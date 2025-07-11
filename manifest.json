@@ -1,0 +1,41 @@
+﻿{
+    "manifest_version": 3,
+    "name": "Egret Inspector",
+    "description": "Egret Chrome Debug Tool",
+    "version": "3.0.0",
+    "icons": {
+      "48": "icon.png"
+    },
+    "action": {
+      "default_title": "Egret Inspector"
+    },
+    "devtools_page": "devtools.html",
+    "background": {
+      "service_worker": "backgroudScripts.min.js",
+      "type": "module"
+    },
+    "permissions": [
+      "scripting",
+      "tabs",
+      "storage"
+    ],
+    "host_permissions": [
+      "<all_urls>"
+    ],
+    "content_scripts": [
+      {
+        "matches": ["<all_urls>"],
+        "js": ["contentScripts.min.js"],
+        "run_at": "document_end"
+      }
+    ],
+    "web_accessible_resources": [
+      {
+        "resources": [
+          "*/*",
+          "*"
+        ],
+        "matches": ["<all_urls>"]
+      }
+    ]
+  }
