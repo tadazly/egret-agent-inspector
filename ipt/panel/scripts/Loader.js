@@ -646,7 +646,7 @@ var egret;
                 var t = this;
                 var n = this._parseMsgData(e);
                 var r = n.id;
-                var i = n.data.name;
+                var i = n.data && n.data.name;
                 var o = this.callbacks[r];
                 if (o) {
                     o(n.data);

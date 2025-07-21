@@ -11,7 +11,7 @@
     },
     "devtools_page": "devtools.html",
     "background": {
-      "service_worker": "backgroudScripts.min.js",
+      "service_worker": "backgroundScripts.min.js",
       "type": "module"
     },
     "permissions": [
