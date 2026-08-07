@@ -1320,6 +1320,7 @@ var egret;
                     var r = e.TreeNode.getByHash(i);
                     e.TreeNode.clone(n, true, r)
                 }
+                if (!this._data || !e.TreeNode.getByHash(t)) return;
                 this._data.naviToNode(t);
                 this.showChildren()
             };
@@ -1358,18 +1359,28 @@ var egret;
             };
             n.prototype.search = function () {
                 var e = this;
-                var t = $("#txtSearchName").val();
+                var t = $.trim($("#txtSearchName").val());
                 if (!t) return false;
-                var n = {
+                var n = this.searchForm.data("query") == t ? this.searchForm.data("current") : null;
+                this.searchForm.data("query", t);
+                var r = {
                     name: "search",
                     option: {
-                        current: this.searchForm.data("current"),
+                        current: n,
                         name: t
                     }
                 };
-                this.port.post(n, null, function (t) {
-                    console.log(t.results);
-                    e.searchForm.data("current", t.current)
+                this.port.post(r, null, function (t) {
+                    if (!t || !t.results || !t.results.length) {
+                        e.searchForm.removeData("current");
+                        return
+                    }
+                    e.searchForm.data("current", t.current);
+                    if (t.selection) {
+                        e.mainPanel.showGameSelection(t.selection.hash, t.selection.props, t.selection.treeChange)
+                    } else {
+                        e.showGameSelection(t.current)
+                    }
                 });
                 return false
             };
@@ -1829,7 +1840,7 @@ var egret;
 })(egret || (egret = {}));
 
 function showChanges() {
-    var e = "3.1.0";
+    var e = "3.1.1";
     if (window.localStorage.getItem("showChange" + e)) return;
     var t = document.getElementById("changes");
     t.style.display = "block";

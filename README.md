@@ -1,6 +1,6 @@
 # Egret Inspector
 
-Egret Inspector 是用于调试 Egret 项目的 Chrome DevTools 扩展，当前版本为 **3.1.0**。
+Egret Inspector 是用于调试 Egret 项目的 Chrome DevTools 扩展，当前版本为 **3.1.1**。
 
 ## 安装方法
 
@@ -18,6 +18,12 @@ Egret Inspector 是用于调试 Egret 项目的 Chrome DevTools 扩展，当前�
 - 在游戏画面中高亮点击或鼠标划过的对象。
 - 显示页面 FPS，并支持阻止调试点击传递给游戏。
 - 将显示对象或属性保存为页面全局变量。
+
+## 3.1.1 更新内容
+
+- 优化 `name`、`hashCode` 搜索，命中后自动加载并展开祖先节点，选中并滚动至对应组件。
+- 切换搜索词时重置结果游标，避免沿用上一次搜索位置。
+- 统一空结果响应并增加目标节点缺失保护，提高搜索稳定性。
 
 ## 3.1.0 更新内容
 
