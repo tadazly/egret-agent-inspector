@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "Egret Inspector",
     "description": "Egret Chrome Debug Tool",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "icons": {
       "48": "icon.png"
     },

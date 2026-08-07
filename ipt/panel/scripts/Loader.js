@@ -233,20 +233,22 @@ var egret;
                 if (e === void 0) {
                     e = true
                 }
-                this._children.forEach(function (e) {
-                    return e.reset()
-                });
-                this._props.forEach(function (e) {
-                    return e.reset()
-                });
-                this._children = [];
-                this._props = [];
-                this.children = null;
-                this.props = null;
-                this.show = false;
-                if (e) {
-                    t.hash2Node[this.rawHash] = undefined;
-                    t.hash2DisplayObject[this.rawHash] = undefined
+                var n = [this];
+                while (n.length) {
+                    var r = n.pop();
+                    var i = r._children || [];
+                    var o = r._props || [];
+                    for (var s = 0; s < i.length; s++) n.push(i[s]);
+                    for (var a = 0; a < o.length; a++) n.push(o[a]);
+                    r._children = [];
+                    r._props = [];
+                    r.children = null;
+                    r.props = null;
+                    r.show = false;
+                    if (e) {
+                        delete t.hash2Node[r.rawHash];
+                        delete t.hash2DisplayObject[r.rawHash]
+                    }
                 }
             };
             Object.defineProperty(t.prototype, "raw", {
@@ -306,9 +308,12 @@ var egret;
                     n = false
                 }
                 var r = t.getByHash(e);
+                if (!r) return;
                 var i = [];
                 var o = r.parent;
-                while (o != null) {
+                var a = {};
+                while (o != null && !a[o.rawHash]) {
+                    a[o.rawHash] = true;
                     i.push(o);
                     o = o.parent
                 }
@@ -419,22 +424,40 @@ var egret;
                 if (n === void 0) {
                     n = null
                 }
-                var r = t.hash2Node[e.hashCode];
-                var i = r != undefined;
-                if (i) {
-                    r.reset(false);
-                    t.parseChildren(e, r, 0)
-                } else {
-                    r = t.parseNode(e)
+                var r = [];
+                var i = {};
+                var o = e;
+                while (o) {
+                    if (i[o.hashCode]) break;
+                    i[o.hashCode] = true;
+                    r.push(o);
+                    if (t.hash2Node[o.hashCode] != undefined) break;
+                    o = o.parent
                 }
-                r.showChildren();
-                if (n) {
-                    for (var o = 0; o < r._children.length; o++) {
-                        if (r._children[o].rawHash == n.rawHash) r._children[o] = n
+                var s = n;
+                var a = null;
+                for (var h = 0; h < r.length; h++) {
+                    var c = r[h];
+                    var l = t.hash2Node[c.hashCode];
+                    if (l != undefined) {
+                        l.reset(false);
+                        t.parseChildren(c, l, 0)
+                    } else {
+                        l = t.parseNode(c)
                     }
+                    l.showChildren();
+                    if (s) {
+                        for (var u = 0; u < l._children.length; u++) {
+                            if (l._children[u].rawHash == s.rawHash) {
+                                l._children[u] = s;
+                                break
+                            }
+                        }
+                    }
+                    s = l;
+                    a = l
                 }
-                if (i || !e.parent) return r;
-                return t.linkToIt(e.parent, r)
+                return a
             };
             t.unLinkIt = function (e) {
                 var n = t.hash2Node[e.hashCode];
@@ -504,25 +527,74 @@ var egret;
             };
             t.clear = function () {
                 t.hash2Node = {};
-                t.hash2DisplayObject = {}
+                t.hash2DisplayObject = {};
+                t.selected = null
+            };
+            t.toFlat = function (e) {
+                if (!e || e.__egretTreeFlat) return e;
+                var n = [];
+                var r = [];
+                var i = new Map;
+                var o = function (e) {
+                    if (i.has(e)) return i.get(e);
+                    var t = n.length;
+                    i.set(e, t);
+                    n.push(e);
+                    r.push(null);
+                    return t
+                };
+                o(e);
+                for (var s = 0; s < n.length; s++) {
+                    var a = n[s];
+                    var h = {};
+                    Object.getOwnPropertyNames(a).forEach(function (e) {
+                        if (e == "events" || e == "_children" || e == "_props" || e == "children" || e == "props") return;
+                        var t = a[e];
+                        if (typeof t != "function") h[e] = t
+                    });
+                    r[s] = {
+                        data: h,
+                        children: (a._children || []).map(o),
+                        props: (a._props || []).map(o)
+                    }
+                }
+                return {
+                    __egretTreeFlat: 1,
+                    nodes: r,
+                    root: 0
+                }
+            };
+            t.fromFlat = function (e, n, r) {
+                if (!e || !e.__egretTreeFlat || !e.nodes || !e.nodes.length) return null;
+                var i = new Array(e.nodes.length);
+                for (var o = 0; o < i.length; o++) i[o] = o == e.root && n ? n : new t;
+                for (var s = 0; s < i.length; s++) {
+                    var a = i[s];
+                    var h = e.nodes[s];
+                    var l = h.data || {};
+                    Object.getOwnPropertyNames(l).forEach(function (e) {
+                        a[e] = l[e]
+                    });
+                    a._children = (h.children || []).map(function (e) {
+                        return i[e]
+                    });
+                    a._props = (h.props || []).map(function (e) {
+                        return i[e]
+                    });
+                    a.children = a.show ? a._children : null;
+                    a.props = a.show ? a._props : null;
+                    a.updateIcon();
+                    if (a.rawHash != null && a.rawHash != -1) t.hash2Node[a.rawHash] = a
+                }
+                var o = i[e.root || 0];
+                r && o.trigger(t.Changed);
+                return o
             };
             t.clone = function (e, n, r) {
                 if (n === void 0) {
                     n = false
                 }
-                r = r || new t;
-                var i = Object.getOwnPropertyNames(e);
-                i.forEach(function (t) {
-                    if (t == "events" || t == "_children" || t == "_props") return;
-                    r[t] = e[t]
-                });
-                t.hash2Node[r.rawHash] = r;
-                if (e._children.length > 0) r._children = e._children.map(function (e) {
-                    return t.clone(e, false, t.getByHash(e.rawHash))
-                });
-                r.recover();
-                n && r.trigger(t.Changed);
-                return r
+                return t.fromFlat(t.toFlat(e), r, n)
             };
             t.Show = "show";
             t.UnSelected = "unselected";
@@ -992,7 +1064,13 @@ var egret;
                 this.btnRefresh = $("#refreshTree");
                 this._highlightHover = false;
                 this._highlightClick = true;
-                this._preventTouch = false
+                this._preventTouch = false;
+                this._hoverFrame = 0;
+                this._hoverHash = null;
+                this._lastHoverHash = null;
+                this._renderFrame = 0;
+                this._visibleNodes = [];
+                this._rowHeight = 16
             }
             Object.defineProperty(n.prototype, "highlightHover", {
                 set: function (e) {
@@ -1039,6 +1117,13 @@ var egret;
                 this.container = $("#nodes");
                 this.itemTmpl = this.container.html();
                 this.container.html("");
+                this.container.on("scroll", function () {
+                    if (e._renderFrame) return;
+                    e._renderFrame = window.requestAnimationFrame(function () {
+                        e._renderFrame = 0;
+                        e._renderViewport()
+                    })
+                });
                 this.on("datachange", function () {
                     return e.showChildren()
                 });
@@ -1089,25 +1174,81 @@ var egret;
                 })
             };
             n.prototype.showChildren = function () {
-                this.container.html("").data("level", 0);
-                this.bindNode(this._data, this.container)
+                this._visibleNodes = [];
+                if (!this._data) return;
+                var t = [{
+                    node: this._data,
+                    level: 0
+                }];
+                while (t.length) {
+                    var n = t.pop();
+                    var r = n.node;
+                    if (!r || r.memberName == "$LarkMetricMask") continue;
+                    this._visibleNodes.push(n);
+                    if (r.show && r._children && r._children.length) {
+                        for (var o = r._children.length - 1; o >= 0; o--) {
+                            t.push({
+                                node: r._children[o],
+                                level: n.level + 1
+                            })
+                        }
+                    }
+                }
+                var e = -1;
+                for (var i = 0; i < this._visibleNodes.length; i++) {
+                    if (this._visibleNodes[i].node.selected) {
+                        e = i;
+                        break
+                    }
+                }
+                if (e >= 0) {
+                    var o = e * this._rowHeight;
+                    var s = this.container.scrollTop();
+                    var a = this.container.height();
+                    if (o < s || o + this._rowHeight > s + a) this.container.scrollTop(Math.max(0, o - a / 2))
+                }
+                this._renderViewport()
+            };
+            n.prototype._renderViewport = function () {
+                if (!this.container || !this.container.length) return;
+                var e = this._visibleNodes || [];
+                var t = this._rowHeight;
+                var n = Math.max(0, Math.floor(this.container.scrollTop() / t) - 10);
+                var r = Math.min(e.length, n + Math.ceil(this.container.height() / t) + 20);
+                var i = document.createDocumentFragment();
+                var o = document.createElement("div");
+                o.className = "tree-scroll-spacer";
+                o.style.height = e.length * t + "px";
+                i.appendChild(o);
+                for (var s = n; s < r; s++) {
+                    var a = this.bindNode(e[s].node, e[s].level);
+                    if (!a || !a[0]) continue;
+                    a.css({
+                        position: "absolute",
+                        top: s * t + "px",
+                        left: 0,
+                        right: 0,
+                        height: t + "px"
+                    });
+                    i.appendChild(a[0])
+                }
+                this.container.empty()[0].appendChild(i)
             };
             n.prototype.bindNode = function (t, n) {
                 var r = this;
                 t.removeAllEvents();
-                if (t.memberName == "$LarkMetricMask") return;
                 var i = this;
                 var o = i.itemTmpl.replace("{name}", t.name).replace("{memberName}", t.memberName).replace("{icon}", t.icon);
                 var s = $(o);
                 var a = s.find(".memberName");
                 var h = s.find(".toggle");
-                var c = parseInt(n.data("level")) + 1;
                 s.data("hashCode", t.rawHash);
-                h.attr("checked", t.visible);
+                h.prop("checked", !!t.visible);
                 if (t.visible == false) {
                     s.addClass("invisible")
                 }
                 h.click(function (e) {
+                    e.stopPropagation();
                     var n = h.is(":checked");
                     t.visible = n;
                     r.mainPanel.port.post({
@@ -1123,73 +1264,64 @@ var egret;
                     })
                 });
                 var l = s.find(".icon");
-                var u = s.find(".children");
-                u.data("level", c).css("text-indent", c + "em");
                 var p = s.find(".parent");
-                var d = function () {
-                    if (t._children.length == 0) return;
-                    u.html("");
-                    t._children.forEach(function (e) {
-                        return i.bindNode(e, u)
-                    });
-                    if (t.show) u.toggle(t.show)
-                };
-                d();
+                s.find(".children").remove();
+                p.css("padding-left", n + "em");
                 if (!t.memberName) a.remove();
-                t.on("show", function () {
-                    if (t._children.length == 0) {
+                if (t.selected) p.addClass("selected");
+                var d = function () {
+                    if (t._children.length == 0 && t.hasChildren) {
                         r.port.post({
                             name: "expandTree",
                             hashCode: t.rawHash
                         }, null, function (n) {
                             e.TreeNode.clone(n, false, t);
                             t.show = true;
-                            d();
-                            t.showChildren()
+                            t.updateIcon();
+                            r.showChildren()
                         })
                     } else {
-                        u.toggle(t.show);
-                        l.html(t.icon)
+                        t.show = !t.show;
+                        t.updateIcon();
+                        r.showChildren()
                     }
-                });
-                t.on(e.TreeNode.ChildrenChange, d);
-                t.on(e.TreeNode.Changed, function () {
-                    return d()
-                });
-                t.on(e.TreeNode.OnSelected, function (e) {
-                    p.addClass("selected");
-                    var t = r.container.height();
-                    var n = r.container.offset().top;
-                    var i = p.offset().top - n;
-                    if (i > t || i < 0) {
-                        var o = r.container.scrollTop() + i;
-                        r.container.scrollTop(o)
-                    }
-                }).on(e.TreeNode.UnSelected, function (e) {
-                    p.removeClass("selected")
-                });
+                };
                 p.click(function () {
                     return i.showItInGame(t)
                 });
                 p.mouseenter(function () {
-                    return i.showItInGame(t, true)
+                    return i.queueGameHover(t)
                 });
                 l.click(function () {
-                    t.toggle();
+                    d();
                     return false
                 });
                 p.dblclick(function () {
-                    t.toggle();
+                    d();
                     return false
                 });
-                n.append(s)
+                return s
+            };
+            n.prototype.queueGameHover = function (e) {
+                var t = this;
+                this._hoverHash = e.rawHash;
+                if (this._hoverFrame) return;
+                this._hoverFrame = window.requestAnimationFrame(function () {
+                    t._hoverFrame = 0;
+                    if (t._hoverHash == t._lastHoverHash) return;
+                    t._lastHoverHash = t._hoverHash;
+                    var n = egret.devtool.TreeNode.getByHash(t._hoverHash);
+                    if (n) t.showItInGame(n, true)
+                })
             };
             n.prototype.showGameSelection = function (t, n) {
                 if (n) {
-                    var r = e.TreeNode.getByHash(n.rawHash);
+                    var i = n.__egretTreeFlat ? n.nodes[n.root || 0].data.rawHash : n.rawHash;
+                    var r = e.TreeNode.getByHash(i);
                     e.TreeNode.clone(n, true, r)
                 }
-                this._data.naviToNode(t)
+                this._data.naviToNode(t);
+                this.showChildren()
             };
             n.prototype.showItInGame = function (e, t) {
                 if (t === void 0) {
@@ -1197,7 +1329,8 @@ var egret;
                 }
                 if (!t) {
                     this.mainPanel.propsPanel.selectedHash = e.rawHash;
-                    e.showUp()
+                    e.showUp();
+                    this.showChildren()
                 }
                 if (!t || t && this._highlightHover) this.transTreeSelection(e.rawHash, t)
             };
@@ -1219,7 +1352,8 @@ var egret;
                     e.TreeNode.clear();
                     var r = e.TreeNode.clone(n.tree, false);
                     t.data = r;
-                    t.data.naviToNode(n.hash)
+                    t.data.naviToNode(n.hash);
+                    t.showChildren()
                 })
             };
             n.prototype.search = function () {
@@ -1535,7 +1669,7 @@ var egret;
                     hash: this.selectedHash,
                     expression: e
                 }, null, function (e) {
-                    n.showChildren(e, t)
+                    n.showChildren(egret.devtool.TreeNode.clone(e), t)
                 })
             };
             n.prototype.invokeGetter = function (e, t, n) {
@@ -1562,7 +1696,7 @@ var egret;
                 })
             };
             n.prototype.showGameSelection = function (e, t) {
-                this._data = t;
+                this._data = t && t.__egretTreeFlat ? egret.devtool.TreeNode.clone(t) : t;
                 this.selectedHash = e;
                 this.showChildren()
             };
@@ -1606,12 +1740,8 @@ var egret;
                     });
                     t.on("updateTree", function (t) {
                         var r = t.data;
-                        if (!n.treePanel.data) n.treePanel.data = e.TreeNode.clone(r);
-                        else {
-                            var i = e.TreeNode.getByHash(r.rawHash);
-                            e.TreeNode.clone(r, true, i);
-                            n.treePanel.data = n.treePanel.data
-                        }
+                        e.TreeNode.clear();
+                        n.treePanel.data = e.TreeNode.clone(r)
                     });
                     t.on("updateSelection", function (e) {
                         return n.showGameSelection(e.data.hash, e.data.props, e.data.treeChange)
@@ -1699,7 +1829,7 @@ var egret;
 })(egret || (egret = {}));
 
 function showChanges() {
-    var e = "2.5.4";
+    var e = "3.1.0";
     if (window.localStorage.getItem("showChange" + e)) return;
     var t = document.getElementById("changes");
     t.style.display = "block";

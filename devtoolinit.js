@@ -1,6 +1,6 @@
 // The function below is executed in the context of the inspected page.
 var page_getProperties = function () {
-    var data = egret ? egret.MainContext.instance : {};
+    var data = window.egret && window.egret.MainContext ? window.egret.MainContext.instance : {};
     var props = Object.getOwnPropertyNames(data);
     var copy = { __proto__: null };
     for (var i = 0; i < props.length; ++i)
@@ -34,11 +34,21 @@ chrome.devtools.panels.create("Egret", "icon.png", "ipt/panel/index.html", funct
     panel.onShown.addListener(function (w) {
         if (!connected) {
             chrome.devtools.inspectedWindow.eval(`(function () {
+                var startedAt = Date.now();
                 var t = window.setInterval(function () {
-                    var a = egret && egret.devtool && egret.devtool.start && (window.clearInterval(t) || egret.devtool.start());
-                    console.log("waiting");
+                    var runtime = window.egret;
+                    if (runtime && runtime.devtool && runtime.devtool.start) {
+                        window.clearInterval(t);
+                        runtime.devtool.start();
+                    } else if (Date.now() - startedAt > 60000) {
+                        window.clearInterval(t);
+                    }
                 }, 100);
-                egret && egret.devtool && egret.devtool.start && (window.clearInterval(t) || egret.devtool.start());
+                var runtime = window.egret;
+                if (runtime && runtime.devtool && runtime.devtool.start) {
+                    window.clearInterval(t);
+                    runtime.devtool.start();
+                }
             })();`);
         }
 

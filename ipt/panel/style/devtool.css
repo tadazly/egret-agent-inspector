@@ -95,6 +95,10 @@ iframe{
     padding:0;
     position:relative;
 }
+.tree-scroll-spacer {
+    width:1px;
+    pointer-events:none;
+}
 #layout {
     text-align:center;
 }
