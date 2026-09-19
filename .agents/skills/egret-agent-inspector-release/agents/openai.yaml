@@ -1,0 +1,6 @@
+interface:
+  display_name: "发布 Egret Agent Inspector"
+  short_description: "推断版本、更新 CHANGELOG，发布 Release 并更新 S Plugins 市场"
+  default_prompt: "使用 $egret-agent-inspector-release 发布新版本。"
+policy:
+  allow_implicit_invocation: true

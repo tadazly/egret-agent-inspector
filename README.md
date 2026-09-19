@@ -64,4 +64,4 @@ python -m unittest discover -s tests -v
 python scripts/set_version.py 3.3.0
 ```
 
-发布：在 [CHANGELOG.md](CHANGELOG.md) 写好版本说明，同步版本号后推送 `vX.Y.Z` tag。Release workflow 会校验、创建 GitHub Release，并通知 [S Plugins](https://github.com/tadazly/s-plugins) 更新市场（需要仓库 Secret `S_PLUGINS_DISPATCH_TOKEN`）。
+发布：在本仓库中让 Codex 或 Claude Code “发布新版本”，由 `egret-agent-inspector-release` 技能完成。推送 `vX.Y.Z` tag 后，Release workflow 会创建 GitHub Release 并通知 [S Plugins](https://github.com/tadazly/s-plugins) 更新市场（需要仓库 Secret `S_PLUGINS_DISPATCH_TOKEN`）。

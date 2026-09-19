@@ -8,6 +8,7 @@
   - `scripts/browser_extension.py`：浏览器检测与扩展安装。
   - `skills/`：插件 Skills。
 - `.agents/plugins/marketplace.json`、`.claude-plugin/marketplace.json`：两个平台的市场入口。
+- `.agents/skills/egret-agent-inspector-release/`：仓库级发版技能；`.claude/skills/` 下同名技能只做转发。
 
 ## 约定
 
