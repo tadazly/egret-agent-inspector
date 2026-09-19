@@ -1,5 +1,10 @@
 # 更新日志
 
+## 3.2.1
+
+- 修复在 Codex 中安装扩展时目录未生成的问题：安装改由 MCP 工具 `egret_install_extension` 执行，不再受 agent 命令沙箱限制。
+- 安装完成后校验目录和版本，失败时如实返回错误；`egret_extension_status` 在未连接时附带本机浏览器与扩展加载情况。
+
 ## 3.2.0
 
 - 更名为 Egret Agent Inspector，并提供 Codex / Claude Code 插件：MCP 工具、扩展安装、游戏操作和 E2E 测试 Skills。

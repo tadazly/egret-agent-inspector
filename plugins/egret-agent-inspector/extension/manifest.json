@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "Egret Agent Inspector",
     "description": "Egret 显示对象调试面板，并为 AI agent 提供 MCP 自动化通道",
-    "version": "3.2.0",
+    "version": "3.2.1",
     "icons": {
       "48": "icon.png"
     },

@@ -5,8 +5,7 @@
   python browser_extension.py install [--browser chrome|edge|brave|default] [--no-open]
                                                    把扩展复制到固定目录，打开浏览器扩展管理页并复制目录路径到剪贴板
 
-Chromium 系浏览器不允许静默安装未上架扩展，最后一步“加载已解压的扩展程序”需要用户在浏览器中完成；
-扩展已加载时 install 只更新固定目录中的文件，之后调用 egret_reload_extension 即可生效。
+MCP 工具 egret_install_extension 复用本模块；agent 应优先使用该工具，因为 agent 的命令沙箱通常禁止写入用户目录。
 """
 
 import argparse
@@ -68,6 +67,8 @@ BROWSERS = {
 
 
 def install_dir():
+    if os.environ.get("EGRET_EXTENSION_DIR"):
+        return os.path.abspath(os.environ["EGRET_EXTENSION_DIR"])
     if SYSTEM == "Windows":
         base = os.path.join(LOCALAPPDATA, "EgretAgentInspector")
     elif SYSTEM == "Darwin":
@@ -198,14 +199,19 @@ def copy_extension():
     parent = os.path.dirname(target)
     os.makedirs(parent, exist_ok=True)
     staging = tempfile.mkdtemp(prefix="extension-", dir=parent)
-    shutil.copytree(BUNDLED_DIR, os.path.join(staging, "extension"),
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    if os.path.isdir(target):
-        # 原地覆盖文件而不删除目录，避免浏览器因目录短暂消失而移除扩展
-        shutil.copytree(os.path.join(staging, "extension"), target, dirs_exist_ok=True)
-    else:
-        shutil.move(os.path.join(staging, "extension"), target)
-    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        shutil.copytree(BUNDLED_DIR, os.path.join(staging, "extension"),
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        if os.path.isdir(target):
+            # 原地覆盖文件而不删除目录，避免浏览器因目录短暂消失而移除扩展
+            shutil.copytree(os.path.join(staging, "extension"), target, dirs_exist_ok=True)
+        else:
+            shutil.move(os.path.join(staging, "extension"), target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    # 复制结果必须可读且版本一致，否则视为失败
+    if version_of(target) != version_of(BUNDLED_DIR):
+        raise OSError("复制后校验失败：%s 中的扩展版本为 %s，期望 %s" % (target, version_of(target), version_of(BUNDLED_DIR)))
     return target
 
 
@@ -249,7 +255,11 @@ def install(browser, open_page):
         return {"ok": False, "error": "默认浏览器（%s）不是受支持的 Chromium 浏览器，请用 --browser 指定 chrome、edge 或 brave"
                 % (info["defaultBrowserRaw"] or "未知")}
     previous = info["installedVersion"]
-    target = copy_extension()
+    try:
+        target = copy_extension()
+    except OSError as e:
+        return {"ok": False, "error": "无法写入扩展目录 %s：%s" % (install_dir(), e),
+                "hint": "如果在 agent 的命令沙箱中运行，请改用 MCP 工具 egret_install_extension，或以不受沙箱限制的权限重新运行。"}
     entry = next((b for b in info["browsers"] if b["id"] == browser_id), None)
     loaded = [x for x in (entry or {}).get("loaded", []) if x["managed"]]
     legacy = [x for x in (entry or {}).get("loaded", []) if not x["managed"]]

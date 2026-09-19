@@ -34,6 +34,8 @@ def read_bundled_version():
 
 
 SERVER_VERSION = read_bundled_version() or "0.0.0"
+sys.path.insert(0, os.path.join(PLUGIN_ROOT, "scripts"))
+import browser_extension  # noqa: E402  浏览器检测与扩展安装，在 MCP 进程中执行以避开 agent 命令沙箱
 SUPPORTED_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 BASE_PORT = int(os.environ.get("EGRET_MCP_PORT", "17800"))
 PORT_COUNT = 5
@@ -42,7 +44,7 @@ CONNECT_WAIT = float(os.environ.get("EGRET_MCP_CONNECT_WAIT", "20"))
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游戏的显示对象，依赖浏览器中的 Egret Agent Inspector 扩展。
-- 首次使用或工具提示扩展未连接时，先调用 egret_extension_status；未连接则按 egret-install-extension skill 为用户安装扩展。
+- 首次使用或工具提示扩展未连接时，先调用 egret_extension_status；未连接则按 egret-install-extension skill 用 egret_install_extension 为用户安装扩展。
 - 显示对象以 hash（Egret hashCode）标识；id 是组件在代码/EXML 中绑定的属性名。stageRect 为舞台坐标，screenRect 为页面视口 CSS 像素坐标。
 - 常用流程：egret_status → egret_find / egret_get_tree → egret_tap / egret_drag → egret_wait_for → egret_screenshot；可复现的用例用 egret_run_steps 批量执行。
 - 未指定 tabId 时自动选用最近使用或当前激活的含 Egret 游戏的标签页。"""
@@ -162,9 +164,16 @@ TOOLS = {
         obj({"format": {"type": "string", "enum": ["png", "jpeg"]}}),
         "screenshot", None),
     "egret_extension_status": (
-        "检查浏览器扩展是否已连接：返回已连接的浏览器、扩展版本，以及与插件自带版本是否一致（outdated=true 时需更新扩展）。首次使用前调用。",
+        "检查浏览器扩展是否已连接：返回已连接的浏览器、扩展版本及是否需要更新（outdated）；未连接时附带本机浏览器、默认浏览器和扩展加载情况（local）。首次使用前调用。",
         {"type": "object", "properties": {"waitSeconds": {"type": "number", "description": "未连接时等待扩展连接的秒数，默认 8"}}},
         "extensionStatus", None),
+    "egret_install_extension": (
+        "把插件自带的扩展复制到固定安装目录，并打开浏览器扩展管理页、复制目录路径到剪贴板。"
+        "返回 ok=false 时安装失败；ok=true 时把 nextSteps 转告用户完成“加载已解压的扩展程序”。扩展已加载时只更新文件，随后调用 egret_reload_extension。",
+        {"type": "object", "properties": {
+            "browser": {"type": "string", "enum": ["default", "chrome", "edge", "brave"], "description": "目标浏览器，默认用户的默认浏览器"},
+            "openPage": {"type": "boolean", "description": "是否打开扩展管理页，默认 true"}}},
+        "installExtension", None),
     "egret_reload_extension": (
         "让已连接的扩展从磁盘重新加载（更新扩展文件后使用），随后等待其重新连接。",
         {"type": "object", "properties": {}},
@@ -474,6 +483,10 @@ class McpServer:
         try:
             if bridge_method == "extensionStatus":
                 return await self.extension_status(float(args.get("waitSeconds", 8)))
+            if bridge_method == "installExtension":
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, browser_extension.install,
+                                                  args.get("browser", "default"), args.get("openPage", True) is not False)
             if bridge_method == "reloadExtension":
                 res = await self.bridge.request("reloadExtension", {}, timeout)
                 await asyncio.sleep(1)
@@ -500,13 +513,17 @@ class McpServer:
             raise RuntimeError("请求超时（%.0f 秒）" % timeout)
 
     async def extension_status(self, wait):
-        status = {"port": self.bridge.port, "bundledVersion": SERVER_VERSION, "extensionDir": EXTENSION_DIR}
+        status = {"port": self.bridge.port, "bundledVersion": SERVER_VERSION, "installDir": browser_extension.install_dir()}
         if self.bridge.port is None:
             status.update(connected=False, hint="端口 %d-%d 均被占用" % (BASE_PORT, BASE_PORT + PORT_COUNT - 1))
             return status
         conn = await self.bridge.wait_connected(wait)
         if conn is None:
-            status.update(connected=False, hint="扩展未连接：浏览器未打开，或尚未安装扩展（使用 egret-install-extension skill 安装）")
+            status.update(connected=False, hint="扩展未连接：浏览器未打开，或尚未安装扩展（使用 egret_install_extension 安装）")
+            try:
+                status["local"] = await asyncio.get_running_loop().run_in_executor(None, browser_extension.status)
+            except Exception as e:  # noqa: BLE001
+                status["local"] = {"error": str(e)}
             return status
         info = conn.info
         status.update(connected=True, browser=info.get("browser"), extensionVersion=info.get("extensionVersion"),

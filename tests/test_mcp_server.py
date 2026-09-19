@@ -6,6 +6,7 @@ import json
 import os
 import struct
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -78,7 +79,10 @@ class FakeExtension:
 
 class McpServerTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        env = dict(os.environ, EGRET_MCP_PORT=str(PORT), EGRET_MCP_CONNECT_WAIT="2", PYTHONIOENCODING="utf-8")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.install_dir = os.path.join(self.tmp.name, "extension")
+        env = dict(os.environ, EGRET_MCP_PORT=str(PORT), EGRET_MCP_CONNECT_WAIT="2", PYTHONIOENCODING="utf-8",
+                   EGRET_EXTENSION_DIR=self.install_dir)
         self.proc = await asyncio.create_subprocess_exec(
             sys.executable, str(SERVER), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, env=env, limit=2 ** 24)
@@ -93,6 +97,7 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.proc.wait(), 5)
         except asyncio.TimeoutError:
             self.proc.kill()
+        self.tmp.cleanup()
 
     async def rpc(self, method, params=None):
         self.ids += 1
@@ -112,16 +117,26 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_tools_listed(self):
         tools = {t["name"] for t in (await self.rpc("tools/list"))["tools"]}
-        for name in ("egret_find", "egret_tap", "egret_extension_status", "egret_reload_extension", "egret_run_steps"):
+        for name in ("egret_find", "egret_tap", "egret_extension_status", "egret_install_extension",
+                     "egret_reload_extension", "egret_run_steps"):
             self.assertIn(name, tools)
 
     async def test_status_without_extension(self):
         res, data = await self.call("egret_extension_status", {"waitSeconds": 0.2})
         self.assertFalse(data["connected"])
         self.assertTrue(data["bundledVersion"])
+        self.assertIn("defaultBrowser", data["local"])
         res, _ = await self.call("egret_find", {"id": "x"})
         self.assertTrue(res["isError"])
         self.assertIn("egret-install-extension", res["content"][0]["text"])
+
+    async def test_install_extension(self):
+        res, data = await self.call("egret_install_extension", {"browser": "chrome", "openPage": False})
+        self.assertFalse(res.get("isError"), data)
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(os.path.normcase(data["installDir"]), os.path.normcase(self.install_dir))
+        self.assertTrue(os.path.isfile(os.path.join(self.install_dir, "manifest.json")))
+        self.assertTrue(data["nextSteps"])
 
     async def test_run_steps_with_fake_extension(self):
         ext = FakeExtension()

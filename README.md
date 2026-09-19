@@ -45,7 +45,7 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 
 | 类别 | 工具 |
 | --- | --- |
-| 连接 | `egret_extension_status`、`egret_reload_extension`、`egret_list_tabs`、`egret_navigate` |
+| 连接 | `egret_extension_status`、`egret_install_extension`、`egret_reload_extension`、`egret_list_tabs`、`egret_navigate` |
 | 查询 | `egret_status`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
 | 操作 | `egret_tap`、`egret_drag`、`egret_set_props`、`egret_wait_for`、`egret_evaluate`、`egret_screenshot` |
 | 测试 | `egret_run_steps`：批量执行步骤并断言，失败时附截图 |
