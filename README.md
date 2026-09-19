@@ -54,7 +54,7 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 
 ## DevTools 面板
 
-在 DevTools 的“Egret”面板中查看显示对象树、修改属性和高亮对象。勾选“显示id”后，列表以 `id ( name ) : 类名` 格式显示组件绑定的 id（黄色）。
+在 DevTools 的“Egret”面板中查看显示对象树、修改属性和高亮对象；Egret 2.4 及以上版本查看划过对象时需按住鼠标左键移动。勾选“显示id”后，列表以 `id ( name ) : 类名` 格式显示组件绑定的 id（黄色）。
 
 ## 开发
 

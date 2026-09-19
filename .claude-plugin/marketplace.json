@@ -11,7 +11,7 @@
       "name": "egret-agent-inspector",
       "source": "./plugins/egret-agent-inspector",
       "description": "读取和操作浏览器中 Egret 游戏的显示对象，支持 agent 驱动的 E2E 测试",
-      "version": "3.2.2"
+      "version": "3.2.3"
     }
   ]
 }

@@ -424,6 +424,10 @@ ol li{
     display:none;
 }
 
+    #changes a {
+        color: #7FB8FF;
+    }
+
     #changes .close {
         position: absolute;
         right: 10px;
