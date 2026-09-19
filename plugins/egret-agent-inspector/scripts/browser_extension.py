@@ -70,7 +70,8 @@ def install_dir():
     if os.environ.get("EGRET_EXTENSION_DIR"):
         return os.path.abspath(os.environ["EGRET_EXTENSION_DIR"])
     if SYSTEM == "Windows":
-        base = os.path.join(LOCALAPPDATA, "EgretAgentInspector")
+        # 不放 AppData：MSIX 打包的宿主（如 Codex 桌面版）会把 AppData 写入重定向到包私有目录，浏览器看不到
+        base = os.path.join(HOME, ".egret-agent-inspector")
     elif SYSTEM == "Darwin":
         base = os.path.join(HOME, "Library", "Application Support", "EgretAgentInspector")
     else:
@@ -194,8 +195,24 @@ def status():
     }
 
 
+def packaged_app():
+    """当前进程是否运行在 Windows MSIX 包上下文中（其 AppData 写入会被重定向）。"""
+    if SYSTEM != "Windows":
+        return False
+    try:
+        import ctypes
+        length = ctypes.c_uint32(0)
+        # APPMODEL_ERROR_NO_PACKAGE = 15700
+        return ctypes.windll.kernel32.GetCurrentPackageFullName(ctypes.byref(length), None) != 15700
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def copy_extension():
     target = install_dir()
+    appdata = [os.path.normcase(p) for p in (LOCALAPPDATA, os.environ.get("APPDATA", "")) if p]
+    if packaged_app() and any(os.path.normcase(target).startswith(p + os.sep) for p in appdata):
+        raise OSError("当前宿主是 MSIX 打包应用，写入 AppData 会被重定向到包私有目录、浏览器不可见；请把 EGRET_EXTENSION_DIR 设到 AppData 之外")
     parent = os.path.dirname(target)
     os.makedirs(parent, exist_ok=True)
     staging = tempfile.mkdtemp(prefix="extension-", dir=parent)

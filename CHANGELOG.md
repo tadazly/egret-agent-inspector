@@ -1,5 +1,9 @@
 # 更新日志
 
+## 3.2.4
+
+- 修复在 Codex 桌面版（Windows）中安装扩展后浏览器找不到扩展目录的问题；Windows 安装目录改为 `%USERPROFILE%\.egret-agent-inspector\extension`，旧目录加载的扩展需按提示移除后重新加载。
+
 ## 3.2.3
 
 - 精简 DevTools 面板开屏公告，只保留当前主要更新并链接到完整更新日志；普通发版不再重复弹出。
