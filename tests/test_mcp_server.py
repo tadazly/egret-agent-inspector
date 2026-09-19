@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -162,6 +163,30 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         finally:
             ext.task.cancel()
             ext.writer.close()
+
+
+class PluginRemovalTest(unittest.IsolatedAsyncioTestCase):
+    async def test_plugin_dir_removable_while_running(self):
+        """卸载插件时 server 可能仍在运行，插件目录不能被其占用（Windows 会锁定进程的 cwd）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = os.path.join(tmp, "plugin")
+            shutil.copytree(SERVER.parents[1], plugin, ignore=shutil.ignore_patterns("__pycache__"))
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, os.path.join(".", "server", SERVER.name), cwd=plugin,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                env=dict(os.environ, EGRET_MCP_PORT=str(PORT + 1)))
+            try:
+                proc.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n')
+                await proc.stdin.drain()
+                await asyncio.wait_for(proc.stdout.readline(), 30)
+                shutil.rmtree(plugin)
+                self.assertFalse(os.path.exists(plugin))
+            finally:
+                proc.stdin.close()
+                try:
+                    await asyncio.wait_for(proc.wait(), 5)
+                except asyncio.TimeoutError:
+                    proc.kill()
 
 
 if __name__ == "__main__":

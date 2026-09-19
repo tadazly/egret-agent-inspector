@@ -23,6 +23,10 @@ import time
 SERVER_NAME = "egret-agent-inspector"
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXTENSION_DIR = os.path.join(PLUGIN_ROOT, "extension")
+# 宿主以插件目录为 cwd 启动本进程；Windows 会锁定进程的 cwd，导致卸载插件时目录删不掉，
+# 由本进程拉起的浏览器也会继承该 cwd。启动后立即切走，并且不在插件目录写 __pycache__。
+os.chdir(os.path.expanduser("~"))
+sys.dont_write_bytecode = True
 
 
 def read_bundled_version():

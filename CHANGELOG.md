@@ -1,5 +1,9 @@
 # 更新日志
 
+## 3.2.5
+
+- 修复 Windows 上卸载插件失败、需重启 Codex 才能卸载的问题。
+
 ## 3.2.4
 
 - 修复在 Codex 桌面版（Windows）中安装扩展后浏览器找不到扩展目录的问题；Windows 安装目录改为 `%USERPROFILE%\.egret-agent-inspector\extension`，旧目录加载的扩展需按提示移除后重新加载。
