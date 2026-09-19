@@ -1171,12 +1171,18 @@ var egret;
                 }, true);
                 $.contextMenu({
                     selector: ".display-object",
-                    items: {
-                        store: {
-                            name: "存储为全局变量"
-                        },
-                        axesHelper: {
+                    build: function () {
+                        // 位置缩放编辑依赖游戏项目提供的 AxesHelper，页面中没有时不显示
+                        var items = {
+                            store: {
+                                name: "存储为全局变量"
+                            }
+                        };
+                        if (e.features && e.features.axesHelper) items.axesHelper = {
                             name: "位置缩放编辑"
+                        };
+                        return {
+                            items: items
                         }
                     },
                     callback: function (t, n) {
@@ -1387,6 +1393,7 @@ var egret;
                     name: "refresh"
                 }, null, function (n) {
                     e.TreeNode.clear();
+                    t.features = n.features || {};
                     var r = e.TreeNode.clone(n.tree, false);
                     t.data = r;
                     t.data.naviToNode(n.hash);
@@ -1787,8 +1794,12 @@ var egret;
                     });
                     t.on("updateTree", function (t) {
                         var r = t.data;
+                        n.treePanel.features = t.features || {};
                         e.TreeNode.clear();
                         n.treePanel.data = e.TreeNode.clone(r)
+                    });
+                    t.on("features", function (e) {
+                        n.treePanel.features = e.features || {}
                     });
                     t.on("updateSelection", function (e) {
                         return n.showGameSelection(e.data.hash, e.data.props, e.data.treeChange)
