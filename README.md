@@ -1,40 +1,67 @@
-# Egret Inspector
+# Egret Agent Inspector
 
-Egret Inspector 是用于调试 Egret 项目的 Chrome DevTools 扩展，当前版本为 **3.1.1**。
+让 AI agent 读取和操作浏览器中的 Egret 游戏：查询显示对象树，定位组件，执行点击、拖动、输入和断言，并运行可复现的 E2E 用例。同时保留原有的 Chrome DevTools 调试面板。
 
-## 安装方法
+## 安装
 
-1. 打开 Chrome 的“扩展程序”→“管理扩展程序”。
-2. 打开页面右上角的“开发者模式”。
-3. 点击“加载未打包的扩展程序”，选择本项目目录。
-4. 打开包含 Egret 项目的页面及 Chrome DevTools，在“Egret”面板中开始调试。
+需要 Chromium 浏览器（Chrome、Edge、Brave）和 Python 3.8+。macOS/Linux 需保证 `python` 命令指向 Python 3。
 
-代码更新后，请在扩展程序管理页面点击本扩展的“重新加载”，然后刷新被调试页面。
+### Claude Code
 
-## 主要功能
+```text
+/plugin marketplace add tadazly/egret-agent-inspector
+/plugin install egret-agent-inspector@egret-agent-inspector
+```
 
-- 查看、展开和搜索 Egret 显示对象树。
-- 查看及修改选中对象的属性。
-- 在游戏画面中高亮点击或鼠标划过的对象。
-- 显示页面 FPS，并支持阻止调试点击传递给游戏。
-- 将显示对象或属性保存为页面全局变量。
+### Codex
 
-## 3.1.1 更新内容
+按 [S Plugins 的“安装与使用”](https://github.com/tadazly/s-plugins#安装与使用) 添加市场并安装 `Egret Agent Inspector`，或直接添加本仓库：
 
-- 优化 `name`、`hashCode` 搜索，命中后自动加载并展开祖先节点，选中并滚动至对应组件。
-- 切换搜索词时重置结果游标，避免沿用上一次搜索位置。
-- 统一空结果响应并增加目标节点缺失保护，提高搜索稳定性。
+```powershell
+codex plugin marketplace add tadazly/egret-agent-inspector
+```
 
-## 3.1.0 更新内容
+### 浏览器扩展
 
-- 显示树采用迭代遍历和扁平化消息传输，避免超深层级引发调用栈溢出。
-- DevTools 显示树改为虚拟列表，只渲染当前可视区域，减少大量 DOM 节点和事件监听器。
-- 点击检测、对象搜索、树清理及选中路径定位支持超深显示层级。
-- 超大对象高亮改用最大 512×512 的基础图形配合 `scaleX`/`scaleY` 显示，避免生成超大纹理。
-- 静止对象复用高亮几何缓存，鼠标命中检测及面板 hover 消息按动画帧节流。
-- 清理重复启动产生的 Ticker、渲染钩子、事件监听器、探测定时器和 keep-alive 定时器。
+安装插件后新建会话并提出需求即可。首次使用时 agent 会检测默认浏览器，准备扩展文件并打开扩展管理页，你只需打开“开发者模式”并加载 agent 给出的目录。之后可以要求 agent 为其他浏览器安装，插件更新后 agent 会自动重新加载扩展。
 
-## 兼容性
+只使用 DevTools 面板时，可以在扩展管理页直接加载 `plugins/egret-agent-inspector/extension`。
 
-- Chrome Manifest V3。
-- 支持现有 Egret 2.x/Lark 兼容分支；当前面板标注兼容 Egret 2.5。
+## 使用示例
+
+- `为我的默认浏览器安装 Egret Agent Inspector 扩展。`
+- `列出当前游戏界面上所有可点击的按钮。`
+- `测试登录页公告：打开公告、切换到第二个标签、滚动列表，保存为 E2E 用例。`
+
+## Skills
+
+| Skill | 用途 |
+| --- | --- |
+| `egret-install-extension` | 为默认或指定浏览器安装、更新扩展 |
+| `egret-game-operation` | 查找组件并执行点击、拖动、输入、等待和截图 |
+| `egret-e2e-test` | 编写、运行和报告 E2E 用例 |
+
+## MCP 工具
+
+| 类别 | 工具 |
+| --- | --- |
+| 连接 | `egret_extension_status`、`egret_reload_extension`、`egret_list_tabs`、`egret_navigate` |
+| 查询 | `egret_status`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
+| 操作 | `egret_tap`、`egret_drag`、`egret_set_props`、`egret_wait_for`、`egret_evaluate`、`egret_screenshot` |
+| 测试 | `egret_run_steps`：批量执行步骤并断言，失败时附截图 |
+
+组件可按 `id`（代码/EXML 中绑定的属性名）、`text`、`className`、`name` 或图片 `source` 定位。
+
+## DevTools 面板
+
+在 DevTools 的“Egret”面板中查看显示对象树、修改属性和高亮对象。勾选“显示id”后，列表以 `id ( name ) : 类名` 格式显示组件绑定的 id（黄色）。
+
+## 开发
+
+```powershell
+python scripts/validate.py
+python -m unittest discover -s tests -v
+python scripts/set_version.py 3.3.0
+```
+
+发布：在 [CHANGELOG.md](CHANGELOG.md) 写好版本说明，同步版本号后推送 `vX.Y.Z` tag。Release workflow 会校验、创建 GitHub Release，并通知 [S Plugins](https://github.com/tadazly/s-plugins) 更新市场（需要仓库 Secret `S_PLUGINS_DISPATCH_TOKEN`）。

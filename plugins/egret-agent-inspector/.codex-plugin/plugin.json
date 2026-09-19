@@ -1,0 +1,51 @@
+{
+  "name": "egret-agent-inspector",
+  "version": "3.2.0",
+  "description": "读取和操作浏览器中 Egret 游戏的显示对象，支持 agent 驱动的 E2E 测试",
+  "author": {
+    "name": "tadazly"
+  },
+  "repository": "https://github.com/tadazly/egret-agent-inspector.git",
+  "keywords": [
+    "egret",
+    "game",
+    "e2e",
+    "testing",
+    "browser",
+    "devtools"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Egret Agent Inspector",
+    "shortDescription": "查询、操作和测试浏览器中的 Egret 游戏",
+    "longDescription": "通过浏览器扩展读取 Egret 显示对象树，按 id、name、类名或文本定位组件，执行点击、拖动、等待、断言和截图，并可批量运行可复现的 E2E 用例。首次使用时引导安装浏览器扩展。",
+    "developerName": "tadazly",
+    "category": "Developer Tools",
+    "websiteURL": "https://github.com/tadazly/egret-agent-inspector",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "为我的浏览器安装 Egret Agent Inspector 扩展。",
+      "列出当前游戏界面上所有可点击的按钮。",
+      "测试登录流程：打开公告面板后再关闭。"
+    ],
+    "brandColor": "#F5A623"
+  },
+  "mcpServers": {
+    "egret-agent-inspector": {
+      "command": "python",
+      "args": ["./server/egret_agent_inspector_mcp.py"],
+      "cwd": ".",
+      "enabled": true,
+      "default_tools_approval_mode": "approve",
+      "tools": {
+        "egret_evaluate": { "approval_mode": "prompt" }
+      },
+      "startup_timeout_sec": 20,
+      "tool_timeout_sec": 300
+    }
+  }
+}

@@ -1057,6 +1057,7 @@ var egret;
 
             function n() {
                 t.apply(this, arguments);
+                this.chkShowId = $("#chkShowId");
                 this.chkPreventTouch = $("#chkPreventTouch");
                 this.chkHighlightHover = $("#chkHighlightHover");
                 this.chkHighlightClick = $("#chkHighlightClick");
@@ -1065,6 +1066,7 @@ var egret;
                 this._highlightHover = false;
                 this._highlightClick = true;
                 this._preventTouch = false;
+                this._showId = false;
                 this._hoverFrame = 0;
                 this._hoverHash = null;
                 this._lastHoverHash = null;
@@ -1111,6 +1113,16 @@ var egret;
                 enumerable: true,
                 configurable: true
             });
+            Object.defineProperty(n.prototype, "showId", {
+                set: function (e) {
+                    this._showId = e;
+                    if (e != this.chkShowId.is(":checked")) this.chkShowId.prop("checked", e);
+                    window.localStorage.setItem("showId", String(e));
+                    if (this.container) this._renderViewport()
+                },
+                enumerable: true,
+                configurable: true
+            });
             n.prototype.init = function () {
                 var e = this;
                 t.prototype.init.call(this);
@@ -1127,6 +1139,10 @@ var egret;
                 this.on("datachange", function () {
                     return e.showChildren()
                 });
+                this.chkShowId.change(function () {
+                    e.showId = e.chkShowId.is(":checked")
+                });
+                this.showId = (window.localStorage.getItem("showId") || "false") == "true";
                 this.chkPreventTouch.change(function () {
                     return e._onChkPreventTouchChange()
                 });
@@ -1238,9 +1254,13 @@ var egret;
                 var r = this;
                 t.removeAllEvents();
                 var i = this;
-                var o = i.itemTmpl.replace("{name}", t.name).replace("{memberName}", t.memberName).replace("{icon}", t.icon);
+                var c = i.buildLabel(t);
+                var o = i.itemTmpl.replace("{label}", function () {
+                    return c
+                }).replace("{icon}", function () {
+                    return t.icon
+                });
                 var s = $(o);
-                var a = s.find(".memberName");
                 var h = s.find(".toggle");
                 s.data("hashCode", t.rawHash);
                 h.prop("checked", !!t.visible);
@@ -1267,7 +1287,6 @@ var egret;
                 var p = s.find(".parent");
                 s.find(".children").remove();
                 p.css("padding-left", n + "em");
-                if (!t.memberName) a.remove();
                 if (t.selected) p.addClass("selected");
                 var d = function () {
                     if (t._children.length == 0 && t.hasChildren) {
@@ -1301,6 +1320,23 @@ var egret;
                     return false
                 });
                 return s
+            };
+            // 显示格式：id ( name ) : 类名；仅有 id 或 name 时显示 id : 类名 / name : 类名
+            n.prototype.buildLabel = function (e) {
+                var t = function (e) {
+                    return String(e).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+                };
+                var n = this._showId && e.bindId ? e.bindId : "";
+                var r = e.memberName ? e.memberName : "";
+                var i = "";
+                if (n) {
+                    i = '<span class="bindId">' + t(n) + "</span>";
+                    if (r) i += ' <span class="memberName">( ' + t(r) + " )</span>"
+                } else if (r) {
+                    i = '<span class="memberName">' + t(r) + "</span>"
+                }
+                if (i) i += '<span class="nameSeparator"> : </span>';
+                return i + t(e.name)
             };
             n.prototype.queueGameHover = function (e) {
                 var t = this;

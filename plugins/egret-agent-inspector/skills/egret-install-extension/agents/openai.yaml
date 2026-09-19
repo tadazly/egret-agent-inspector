@@ -1,0 +1,6 @@
+interface:
+  display_name: "安装 Egret 浏览器扩展"
+  short_description: "为默认或指定浏览器安装、更新 Egret Agent Inspector 扩展"
+  default_prompt: "使用 $egret-install-extension 检查扩展连接；未安装时为我的默认浏览器安装。"
+policy:
+  allow_implicit_invocation: true

@@ -1,13 +1,13 @@
 ﻿{
     "manifest_version": 3,
-    "name": "Egret Inspector",
-    "description": "Egret Chrome Debug Tool",
-    "version": "3.1.1",
+    "name": "Egret Agent Inspector",
+    "description": "Egret 显示对象调试面板，并为 AI agent 提供 MCP 自动化通道",
+    "version": "3.2.0",
     "icons": {
       "48": "icon.png"
     },
     "action": {
-      "default_title": "Egret Inspector"
+      "default_title": "Egret Agent Inspector"
     },
     "devtools_page": "devtools.html",
     "background": {
@@ -17,7 +17,8 @@
     "permissions": [
       "scripting",
       "tabs",
-      "storage"
+      "storage",
+      "alarms"
     ],
     "host_permissions": [
       "<all_urls>"

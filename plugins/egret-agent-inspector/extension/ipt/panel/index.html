@@ -1,7 +1,7 @@
 ﻿<!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
-    <title>Egret Inspector</title>
+    <title>Egret Agent Inspector</title>
     <link href="style/devtool.css" rel="stylesheet" />
     <script src="../lib/jquery-2.1.1.min.js"></script>
     <script src="scripts/Loader.js"></script>
@@ -14,6 +14,7 @@
                 <span id="fps">60</span>fps
             </div>
             <div class="controls" id="control">
+                <label><input type="checkbox" id="chkShowId" value="" /> 显示id</label>
                 <label><input type="checkbox" id="chkPreventTouch" value="" /> 阻止点击</label>
                 <label><input type="checkbox" id="chkHighlightHover" value="" /> 高亮划过对象</label>
                 <label><input type="checkbox" id="chkHighlightClick" checked="checked" value="" /> 选中点击对象</label>
@@ -23,7 +24,7 @@
                 <div class="display-object">
                     <div class="parent">
                         <span class="icon">{icon}</span>
-                        <span class="node"><span class="memberName">{memberName}</span> {name} </span>
+                        <span class="node">{label}</span>
                         <input type="checkbox" class="toggle" value="" />
                     </div>
                     <div class="children">
@@ -32,7 +33,7 @@
             </div>
             <div id="searchBar">
                 <form id="searchForm" action="/" method="get">
-                    <input type="text" id="txtSearchName" name="name" value="" placeholder="name,hashCode (ctrl|cmd+shift+f)" autocomplete="off" />
+                    <input type="text" id="txtSearchName" name="name" value="" placeholder="name,id,hashCode (ctrl|cmd+shift+f)" autocomplete="off" />
                 </form>
             </div>
         </div>
@@ -69,7 +70,9 @@
 
 
     <div id="changes">
-        <h2>Egret Inspector 3.1.1</h2>
+        <h2>Egret Agent Inspector 3.2.0</h2>
+        <h3>新增“显示id”：以黄色显示组件在代码/EXML 中绑定的 id，格式为 id ( name ) : 类名，搜索框支持按 id 搜索</h3>
+        <h3>新增 MCP 服务，供 Claude Code / Codex 等 agent 读取和操作显示对象，详见 README</h3>
         <h3>优化 name、hashCode 搜索，命中后自动展开并定位至对应组件</h3>
         <h3>支持 Egret 2.5 & Chrome 138 版本</h3>
         <h3>高亮划过对象</h3>

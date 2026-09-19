@@ -1,0 +1,20 @@
+{
+  "name": "egret-agent-inspector",
+  "interface": {
+    "displayName": "Egret Agent Inspector"
+  },
+  "plugins": [
+    {
+      "name": "egret-agent-inspector",
+      "source": {
+        "source": "local",
+        "path": "./plugins/egret-agent-inspector"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

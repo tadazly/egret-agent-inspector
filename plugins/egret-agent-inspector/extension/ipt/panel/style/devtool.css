@@ -134,8 +134,8 @@ iframe{
 .memberName {
     color: #FF9DC3;
 }
-.memberName:after {
-    content:' :'
+.bindId {
+    color: #FFD700;
 }
 .display-object.hidden,.display-object.hidden .display-object{
     color: #B6B6B6;

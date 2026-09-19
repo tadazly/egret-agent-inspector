@@ -1,0 +1,6 @@
+interface:
+  display_name: "Egret E2E 测试"
+  short_description: "编写、运行并报告 Egret 游戏的 E2E 用例"
+  default_prompt: "使用 $egret-e2e-test 为我指定的游戏流程编写并运行 E2E 用例，报告结果。"
+policy:
+  allow_implicit_invocation: true

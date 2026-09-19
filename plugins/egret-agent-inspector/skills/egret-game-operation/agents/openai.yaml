@@ -1,0 +1,6 @@
+interface:
+  display_name: "操作 Egret 游戏"
+  short_description: "查找组件并执行点击、拖动、输入、等待和截图"
+  default_prompt: "使用 $egret-game-operation 查看当前游戏界面，并操作我指定的组件。"
+policy:
+  allow_implicit_invocation: true
