@@ -13,14 +13,19 @@ stdio MCP server，仅依赖 Python 3.8+ 标准库。在 127.0.0.1 上开启 Web
 """
 
 import asyncio
+import atexit
 import base64
 import hashlib
 import itertools
 import json
 import os
 import re
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 
 SERVER_NAME = "egret-agent-inspector"
@@ -43,6 +48,148 @@ def read_bundled_version():
 SERVER_VERSION = read_bundled_version() or "0.0.0"
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "scripts"))
 import browser_extension  # noqa: E402  浏览器检测与扩展安装，在 MCP 进程中执行以避开 agent 命令沙箱
+
+
+OCR_MACOS_SOURCE = os.path.join(PLUGIN_ROOT, "scripts", "ocr_macos.swift")
+OCR_WINDOWS_SOURCE = os.path.join(PLUGIN_ROOT, "scripts", "ocr_windows.ps1")
+_OCR_WORKER = None
+_OCR_WORKER_ERROR = None
+_OCR_WORKER_READY = threading.Event()
+_OCR_WORKER_LOCK = threading.Lock()
+
+
+def macos_ocr_binary():
+    """编译并缓存 macOS Vision OCR helper；首轮较慢，后续直接复用临时目录中的二进制。"""
+    if sys.platform != "darwin":
+        raise RuntimeError("当前平台没有内置快速 OCR 后端")
+    xcrun = shutil.which("xcrun")
+    if not xcrun or not os.path.isfile(OCR_MACOS_SOURCE):
+        raise RuntimeError("macOS Vision OCR 需要 Xcode Command Line Tools")
+    with open(OCR_MACOS_SOURCE, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()[:12]
+    binary = os.path.join(tempfile.gettempdir(), "egret-agent-inspector-ocr-" + digest)
+    if os.path.isfile(binary) and os.access(binary, os.X_OK):
+        return binary, False
+    started = time.perf_counter()
+    module_cache = os.path.join(tempfile.gettempdir(), "egret-agent-inspector-swift-cache")
+    os.makedirs(module_cache, exist_ok=True)
+    build_env = dict(os.environ, SWIFT_MODULECACHE_PATH=module_cache, CLANG_MODULE_CACHE_PATH=module_cache)
+    built = subprocess.run([xcrun, "swiftc", "-O", OCR_MACOS_SOURCE, "-o", binary],
+                           capture_output=True, text=True, timeout=90, env=build_env)
+    if built.returncode:
+        raise RuntimeError("编译 macOS OCR helper 失败：" + (built.stderr.strip() or built.stdout.strip()))
+    os.chmod(binary, 0o700)
+    return binary, int((time.perf_counter() - started) * 1000)
+
+
+def _prewarm_macos_ocr():
+    global _OCR_WORKER, _OCR_WORKER_ERROR
+    try:
+        binary, _ = macos_ocr_binary()
+        worker = subprocess.Popen([binary, "--daemon"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, bufsize=1)
+        ready = json.loads(worker.stdout.readline())
+        if not ready.get("ready"):
+            raise RuntimeError("macOS OCR worker 未就绪")
+        _OCR_WORKER = worker
+        _OCR_WORKER_READY.set()
+    except Exception as e:  # noqa: BLE001
+        _OCR_WORKER_ERROR = str(e)
+
+
+def start_ocr_prewarm():
+    if sys.platform == "darwin" and os.environ.get("EGRET_OCR_PREWARM", "1") != "0" and not _OCR_WORKER_READY.is_set():
+        threading.Thread(target=_prewarm_macos_ocr, name="egret-ocr-prewarm", daemon=True).start()
+
+
+def stop_ocr_worker():
+    if _OCR_WORKER and _OCR_WORKER.poll() is None:
+        _OCR_WORKER.terminate()
+
+
+atexit.register(stop_ocr_worker)
+
+
+def run_fast_ocr(image_data, candidates, scale):
+    """一次图片、多个候选区域批量 OCR，避免每个按钮各截一次图。"""
+    compile_ms = 0
+    if sys.platform == "darwin":
+        use_worker = _OCR_WORKER_READY.is_set() and _OCR_WORKER and _OCR_WORKER.poll() is None
+        if use_worker:
+            binary = None
+            backend = "macos-vision-accurate-warm"
+        else:
+            binary, compile_ms = macos_ocr_binary()
+            backend = "macos-vision-fast"
+        command = None
+    elif sys.platform == "win32":
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell or not os.path.isfile(OCR_WINDOWS_SOURCE):
+            raise RuntimeError("Windows OCR 需要 Windows PowerShell 与 Windows.Media.Ocr")
+        backend = "windows-media-ocr"
+        command = [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                   "-File", OCR_WINDOWS_SOURCE]
+    else:
+        raise RuntimeError("当前平台没有内置快速 OCR 后端；目前支持 Windows 与 macOS")
+    started = time.perf_counter()
+    image_path = spec_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="egret-ocr-", suffix=".png", delete=False) as image_file:
+            image_file.write(base64.b64decode(image_data))
+            image_path = image_file.name
+        ratio = float(scale or 1)
+        regions = []
+        for candidate in candidates:
+            rect = candidate.get("screenRect") or {}
+            if not rect.get("width") or not rect.get("height") or candidate.get("hash") is None:
+                continue
+            pad = 4 * ratio
+            regions.append({
+                "id": str(candidate["hash"]),
+                "x": float(rect.get("x", 0)) * ratio - pad,
+                "y": float(rect.get("y", 0)) * ratio - pad,
+                "width": float(rect["width"]) * ratio + pad * 2,
+                "height": float(rect["height"]) * ratio + pad * 2,
+            })
+        if not regions:
+            return {"available": True, "backend": backend, "texts": {}, "elapsedMs": 0,
+                    "compileMs": compile_ms or 0}
+        spec = {"image": image_path, "regions": regions, "languages": ["zh-Hans", "en-US"]}
+        with tempfile.NamedTemporaryFile(prefix="egret-ocr-", suffix=".json", mode="w",
+                                         encoding="utf-8", delete=False) as spec_file:
+            json.dump(spec, spec_file, ensure_ascii=False)
+            spec_path = spec_file.name
+        if sys.platform == "darwin" and use_worker:
+            with _OCR_WORKER_LOCK:
+                _OCR_WORKER.stdin.write(spec_path + "\n")
+                _OCR_WORKER.stdin.flush()
+                decoded = json.loads(_OCR_WORKER.stdout.readline())
+            if decoded.get("error"):
+                raise RuntimeError(decoded["error"])
+        else:
+            completed = subprocess.run(([binary, spec_path] if command is None else command + [spec_path]),
+                                       capture_output=True, text=True, timeout=5)
+            if completed.returncode:
+                raise RuntimeError(completed.stderr.strip() or "本地 OCR 执行失败")
+            decoded = json.loads(completed.stdout)
+        texts, confidences = {}, {}
+        for match in decoded.get("matches", []):
+            text = (match.get("text") or "").strip()
+            meaningful = re.sub(r"[^0-9A-Za-z\u3400-\u9fff]+", "", text)
+            if len(meaningful) >= 2:
+                texts[str(match["id"])] = text
+                confidences[str(match["id"])] = round(float(match.get("confidence") or 0), 3)
+        return {"available": True, "backend": backend, "texts": texts,
+                "confidences": confidences, "regions": len(regions),
+                "language": decoded.get("language"),
+                "elapsedMs": int((time.perf_counter() - started) * 1000), "compileMs": compile_ms or 0}
+    finally:
+        for path in (image_path, spec_path):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 SUPPORTED_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 BASE_PORT = int(os.environ.get("EGRET_MCP_PORT", "17800"))
 PORT_COUNT = int(os.environ.get("EGRET_MCP_PORT_COUNT", "16"))
@@ -53,8 +200,8 @@ WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游戏的显示对象，依赖浏览器中的 Egret Agent Inspector 扩展。
 - 首次使用或工具提示扩展未连接时，先调用 egret_extension_status；未连接则按 egret-install-extension skill 用 egret_install_extension 为用户安装扩展。
 - 显示对象以 hash（Egret hashCode）标识；id 是组件在代码/EXML 中绑定的属性名。stageRect 为舞台坐标，screenRect 为页面视口 CSS 像素坐标。
-- 常用流程：egret_scene → egret_find / egret_interactables → egret_tap / egret_drag → egret_wait_for；内容更新用 changed，多种结果用 anyOf，已确认流程用 egret_run_steps。
-- 省上下文：优先用 egret_scene 和 egret_find 的 fields 取需要的字段，不要动辄 egret_get_tree 全量展开；截图只在需要看画面时用，判断状态一律以显示列表为准。
+- 常用流程：egret_scene → 已知标识用 egret_find、自然语言目标用 egret_locate → egret_tap / egret_drag → 精确 egret_wait_for；已确认流程用 egret_run_steps。
+- 省上下文：egret_locate 会一次聚合 id/name/qaName/text/source、子树标签和监听证据；图片字可能有用时传 ocr=true，工具只在结构化结果歧义后用 Windows/macOS 本地 OCR 补证据。仍歧义才局部截图，不要连续 find/get_tree 试探或盲点。
 - 界面被弹窗挡住时用 egret_dismiss_popups；想知道某个控件背后是哪段代码用 egret_inspect_code。
 - 探索开始前先用 egret_notes 查已有笔记，踩坑、确认入口或测出动画耗时后写回，避免下次重新摸索。
 - splan_test_command 仅在用户本轮明确授权且 probe 确认加载 debug.js 时使用。
@@ -179,7 +326,8 @@ TOOLS = {
         "page", "setProps"),
     "egret_wait_for": (
         "等待显示对象出现、消失或内容变化。state: visible（默认）、exists、hidden、gone、changed；"
-        "anyOf 可并行等待多个条件；等待 hidden/gone 时出现可推进的引导或顶层界面会提前返回 interrupted。普通点击建议 timeoutMs 2000-3000。",
+        "changed 必须带 hash/id/qaName/text 等目标，禁止无目标泛等；anyOf 可并行等待多个条件；"
+        "等待 hidden/gone 时出现可推进的引导或顶层界面会提前返回 interrupted。普通点击建议 timeoutMs 2000-3000。",
         obj(dict(MATCH_PROPS,
                  state=WAIT_CONDITION_PROPS["state"],
                  watchProps=WAIT_CONDITION_PROPS["watchProps"],
@@ -193,10 +341,13 @@ TOOLS = {
                  stableMs={"type": "integer", "description": "匹配对象的位置、尺寸和透明度保持不变多久才算满足，用于等待打开动画结束，如 300"})),
         "page", "waitFor"),
     "egret_advance": (
-        "推进当前可点任意处继续的 GuideMask 或 NPC 对话，自动使用 recommendedTarget。"
-        "max 默认 1；自动游玩可短批量推进连续对白，遇到选择、普通面板或点击后无变化即停止。",
+        "仅推进当前可点任意处继续的 GuideMask 或 NPC 对话，自动使用这两类界面的 recommendedTarget；"
+        "不用于选择普通按钮、地图入口或 NPC。"
+        "max 默认 1；批量推进会等文本稳定并保持均匀节奏，遇到选项、面板切换或点击后无变化即停止。",
         obj({"max": {"type": "integer", "description": "最多推进次数，默认 1，硬上限 12"},
              "waitMs": {"type": "integer", "description": "每次点击后等待界面变化，默认 1200，最大 5000"},
+             "paceMs": {"type": "integer", "description": "连续两次点击的最小间隔，默认 320，最大 2000"},
+             "stableMs": {"type": "integer", "description": "文本停止变化多久才继续，默认 180，最大 1500"},
              "method": {"type": "string", "enum": ["touch", "dom", "dom-touch"]}}),
         "page", "advance"),
     "egret_evaluate": (
@@ -226,15 +377,20 @@ TOOLS = {
         "screenshot", None),
     "egret_scene": (
         "界面快照：舞台各层、当前面板/弹窗栈（最上层在最后）以及最上层面板里的可交互控件，"
-        "每个控件带中心点、遮挡和状态；GuideMask 与点按继续的 NPC 对话直接返回 recommendedTarget。",
+        "每个控件带中心点、遮挡和状态；仅纯引导或点按继续的 NPC 对话返回 recommendedTarget。"
+        "普通按钮、地图入口和 NPC 必须用 egret_find 或 egret_locate 定位。",
         obj({"maxItems": {"type": "integer", "description": "最多返回多少个控件，默认 20，硬上限 50；0 表示只要面板栈"}}),
         "page", "scene"),
-    "egret_interactables": (
-        "列出当前顶层界面中实际注册了 touch/tap/mouse/click 回调的可见对象；返回监听类型、函数名、状态、中心点与遮挡。"
-        "引导/对话优先返回可直接点击的 recommendedTarget，地图代理监听则返回对应容器。",
-        obj({"rootHash": {"type": "integer", "description": "限定子树；默认当前顶层面板"},
-             "limit": {"type": "integer", "description": "最多返回条数，默认 30，硬上限 80"}}),
-        "page", "interactables"),
+    "egret_locate": (
+        "按自然语言描述一次定位按钮、入口、列表项或 NPC。综合 id/name/qaName/text/source、子树标签和真实监听器评分，"
+        "返回 evidence、labels 与候选；只有唯一高置信匹配才给 recommendedTarget。ocr=true 时仅在结构化结果仍歧义后，"
+        "对候选区域做一次本地快速 OCR 并重新评分，不上传图片。",
+        obj({"description": {"type": "string", "description": "目标描述，如“任务面板中的剧情按钮”或“萨帕尼克 NPC"},
+             "rootHash": {"type": "integer", "description": "可选，限定在已知面板/容器子树中"},
+             "limit": {"type": "integer", "description": "最多返回候选数，默认 8，硬上限 20"},
+             "ocr": {"type": "boolean", "description": "结构化定位歧义时启用本地 OCR，默认 false"},
+             "ocrLimit": {"type": "integer", "description": "最多 OCR 多少个候选，默认 12，硬上限 20"}}, ["description"]),
+        "page", "locate"),
     "egret_dismiss_popups": (
         "连续关闭最上层弹窗：优先点面板内的关闭控件，没有关闭控件就点面板之外的遮罩，每关一个都确认它确实消失。"
         "until 给出查询条件时匹配到即停止（例如主界面的某个组件）。返回关掉了哪些、卡在哪个。",
@@ -679,6 +835,8 @@ class McpServer:
                     content.append({"type": "image", "data": image["data"], "mimeType": image["mimeType"]})
                 return {"isError": not report["passed"], "content": content}
             res = await self.invoke(name, args)
+            if name == "egret_locate" and args.get("ocr") and res.get("ambiguous"):
+                res = await self.enrich_locate_with_ocr(args, res)
             if name == "egret_screenshot":
                 note = {"tabId": res.get("tabId")}
                 if res.get("warnings"):
@@ -690,6 +848,53 @@ class McpServer:
             return {"content": [{"type": "text", "text": json.dumps(res, ensure_ascii=False)}]}
         except Exception as e:  # noqa: BLE001
             return {"isError": True, "content": [{"type": "text", "text": str(e)}]}
+
+    async def enrich_locate_with_ocr(self, args, initial):
+        """结构化定位歧义时，在一次 MCP 调用内截图、批量 OCR、重新语义评分。"""
+        candidates = initial.get("candidates") or []
+        ocr_limit = min(max(int(args.get("ocrLimit", 12)), 1), 20)
+        try:
+            shot = await self.invoke("egret_screenshot", {"tabId": args.get("tabId"), "format": "png", "maxWidth": 1600})
+            viewport = initial.get("captureSize") or initial.get("viewportSize") or {}
+            viewport_width = float(viewport.get("width") or 0)
+            viewport_height = float(viewport.get("height") or 0)
+            if not viewport_width or not viewport_height:
+                fallback_ratio = float(initial.get("devicePixelRatio") or 1)
+                viewport_width = float(shot.get("width") or 0) / fallback_ratio
+                viewport_height = float(shot.get("height") or 0) / fallback_ratio
+            ratio = float(shot.get("width") or 0) / viewport_width if viewport_width else 1
+            candidates = [c for c in candidates if c.get("screenRect") and not c.get("occluded") and
+                          0 < float(c["screenRect"].get("width") or 0) <= viewport_width * 0.8 and
+                          0 < float(c["screenRect"].get("height") or 0) <= viewport_height * 0.5 and
+                          float(c["screenRect"].get("x") or 0) < viewport_width and
+                          float(c["screenRect"].get("y") or 0) < viewport_height and
+                          float(c["screenRect"].get("x") or 0) + float(c["screenRect"].get("width") or 0) > 0 and
+                          float(c["screenRect"].get("y") or 0) + float(c["screenRect"].get("height") or 0) > 0][:ocr_limit]
+            if not candidates:
+                initial["ocr"] = {"available": True, "skipped": "no-visible-candidates"}
+                return initial
+            loop = asyncio.get_running_loop()
+            ocr = await loop.run_in_executor(None, run_fast_ocr, shot["data"], candidates,
+                                             ratio)
+        except Exception as e:  # noqa: BLE001
+            initial["ocr"] = {"available": False, "error": str(e)}
+            return initial
+        texts = ocr.get("texts") or {}
+        if not texts:
+            initial["ocr"] = ocr
+            return initial
+        refine_args = dict(args)
+        refine_args.pop("ocr", None)
+        refine_args.pop("ocrLimit", None)
+        refine_args["ocrByHash"] = texts
+        refined = await self.invoke("egret_locate", refine_args)
+        refined["ocr"] = ocr
+        if shot.get("warnings"):
+            refined["ocr"]["warnings"] = shot["warnings"]
+            refined["ambiguous"] = True
+            refined["recommendedTarget"] = None
+            refined["reason"] = "OCR 截图可能过期或不可用，只返回文字参考；激活浏览器窗口后重试才能用于点击消歧"
+        return refined
 
     async def invoke(self, name, args):
         """执行单个工具，返回结果对象；失败时抛出异常。"""
@@ -731,11 +936,16 @@ class McpServer:
                     args["limit"] = min(max(int(args.get("limit", 20)), 1), 50)
                 elif page_method == "scene":
                     args["maxItems"] = min(max(int(args.get("maxItems", 20)), 0), 50)
-                elif page_method == "interactables":
-                    args["limit"] = min(max(int(args.get("limit", 30)), 1), 80)
+                elif page_method == "locate":
+                    requested = int(args.get("limit", 8))
+                    if args.get("ocr"):
+                        requested = max(requested, int(args.get("ocrLimit", 12)))
+                    args["limit"] = min(max(requested, 1), 20)
                 elif page_method == "advance":
                     args["max"] = min(max(int(args.get("max", 1)), 1), 12)
                     args["waitMs"] = min(max(int(args.get("waitMs", 1200)), 100), 5000)
+                    args["paceMs"] = min(max(int(args.get("paceMs", 320)), 0), 2000)
+                    args["stableMs"] = min(max(int(args.get("stableMs", 180)), 0), 1500)
                 elif page_method == "splan" and args.get("action") == "listModules":
                     args["limit"] = min(max(int(args.get("limit", 60)), 1), 200)
                 if page_method == "waitFor":
@@ -1008,6 +1218,7 @@ def compact(res):
 async def main():
     bridge = Bridge()
     await bridge.start()
+    start_ocr_prewarm()
     server = McpServer(bridge)
     loop = asyncio.get_running_loop()
     tasks = set()

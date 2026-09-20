@@ -50,14 +50,14 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | 类别 | 工具 |
 | --- | --- |
 | 连接 | `egret_extension_status`、`egret_install_extension`、`egret_reload_extension`、`egret_reopen_browser`、`egret_list_tabs`、`egret_navigate` |
-| 查询 | `egret_scene`（面板栈与控件状态）、`egret_interactables`（真实事件监听）、`egret_status`、`egret_runtime_stats`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
+| 查询 | `egret_scene`（面板栈与控件状态）、`egret_locate`（自然语言语义定位与消歧）、`egret_status`、`egret_runtime_stats`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
 | 操作 | `egret_tap`、`egret_advance`、`egret_drag`、`egret_dismiss_popups`、`egret_set_props`、`egret_wait_for`、`egret_evaluate`、`egret_screenshot` |
 | 排错 | `egret_get_errors`：页面未捕获异常、Promise 拒绝、资源加载失败和 console.error/warn；`egret_inspect_code`：控件背后的事件回调与源码片段 |
 | 记忆 | `egret_notes`：按游戏域名保存入口、定位条件、卡点解法、缺陷与耗时，跨会话复用 |
 | 测试 | `egret_run_steps`：批量执行步骤并断言，失败时附截图，并报告运行期间的页面错误 |
 | 项目专属 | `splan_call`：模块与 QA 能力；`splan_test_command`：仅明确授权且加载 `debug.js` 时执行测试命令 |
 
-查询类工具限制返回规模；`egret_wait_for` 支持 `changed/anyOf`，`egret_screenshot` 默认压缩并可用 `rect` 只截局部。
+查询类工具限制返回规模；`egret_locate` 只有在唯一高置信匹配时才返回可直接点击的目标，`ocr: true` 会在结构化结果歧义后用 Windows/macOS 本地 OCR 批量识别候选按钮；`egret_wait_for` 支持带明确目标的 `changed/anyOf`，`egret_screenshot` 默认压缩并可用 `rect` 只截局部。
 
 组件可按 `id`（代码/EXML 中绑定的属性名）、`qaName`、`text`、`className`、`name` 或图片 `source` 定位。
 `qaName` 为 `宿主短类名__部件名`（如 `SignPanel__btn_sign`）：组件自身写了 qaName 时直接使用，否则由绑定关系推导，因此正式构建中同样可用。

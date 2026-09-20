@@ -1888,7 +1888,7 @@ var egret;
 
 function showChanges() {
     // 公告版本：仅在 #changes 的公告内容变化时修改，普通发版无需改动
-    var e = "3.2";
+    var e = "4.0";
     if (window.localStorage.getItem("showChange" + e)) return;
     var t = document.getElementById("changes");
     t.style.display = "block";

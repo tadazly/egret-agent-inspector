@@ -131,8 +131,9 @@ class FakeExtension:
             result = {"jsHeap": {"usedBytes": 10}, "egret": {"displayObjects": 2}}
         elif method == "getTree":
             result = {"nodeCount": 1, "truncated": False, "tree": NODES["btn_notice"]}
-        elif method == "interactables":
-            result = {"total": 1, "truncated": False, "items": [NODES["btn_notice"]]}
+        elif method == "locate":
+            result = {"description": p["description"], "matched": 1, "ambiguous": False,
+                      "recommendedTarget": NODES["btn_notice"], "candidates": [NODES["btn_notice"]]}
         elif method == "getErrors":
             errors = [{"type": "console.error", "message": "boom", "at": 1, "lastAt": 1, "count": 1, "stack": None}]
             result = {"total": len(errors), "now": 100, "collectingSince": 0,
@@ -147,7 +148,8 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.install_dir = os.path.join(self.tmp.name, "extension")
         env = dict(os.environ, EGRET_MCP_PORT=str(PORT), EGRET_MCP_CONNECT_WAIT="2", PYTHONIOENCODING="utf-8",
-                   EGRET_EXTENSION_DIR=self.install_dir, EGRET_NOTES_DIR=os.path.join(self.tmp.name, "notes"))
+                   EGRET_EXTENSION_DIR=self.install_dir, EGRET_NOTES_DIR=os.path.join(self.tmp.name, "notes"),
+                   EGRET_OCR_PREWARM="0")
         self.proc = await asyncio.create_subprocess_exec(
             sys.executable, str(SERVER), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, env=env, limit=2 ** 24)
@@ -186,13 +188,17 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         for name in ("egret_find", "egret_tap", "egret_extension_status", "egret_install_extension",
                      "egret_reload_extension", "egret_reopen_browser", "egret_run_steps", "egret_scene",
                      "egret_advance", "egret_runtime_stats", "egret_dismiss_popups",
-                     "egret_inspect_code", "egret_interactables", "egret_notes", "splan_call",
+                     "egret_inspect_code", "egret_locate", "egret_notes", "splan_call",
                      "splan_test_command"):
             self.assertIn(name, tools)
+        self.assertNotIn("egret_interactables", tools)
         wait = next(tool for tool in listed if tool["name"] == "egret_wait_for")["inputSchema"]["properties"]
         self.assertIn("changed", wait["state"]["enum"])
         self.assertIn("anyOf", wait)
         self.assertIn("interruptOnOverlay", wait)
+        locate = next(tool for tool in listed if tool["name"] == "egret_locate")["inputSchema"]["properties"]
+        self.assertIn("ocr", locate)
+        self.assertIn("ocrLimit", locate)
         command = next(tool for tool in listed if tool["name"] == "splan_test_command")["inputSchema"]
         self.assertIn("authorized", command["required"])
 
@@ -284,13 +290,16 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(method, "getTree")
             self.assertEqual(params["depth"], 8)
             self.assertEqual(params["maxNodes"], 120)
-            _, interactive = await self.call("egret_interactables", {"limit": 999})
-            self.assertEqual(interactive["total"], 1)
-            self.assertEqual(ext.page_params[-1][1]["limit"], 80)
-            _, advanced = await self.call("egret_advance", {"max": 999, "waitMs": 99999})
+            _, located = await self.call("egret_locate", {"description": "公告按钮", "limit": 999})
+            self.assertFalse(located["ambiguous"])
+            self.assertEqual(ext.page_params[-1][1]["limit"], 20)
+            _, advanced = await self.call("egret_advance", {"max": 999, "waitMs": 99999,
+                                                              "paceMs": 99999, "stableMs": 99999})
             self.assertEqual(advanced["advanced"], 1)
             self.assertEqual(ext.page_params[-1][1]["max"], 12)
             self.assertEqual(ext.page_params[-1][1]["waitMs"], 5000)
+            self.assertEqual(ext.page_params[-1][1]["paceMs"], 2000)
+            self.assertEqual(ext.page_params[-1][1]["stableMs"], 1500)
             _, stats = await self.call("egret_runtime_stats")
             self.assertEqual(stats["egret"]["displayObjects"], 2)
         finally:

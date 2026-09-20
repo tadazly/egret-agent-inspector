@@ -17,9 +17,9 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 - `qaName` 在结果中总会给出：组件自身写了 qaName 就用它，否则由绑定关系推导，因此与项目测试用例中的写法一致，可直接抄进用例。
 - 定位条件因项目而异，一种找不到就换一种：文字做在图片里时 `text` 无效，类名被压缩或组件自定义时 `className` 无效，`id` 也可能整个项目都是空。
 - 结果里的 `path` 是给人看的，其中的层级名可能来自 id、`name` 或类名，不能原样当查询条件；要精确定位就用 `hash`。
-- 不清楚界面结构时，用 `egret_get_tree` 从某个面板的 `hash` 开始浏览，并限制 `depth` 和 `maxNodes`；不要从舞台全量展开。
-- 想知道当前哪些对象实际注册了点击回调时，用 `egret_interactables`；它也能发现由地图或父容器统一接管的交互。
-- `recommendedTarget` 出现时直接点击其 `stagePoint`。连续的 `dialogue-continue` / `guide-continue` 用 `egret_advance`；不要逐个尝试 `shap1/2/3/4`、箭头或遮罩碎片。
+- 只知道“剧情按钮”“第二个 NPC”这类自然语言描述时，先调用一次 `egret_locate`。它会同时分析 `id/name/qaName/text/source`、子树标签和点击监听；用户描述的是可见按钮文字、文字可能烘焙在图片里时同一次调用传 `ocr: true`，结构化结果歧义后才会在 Windows/macOS 本地批量 OCR 候选区域。
+- `ambiguous: false` 才能直接使用 `recommendedTarget`；歧义时先根据 `evidence/labels` 缩小 `rootHash` 或补充描述。结构化信息与 OCR 仍无法消歧时，才用 `egret_screenshot` 截候选区域做视觉确认；禁止按第一项盲点，也不要用多轮 `find/get_tree` 枚举猜测。
+- `egret_scene` 的 `recommendedTarget` 只允许用于 `guide-hole`、`guide-continue` 或 `dialogue-continue`；普通按钮、地图入口和 NPC 必须用 `egret_find` 或 `egret_locate` 定位，不能从场景顺序推断目标。连续的对话/引导用 `egret_advance`；不要逐个尝试 `shap1/2/3/4`、箭头或遮罩碎片。
 - 结果中的 `hash` 可在后续调用中直接使用，界面重建后会失效，需要重新查找。
 - 不要用 `touchableOnly: true` 找按钮：弹窗关闭按钮常是 `touchEnabled` 为假的图片，点击由父容器接管，会被这个条件过滤掉。
 - 位置已知而定位条件不明时，用 `egret_screenshot` 看清位置，再用 `egret_hit_test` 按 `clientX`/`clientY` 反查该点的对象，取其 `hash` 操作。
@@ -29,7 +29,7 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 - 点击用 `egret_tap`，默认 `method: "touch"` 走引擎真实命中检测。目标被遮挡时工具直接报错且不会点击，错误信息里会给出挡住它的对象：先关掉它再重试，不要改用 `force` 或 `event` 硬点。
 - 滚动列表或拖动用 `egret_drag`，以列表对象为起点并给出 `dy`/`dx`。
 - 输入文本用 `egret_set_props` 设置 `text`，并加 `dispatchChange: true`。
-- 每次操作后用 `egret_wait_for` 等待预期状态；普通点击限 2–3 秒，只有明确的加载、网络或战斗切换才延长。内容更新用 `changed`，多种结果用 `anyOf`；返回 `interrupted` 时立即执行 `overlay.recommendedTarget` 或处理顶层弹窗。面板有动画时加 `stableMs: 300`。
+- 每次操作后用 `egret_wait_for` 等待明确目标；普通点击限 2–3 秒，只有明确的加载、网络或战斗切换才延长。`changed` 必须带具体 `hash/id/qaName/text`，禁止无目标等待；多种结果用 `anyOf`。返回 `interrupted` 时处理 `overlay.recommendedTarget` 或顶层弹窗。面板有动画时加 `stableMs: 300`。
 - 需要视觉确认时调用 `egret_screenshot`，但判断界面状态一律以显示列表为准：浏览器窗口不在前台时截图可能是过期画面（此时结果会带 `warnings`）。
 - `egret_evaluate` 用于读取模块数据、调用项目自身的调试接口；不要借它直接改写业务状态来“让界面看起来正确”，除非用户明确要求。
 - 操作后如果界面没有预期变化，用 `egret_get_errors` 看这段时间页面是否报错，再决定是重试还是报告缺陷。

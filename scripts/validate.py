@@ -100,6 +100,7 @@ def check_python(errors):
 
 def check_node(errors):
     launcher = PLUGIN / "scripts" / "start_mcp.js"
+    page_agent = PLUGIN / "extension" / "mcp" / "pageAgent.js"
     node = shutil.which("node")
     if not launcher.is_file():
         errors.append("scripts/start_mcp.js: missing")
@@ -107,6 +108,21 @@ def check_node(errors):
         errors.append("node: required to launch Codex MCP server")
     elif subprocess.run([node, "--check", str(launcher)], capture_output=True).returncode:
         errors.append("scripts/start_mcp.js: syntax error")
+    if node and subprocess.run([node, "--check", str(page_agent)], capture_output=True).returncode:
+        errors.append("extension/mcp/pageAgent.js: syntax error")
+
+
+def check_ocr(errors):
+    swift = PLUGIN / "scripts" / "ocr_macos.swift"
+    powershell = PLUGIN / "scripts" / "ocr_windows.ps1"
+    if not swift.is_file():
+        errors.append("scripts/ocr_macos.swift: missing")
+    if not powershell.is_file():
+        errors.append("scripts/ocr_windows.ps1: missing")
+    xcrun = shutil.which("xcrun")
+    if sys.platform == "darwin" and xcrun and subprocess.run(
+            [xcrun, "swiftc", "-parse", str(swift)], capture_output=True).returncode:
+        errors.append("scripts/ocr_macos.swift: syntax error")
 
 
 def check_page_agent(errors):
@@ -128,6 +144,7 @@ def main():
     check_skills(errors)
     check_python(errors)
     check_node(errors)
+    check_ocr(errors)
     check_page_agent(errors)
     if errors:
         print("validation failed:", *("- " + e for e in errors), sep="\n", file=sys.stderr)

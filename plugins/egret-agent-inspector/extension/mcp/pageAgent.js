@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.1.10";
+    var VERSION = "1.1.19";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -888,6 +888,22 @@
         };
     }
 
+    function dialogueHasDecision(panel) {
+        var found = false;
+        var pr = stageRect(panel);
+        walk(panel, function (o) {
+            if (found || o === panel || !effectiveVisible(o)) return;
+            var r = stageRect(o);
+            if (!r || !pr || r.width * r.height > pr.width * pr.height * 0.45) return;
+            var tag = className(o) + " " + (nameOf(o) || "") + " " + (bindId(o) || "") + " " + (qaNameOf(o) || "");
+            var text = textOf(o) || "";
+            if (!interactionListenersOf(o).length || !text && !/button|btn|option|choice|select|item/i.test(tag)) return;
+            if (/auto|skip|speed|close|自动|跳过|倍速|关闭/i.test(tag + " " + text)) return;
+            found = true;
+        });
+        return found;
+    }
+
     // 新手遮罩的纯文案提示和 NPC 对话都由整块界面接收点击；把安全点击点直接暴露给 agent，
     // 避免它枚举遮罩碎片，或反复等待复用中的对话面板消失。
     function passiveContinueTargetOf(panel) {
@@ -896,6 +912,8 @@
         var guide = /guideMask\.GuideMask/i.test(panelTag);
         var dialogue = /dialogueIntegration|dialogueButtomMixed|dialogueBottomMixed|npcDialogue|plotDialogue/i.test(panelTag);
         if (!guide && !dialogue) return null;
+        // 出现选项或功能按钮时必须交还给 agent 做语义定位，不能把整块对话面板当“继续”盲点。
+        if (dialogue && dialogueHasDecision(panel)) return null;
 
         var preferred = null, preferredRect = null, largestListener = null, largestArea = 0;
         walk(panel, function (o) {
@@ -938,6 +956,202 @@
             if (t && texts.indexOf(t) < 0) texts.push(t);
         });
         return [hashOf(panel), recommendation && recommendation.reason, texts.join("|")].join("::");
+    }
+
+    function normalizeSemantic(value) {
+        return String(value === undefined || value === null ? "" : value).toLowerCase()
+            .replace(/[\s\-_./\\:：,，。！？!?()（）\[\]【】]+/g, "");
+    }
+
+    function semanticTerms(description) {
+        var raw = String(description || "").toLowerCase();
+        var phrases = [];
+        ["进入游戏", "开始游戏", "立即前往", "回到基地", "返回基地"].forEach(function (phrase) {
+            if (normalizeSemantic(raw).indexOf(phrase) >= 0) phrases.push(phrase);
+        });
+        var ordinal = null;
+        var ordinalMatch = raw.match(/第\s*([一二三四五六七八九十\d]+)\s*(?:个|项|只|名)?/);
+        if (ordinalMatch) {
+            var nums = { "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10 };
+            ordinal = /^\d+$/.test(ordinalMatch[1]) ? +ordinalMatch[1] : nums[ordinalMatch[1]];
+            if (ordinal) ordinal--;
+        }
+        raw = raw.replace(/第\s*[一二三四五六七八九十\d]+\s*(?:个|项|只|名)?/g, " ")
+            .replace(/点击|点一下|打开|选择|找到|查找|定位|进入|前往|当前|界面|里面|中的|按钮|控件|入口|图标|那个|这个|一个/g, " ");
+        var terms = raw.split(/[^0-9a-z\u3400-\u9fff]+/i).map(normalizeSemantic).filter(function (x) { return x.length >= 2; });
+        terms = phrases.concat(terms);
+        return { terms: terms.filter(function (x, i) { return terms.indexOf(x) === i; }), ordinal: ordinal };
+    }
+
+    var SEMANTIC_ALIASES = {
+        "公告": ["notice", "announcement"], "下载": ["download"], "任务": ["task", "quest"],
+        "剧情": ["story", "plot"], "主线": ["mainstory", "maintask", "mainquest"],
+        "关闭": ["close", "quit", "cancel", "dismiss"], "返回": ["back", "return"],
+        "确认": ["confirm", "ok", "yes"], "取消": ["cancel", "no"], "继续": ["continue", "next"],
+        "设置": ["setting", "settings", "option"], "登录": ["login", "signin"],
+        "账号": ["account"], "客服": ["customer", "service"], "奖励": ["reward", "award"],
+        "战斗": ["battle", "fight"], "自动": ["auto"], "跳过": ["skip"],
+        "进入游戏": ["start", "entergame"], "开始游戏": ["start", "entergame"],
+        "立即前往": ["go", "goto", "enter"], "回到基地": ["backbase", "returnbase"], "返回基地": ["backbase", "returnbase"],
+        "npc": ["npc", "storyinteractobject"]
+    };
+
+    function semanticVariants(term) {
+        return [term].concat(SEMANTIC_ALIASES[term] || []);
+    }
+
+    function semanticValues(o, includeDescendants) {
+        var out = [];
+        function add(kind, value, direct) {
+            if (value === undefined || value === null || value === "") return;
+            var text = String(value).trim();
+            if (!text || out.some(function (x) { return x.kind === kind && x.value === text; })) return;
+            out.push({ kind: kind, value: text, direct: !!direct });
+        }
+        add("text", textOf(o), true);
+        add("qaName", qaNameOf(o), true);
+        add("id", bindId(o), true);
+        add("name", nameOf(o), true);
+        add("source", sourceOf(o), true);
+        add("className", className(o), true);
+        if (includeDescendants) {
+            var stack = [], scanned = 0;
+            for (var i = numChildren(o) - 1; i >= 0; i--) stack.push(childAt(o, i));
+            while (stack.length && out.length < 24 && scanned < 160) {
+                var child = stack.pop();
+                scanned++;
+                if (!child || !effectiveVisible(child)) continue;
+                add("text", textOf(child), false);
+                add("qaName", qaNameOf(child), false);
+                add("id", bindId(child), false);
+                add("name", nameOf(child), false);
+                add("source", sourceOf(child), false);
+                for (var ci = numChildren(child) - 1; ci >= 0; ci--) stack.push(childAt(child, ci));
+            }
+        }
+        return out;
+    }
+
+    function semanticActionOwner(o, root) {
+        var cur = o, fallback = null;
+        for (var depth = 0; cur && depth < 8; depth++) {
+            var tag = className(cur) + " " + (nameOf(cur) || "") + " " + (bindId(cur) || "") + " " + (qaNameOf(cur) || "");
+            if (/storyInteractObject|npc/i.test(tag)) return cur;
+            if (!fallback && /button|btn|item|tab|check|toggle|close/i.test(tag)) fallback = cur;
+            if (interactionListenersOf(cur).length) return fallback || cur;
+            if (cur === root || cur === getStage()) break;
+            cur = cur.parent;
+        }
+        return fallback;
+    }
+
+    // 把自然语言描述、子树文案/资源名和真实点击监听在页面侧一次聚合，避免 agent 逐个 find/get_tree 试探。
+    function locateSemantic(p) {
+        var stage = requireStage();
+        var root = p.rootHash !== undefined && p.rootHash !== null ? byHash(p.rootHash) : stage;
+        var parsed = semanticTerms(p.description);
+        var limit = Math.min(Math.max(p.limit !== undefined ? +p.limit : 8, 1), 20);
+        var map = {}, serial = 0;
+        walk(root, function (o) {
+            if (!effectiveVisible(o)) return false;
+            var r = stageRect(o);
+            if (!r || r.width < 4 || r.height < 4 || r.x + r.width <= 0 || r.y + r.height <= 0 ||
+                r.x >= stage.stageWidth || r.y >= stage.stageHeight) return;
+            var owner = semanticActionOwner(o, root);
+            if (!owner) return;
+            var key = String(hashOf(owner));
+            if (!map[key]) map[key] = { o: owner, values: [], order: serial++ };
+            semanticValues(o, false).forEach(function (value) {
+                if (o !== owner) value.direct = false;
+                if (!map[key].values.some(function (x) { return x.kind === value.kind && x.value === value.value; })) {
+                    map[key].values.push(value);
+                }
+            });
+        });
+        var candidates = Object.keys(map).map(function (key) {
+            var entry = map[key], o = entry.o;
+            semanticValues(o, true).forEach(function (value) {
+                if (!entry.values.some(function (x) { return x.kind === value.kind && x.value === value.value; })) entry.values.push(value);
+            });
+            var ocrText = p.ocrByHash && p.ocrByHash[String(hashOf(o))];
+            if (ocrText) entry.values.push({ kind: "ocr", value: String(ocrText), direct: true });
+            var direct = semanticValues(o, false);
+            var score = 0, evidence = [], matchedTerms = [];
+            parsed.terms.forEach(function (term) {
+                var best = null, bestScore = 0, bestVariant = null;
+                entry.values.forEach(function (value) {
+                    var normalized = normalizeSemantic(value.value);
+                    if (!normalized) return;
+                    semanticVariants(term).forEach(function (variant) {
+                        if (normalized.indexOf(variant) < 0) return;
+                        var valueScore = value.direct ? 24 : 12;
+                        if (normalized === variant) valueScore += 12;
+                        if (value.kind === "text") valueScore += 8;
+                        else if (/qaName|id|name/.test(value.kind)) valueScore += 5;
+                        if (valueScore > bestScore) { bestScore = valueScore; best = value; bestVariant = variant; }
+                    });
+                });
+                if (best) {
+                    score += bestScore * (term.length >= 4 ? 2 : 1);
+                    matchedTerms.push(term);
+                    evidence.push({ term: term, matchedAs: bestVariant, field: best.kind, value: best.value });
+                }
+            });
+            var description = normalizeSemantic(p.description);
+            direct.forEach(function (value) {
+                var normalized = normalizeSemantic(value.value);
+                if (description && normalized && (normalized === description || description.indexOf(normalized) >= 0)) score += 10;
+            });
+            var info = project(describe(o, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "source", "center", "screenRect",
+                "touchable", "enabled", "selected", "currentState"]);
+            info.score = score;
+            info.matchedTerms = matchedTerms;
+            info.evidence = evidence.slice(0, 6);
+            info.labels = entry.values.filter(function (x) { return /text|source|qaName|id|name|ocr/.test(x.kind); })
+                .slice(0, 10).map(function (x) { return { field: x.kind, value: x.value }; });
+            info.listeners = interactionListenersOf(o);
+            info._order = entry.order;
+            var hit = info.center ? hitTest(info.center.x, info.center.y) : null;
+            if (!reaches(o, hit)) {
+                var alt = probePoint(o, true);
+                if (alt) info.center = alt.point;
+                else {
+                    info.occluded = true;
+                    info.blocker = hit ? className(hit) + "#" + hashOf(hit) : null;
+                }
+            }
+            return info;
+        });
+        candidates.sort(function (a, b) {
+            if (b.score !== a.score) return b.score - a.score;
+            if (a.center && b.center && a.center.y !== b.center.y) return a.center.y - b.center.y;
+            if (a.center && b.center && a.center.x !== b.center.x) return a.center.x - b.center.x;
+            return a._order - b._order;
+        });
+        var matched = candidates.filter(function (x) { return x.score > 0 && !x.occluded; });
+        var selected = parsed.ordinal !== null ? matched[parsed.ordinal] : matched[0];
+        var unique = !!selected && parsed.terms.length > 0 && (parsed.ordinal !== null ? matched.length > parsed.ordinal && parsed.terms.length > 1 :
+            (!matched[1] || selected.score >= matched[1].score + 12));
+        candidates.forEach(function (x) { delete x._order; });
+        var canvas = getCanvas();
+        var canvasRect = canvas && canvas.getBoundingClientRect ? canvas.getBoundingClientRect() : null;
+        return {
+            description: p.description,
+            terms: parsed.terms,
+            requestedIndex: parsed.ordinal,
+            devicePixelRatio: window.devicePixelRatio || 1,
+            viewportSize: { width: window.innerWidth, height: window.innerHeight },
+            captureSize: canvasRect ? {
+                width: Math.max(window.innerWidth, canvasRect.left + canvasRect.width),
+                height: Math.max(window.innerHeight, canvasRect.top + canvasRect.height)
+            } : { width: window.innerWidth, height: window.innerHeight },
+            total: candidates.length,
+            matched: matched.length,
+            ambiguous: !unique,
+            reason: unique ? "unique-semantic-match" : selected ? "多个候选接近，请根据 evidence/labels 明确目标后再点" : "没有语义匹配，请缩小 rootHash 或提供界面文案/资源名",
+            recommendedTarget: unique ? selected : null,
+            candidates: candidates.slice(0, limit)
+        };
     }
 
     function actionableOverlayFor(targets) {
@@ -1331,6 +1545,11 @@
             var stableSince = 0;
             var overlayGraceMs = Math.min(Math.max(p.overlayGraceMs !== undefined ? +p.overlayGraceMs : 300, 0), 5000);
             var conditions = p.anyOf && p.anyOf.length ? p.anyOf.map(function (c) { return Object.assign({}, c); }) : [p];
+            conditions.forEach(function (c) {
+                if ((c.state || p.state) === "changed" && !hasCriteria(c)) {
+                    throw new Error("state=changed 必须提供 hash/id/qaName/text 等目标条件；无目标会观察 stage 本身并一直等到超时");
+                }
+            });
             var baselines = conditions.map(function (c) {
                 if ((c.state || p.state) !== "changed") return null;
                 if (c.from !== undefined) return c.from;
@@ -1469,8 +1688,10 @@
         advance: async function (p) {
             var max = Math.min(Math.max(p.max !== undefined ? +p.max : 1, 1), 12);
             var waitMs = Math.min(Math.max(p.waitMs !== undefined ? +p.waitMs : 1200, 100), 5000);
+            var paceMs = Math.min(Math.max(p.paceMs !== undefined ? +p.paceMs : 320, 0), 2000);
+            var stableMs = Math.min(Math.max(p.stableMs !== undefined ? +p.stableMs : 180, 0), 1500);
             var method = p.method || (touchHandler() ? "touch" : "dom");
-            var steps = [], stopped = "limit";
+            var steps = [], stopped = "limit", chainPanelHash = null, chainReason = null;
             for (var n = 0; n < max; n++) {
                 var beforeScene = sceneInfo();
                 var target = continueTargetOf(beforeScene.top);
@@ -1482,7 +1703,16 @@
                     stopped = "targeted-guide";
                     break;
                 }
+                var panelHash = beforeScene.top && hashOf(beforeScene.top);
+                if (chainPanelHash === null) {
+                    chainPanelHash = panelHash;
+                    chainReason = target.reason;
+                } else if (panelHash !== chainPanelHash || target.reason !== chainReason) {
+                    stopped = "continuation-changed";
+                    break;
+                }
                 var before = continuationSignature(beforeScene.top, target);
+                var clickedAt = Date.now();
                 await performGesture([target.stagePoint], method, 50, null);
                 var changed = false, afterTarget = null;
                 var deadline = Date.now() + waitMs;
@@ -1501,6 +1731,29 @@
                     stopped = "unchanged";
                     break;
                 }
+                // 文本逐字出现时，首次变化不代表已经可继续；等签名短暂稳定并保持均匀点击节奏。
+                if (afterTarget && stableMs) {
+                    var stableSignature = continuationSignature(sceneInfo().top, afterTarget);
+                    var stableSince = Date.now();
+                    var stableDeadline = Date.now() + Math.max(stableMs, waitMs);
+                    while (Date.now() < stableDeadline && Date.now() - stableSince < stableMs) {
+                        await sleep(Math.min(60, stableMs));
+                        var stableScene = sceneInfo();
+                        var stableTarget = continueTargetOf(stableScene.top);
+                        if (!stableScene.top || !stableTarget || hashOf(stableScene.top) !== chainPanelHash || stableTarget.reason !== chainReason) {
+                            afterTarget = stableTarget;
+                            break;
+                        }
+                        var signature = continuationSignature(stableScene.top, stableTarget);
+                        if (signature !== stableSignature) {
+                            stableSignature = signature;
+                            stableSince = Date.now();
+                        }
+                        afterTarget = stableTarget;
+                    }
+                }
+                var paceRemaining = paceMs - (Date.now() - clickedAt);
+                if (paceRemaining > 0) await sleep(paceRemaining);
                 if (!afterTarget) {
                     stopped = "done";
                     break;
@@ -1509,6 +1762,11 @@
             var rest = sceneInfo();
             return { advanced: steps.length, stopped: stopped, steps: steps,
                 next: continueTargetOf(rest.top) };
+        },
+
+        locate: function (p) {
+            if (!p.description || !String(p.description).trim()) throw new Error("需要提供 description 描述要找的按钮、NPC 或入口");
+            return locateSemantic(p);
         },
 
         dismissPopups: async function (p) {
@@ -1571,41 +1829,6 @@
                 remaining: rest.top ? project(describe(rest.top, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center"]) : null,
                 stackDepth: rest.stack.length
             };
-        },
-
-        interactables: function (p) {
-            var si = sceneInfo();
-            var root = p.rootHash !== undefined && p.rootHash !== null ? byHash(p.rootHash) : (si.top || si.stage);
-            var limit = Math.min(Math.max(p.limit !== undefined ? +p.limit : 30, 1), 80);
-            var recommendedTarget = continueTargetOf(root);
-            if (recommendedTarget) return {
-                root: project(describe(root, { center: true }), ["hash", "className", "id", "name", "qaName", "text"]),
-                total: 1, truncated: false, recommendedTarget: recommendedTarget, items: []
-            };
-            var candidates = [];
-            walk(root, function (o) {
-                if (!effectiveVisible(o)) return false;
-                var listeners = interactionListenersOf(o);
-                if (!listeners.length) return;
-                var r = stageRect(o);
-                if (!r || r.width < 4 || r.height < 4 || r.x + r.width <= 0 || r.y + r.height <= 0 ||
-                    r.x >= si.stage.stageWidth || r.y >= si.stage.stageHeight) return;
-                var info = project(describe(o, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center",
-                    "touchable", "enabled", "selected", "currentState"]);
-                info.listeners = listeners;
-                var hit = info.center ? hitTest(info.center.x, info.center.y) : null;
-                if (!reaches(o, hit)) {
-                    var alt = probePoint(o, true);
-                    if (alt) info.center = alt.point;
-                    else {
-                        info.occluded = true;
-                        info.blocker = hit ? className(hit) + "#" + hashOf(hit) : null;
-                    }
-                }
-                candidates.push(info);
-            });
-            return { root: project(describe(root, { center: true }), ["hash", "className", "id", "name", "qaName", "text"]),
-                total: candidates.length, truncated: candidates.length > limit, items: candidates.slice(0, limit) };
         },
 
         runtimeStats: function () {
