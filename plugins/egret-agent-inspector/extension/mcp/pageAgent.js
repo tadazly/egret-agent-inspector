@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.0.4";
+    var VERSION = "1.0.7";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -95,26 +95,105 @@
         return map.get(target) || null;
     }
 
-    // 与面板中“显示id”一致：优先对象自身 id，否则取持有该对象引用的最近宿主（父级或其 skin）上的属性名
-    function bindId(o) {
-        try {
-            if (typeof o.id === "string" && o.id) return o.id;
-        } catch (e) {}
+    // 找到持有该对象引用的最近宿主及其属性名（宿主为某个父级或其 skin）
+    function bindInfo(o) {
         var p = o.parent;
         for (var depth = 0; p && depth < 12; depth++) {
             var key = findBindKey(p, o);
-            if (key) return key;
+            if (key) return { host: p, key: key };
             var skin = null;
             try {
                 skin = p.skin;
             } catch (e) {}
             if (skin && typeof skin === "object" && skin !== p) {
                 key = findBindKey(skin, o);
-                if (key) return key;
+                if (key) return { host: p, key: key };
             }
             p = p.parent;
         }
         return null;
+    }
+
+    // 与面板中“显示id”一致：优先对象自身 id，否则取持有该对象引用的最近宿主上的属性名
+    function bindId(o) {
+        try {
+            if (typeof o.id === "string" && o.id) return o.id;
+        } catch (e) {}
+        var info = bindInfo(o);
+        return info ? info.key : null;
+    }
+
+    function shortClass(o) {
+        var c = className(o) || "";
+        var i = c.lastIndexOf(".");
+        return i >= 0 ? c.slice(i + 1) : c;
+    }
+
+    // QA 定位标识：优先对象自身的 qaName（部分项目在 debug 构建中写入），
+    // 否则按同样的「宿主短类名__部件名」规则推导，使正式构建也能得到稳定标识
+    function qaNameOf(o) {
+        try {
+            if (typeof o.qaName === "string" && o.qaName) return o.qaName;
+        } catch (e) {}
+        var info = bindInfo(o);
+        return info ? shortClass(info.host) + "__" + info.key : null;
+    }
+
+    // ---- 运行期错误收集：让 agent 能发现操作过程中出现的异常、资源缺失和报错日志 ----
+    // 缓冲区挂在 window 上，页面代理重新注入后仍然保留；只记录注入之后发生的错误
+    var ERROR_LIMIT = 200;
+
+    function errorBuffer() {
+        if (!window.__egretInspectorErrors) window.__egretInspectorErrors = [];
+        return window.__egretInspectorErrors;
+    }
+
+    function pushError(type, message, stack) {
+        var buf = errorBuffer();
+        var text = String(message === undefined || message === null ? "" : message).slice(0, 500);
+        var last = buf[buf.length - 1];
+        if (last && last.type === type && last.message === text) {
+            last.count++;
+            last.lastAt = Date.now();
+            return;
+        }
+        buf.push({ type: type, message: text, at: Date.now(), lastAt: Date.now(), count: 1,
+            stack: stack ? String(stack).slice(0, 800) : null });
+        while (buf.length > ERROR_LIMIT) buf.shift();
+    }
+
+    function formatArg(v) {
+        if (v instanceof Error) return v.message;
+        if (v === null || v === undefined || typeof v !== "object") return String(v);
+        try {
+            return JSON.stringify(serialize(v, 1)).slice(0, 200);
+        } catch (e) {
+            return Object.prototype.toString.call(v);
+        }
+    }
+
+    function installErrorHooks() {
+        if (window.__egretInspectorErrorHooks) return;
+        window.__egretInspectorErrorHooks = Date.now();
+        window.addEventListener("error", function (e) {
+            var t = e && e.target;
+            if (t && t !== window && (t.src || t.href)) pushError("resource", "资源加载失败：" + (t.src || t.href));
+            else pushError("error", e && e.message || "未捕获异常", e && e.error && e.error.stack);
+        }, true);
+        window.addEventListener("unhandledrejection", function (e) {
+            var r = e && e.reason;
+            pushError("unhandledrejection", r && r.message || r, r && r.stack);
+        });
+        ["error", "warn"].forEach(function (level) {
+            var orig = console[level];
+            if (typeof orig !== "function") return;
+            console[level] = function () {
+                try {
+                    pushError("console." + level, Array.prototype.map.call(arguments, formatArg).join(" "));
+                } catch (e) {}
+                return orig.apply(console, arguments);
+            };
+        });
     }
 
     function textOf(o) {
@@ -139,8 +218,10 @@
     }
 
     function visualAlpha(o) {
+        var stage = getStage();
         var alpha = 1;
-        for (var cur = o; cur; cur = cur.parent) alpha *= cur.alpha;
+        // 读取 stage.alpha/visible 会让 Egret 打出 Warning #1009，遍历到舞台就停下
+        for (var cur = o; cur && cur !== stage; cur = cur.parent) alpha *= cur.alpha;
         return round(alpha * 100);
     }
 
@@ -148,8 +229,8 @@
         var stage = getStage();
         var cur = o;
         while (cur) {
-            if (!cur.visible || cur.alpha === 0) return false;
             if (cur === stage) return true;
+            if (!cur.visible || cur.alpha === 0) return false;
             cur = cur.parent;
         }
         return false;
@@ -268,6 +349,8 @@
             id: bindId(o),
             name: o.name || null
         };
+        var qa = qaNameOf(o);
+        if (qa) info.qaName = qa;
         var t = textOf(o);
         if (t !== null) info.text = t;
         var src = sourceOf(o);
@@ -330,7 +413,7 @@
     }
 
     function hasCriteria(p) {
-        return ["hash", "id", "name", "className", "text", "source"].some(function (k) {
+        return ["hash", "id", "name", "className", "text", "source", "qaName"].some(function (k) {
             return p[k] !== undefined && p[k] !== null && p[k] !== "";
         });
     }
@@ -343,17 +426,19 @@
         var mClass = makeMatcher(p.className, mode);
         var mText = makeMatcher(p.text, mode);
         var mSource = makeMatcher(p.source, mode);
+        var mQa = makeMatcher(p.qaName, mode);
         var visibleOnly = p.visibleOnly !== false;
         var root = p.rootHash !== undefined && p.rootHash !== null ? byHash(p.rootHash) : stage;
         var results = [];
         walk(root, function (o) {
-            if (visibleOnly && (!o.visible || o.alpha === 0)) return false;
+            if (visibleOnly && o !== stage && (!o.visible || o.alpha === 0)) return false;
             if (p.hash !== undefined && p.hash !== null && String(hashOf(o)) !== String(p.hash)) return;
             if (mName && !mName(o.name)) return;
             if (mClass && !mClass(className(o))) return;
             if (mText && !mText(textOf(o))) return;
             if (mSource && !mSource(sourceOf(o))) return;
             if (mId && !mId(bindId(o))) return;
+            if (mQa && !mQa(qaNameOf(o))) return;
             if (p.touchableOnly && !effectiveTouchable(o)) return;
             if (visibleOnly && !effectiveVisible(o)) return;
             results.push(o);
@@ -365,7 +450,7 @@
         if (p.hash !== undefined && p.hash !== null) return byHash(p.hash);
         if (!hasCriteria(p)) return null;
         var list = query(p);
-        if (!list.length) throw new Error("没有找到匹配的显示对象：" + JSON.stringify(pick(p, ["id", "name", "className", "text", "source"])));
+        if (!list.length) throw new Error("没有找到匹配的显示对象：" + JSON.stringify(pick(p, ["id", "name", "className", "text", "source", "qaName"])));
         var index = p.index || 0;
         if (index >= list.length) throw new Error("匹配到 " + list.length + " 个对象，index " + index + " 越界");
         return list[index];
@@ -547,6 +632,23 @@
     }
 
     var handlers = {
+        getErrors: function (p) {
+            var since = p.sinceTs !== undefined && p.sinceTs !== null ? +p.sinceTs : 0;
+            var types = p.types && p.types.length ? p.types : null;
+            var buf = errorBuffer();
+            var list = buf.filter(function (e) {
+                if (e.lastAt < since) return false;
+                return !types || types.some(function (t) {
+                    return e.type === t || e.type.indexOf(t) === 0;
+                });
+            });
+            var limit = p.limit !== undefined ? +p.limit : 50;
+            var out = { total: list.length, collectingSince: window.__egretInspectorErrorHooks || null, now: Date.now(),
+                errors: list.slice(-limit) };
+            if (p.clear) window.__egretInspectorErrors = [];
+            return out;
+        },
+
         status: function () {
             var eg = egretNs();
             var stage = getStage();
@@ -618,7 +720,7 @@
         },
 
         find: function (p) {
-            if (!hasCriteria(p)) throw new Error("至少提供 id / name / className / text / source / hash 之一");
+            if (!hasCriteria(p)) throw new Error("至少提供 id / qaName / name / className / text / source / hash 之一");
             var list = query(p);
             var limit = p.limit !== undefined ? +p.limit : 20;
             var keys = p.props || [];
@@ -673,12 +775,18 @@
             var method = p.method || (touchHandler() ? "touch" : "dom");
             var warnings = [];
             var hit = hitTest(pt.x, pt.y);
-            // 命中测试能摸到目标，就说明它确实可见可点：某些 UI 框架（如 FairyGUI）的父链上
-            // 带着 visible=false 的容器，此时 effectiveVisible 会误判，不要据此发警告
-            var reachable = target && hit && isSelfOrAncestor(target, hit);
+            // 命中目标自身、其子节点或其祖先（点击常由父容器接管）都算能点到。某些 UI 框架（如 FairyGUI）
+            // 的父链上带着 visible=false 的容器，此时 effectiveVisible 会误判，不要据此判断
+            var reachable = target && hit && (isSelfOrAncestor(target, hit) || isSelfOrAncestor(hit, target));
             if (target && !reachable && !effectiveVisible(target)) warnings.push("目标对象在舞台上不可见");
             if (target && hit && method !== "event" && !reachable) {
-                warnings.push("点击位置命中的对象不在目标内部（可能被遮挡）：" + className(hit) + (bindId(hit) ? "#" + bindId(hit) : ""));
+                var blocker = className(hit) + (bindId(hit) ? "#" + bindId(hit) : "");
+                // 挡住了还照点只会点到遮挡物上，不如直接失败，让调用方先处理遮挡再重试
+                if (!p.force) {
+                    throw new Error("目标被遮挡，未执行点击：该位置命中的是 " + blocker +
+                        "（通常是弹窗或全屏遮罩，先关闭它再重试；确需照点可传 force: true）");
+                }
+                warnings.push("点击位置命中的对象不在目标内部（可能被遮挡）：" + blocker);
             }
             var times = p.count || 1;
             for (var i = 0; i < times; i++) {
@@ -798,6 +906,8 @@
             return { value: serialize(value, p.depth !== undefined ? +p.depth : 3) };
         }
     };
+
+    installErrorHooks();
 
     window.__egretInspectorMcp = {
         version: VERSION,

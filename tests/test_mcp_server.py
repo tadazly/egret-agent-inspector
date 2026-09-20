@@ -73,6 +73,10 @@ class FakeExtension:
             result = {"method": "touch", "target": node, "warnings": []}
         elif method == "waitFor":
             result = {"matched": bool(node), "elapsedMs": 5}
+        elif method == "getErrors":
+            errors = [{"type": "console.error", "message": "boom", "at": 1, "lastAt": 1, "count": 1, "stack": None}]
+            result = {"total": len(errors), "now": 100, "collectingSince": 0,
+                      "errors": errors if p.get("limit") else []}
         else:
             return {"id": msg["id"], "error": "unsupported"}
         return {"id": msg["id"], "result": {"tabId": 1, "frameId": 0, "result": result}}
@@ -153,6 +157,8 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
             ]})
             self.assertFalse(res.get("isError"), report)
             self.assertTrue(report["passed"])
+            # 运行期间页面产生的错误要报出来，但不改变用例结论
+            self.assertEqual(report["pageErrors"][0]["message"], "boom")
             res, report = await self.call("egret_run_steps", {"screenshotOnFailure": False, "steps": [
                 {"action": "assert", "id": "txt_title", "expect": {"text": "活动"}},
                 {"action": "tap", "id": "btn_notice"},

@@ -68,6 +68,7 @@ MATCH_PROPS = {
     "className": {"type": "string", "description": "类名，如 eui.Button、newLogin.NewLoginPanel"},
     "text": {"type": "string", "description": "文本内容（Label/TextField 的 text 或 Button 的 label）"},
     "source": {"type": "string", "description": "图片资源名（eui.Image 的 source），用于定位没有 id 的图片按钮"},
+    "qaName": {"type": "string", "description": "QA 定位标识：对象自身的 qaName，或按「宿主短类名__部件名」推导得到，如 SignPanel__btn_sign"},
     "match": {"type": "string", "enum": ["contains", "exact", "regex"], "description": "字符串匹配方式，默认 contains（不区分大小写）"},
     "rootHash": {"type": "integer", "description": "仅在该对象的子树中查找"},
     "visibleOnly": {"type": "boolean", "description": "只匹配在舞台上可见的对象，默认 true"},
@@ -107,7 +108,7 @@ TOOLS = {
              "bounds": {"type": "boolean", "description": "是否计算坐标，默认 true"}}),
         "page", "getTree"),
     "egret_find": (
-        "按 id / name / className / text / source / hash 查找显示对象，返回路径、可见性、可点击性及舞台/屏幕坐标。",
+        "按 id / qaName / name / className / text / source / hash 查找显示对象，返回 qaName、路径、可见性、可点击性及舞台/屏幕坐标。",
         obj(dict(MATCH_PROPS, limit={"type": "integer", "description": "最多返回条数，默认 20"},
                  props={"type": "array", "items": {"type": "string"}, "description": "额外读取的属性名，附在每条结果的 props 中"})),
         "page", "find"),
@@ -118,7 +119,7 @@ TOOLS = {
     "egret_tap": (
         "点击显示对象（按 hash/查询条件定位其中心，或直接给 stageX/stageY、clientX/clientY）。"
         "method: touch=经 Egret TouchHandler 走真实命中检测（默认），dom=向 canvas 派发鼠标事件，dom-touch=派发触摸事件，event=直接在目标上派发 TouchEvent（忽略遮挡）。"
-        "返回实际命中的对象，若被遮挡会给出 warnings。",
+        "返回实际命中的对象。目标被其他对象遮挡时不执行点击并报错，应先关闭遮挡物（通常是弹窗或全屏遮罩）再重试。",
         obj(dict(TARGET_PROPS,
                  stageX={"type": "number"}, stageY={"type": "number"},
                  clientX={"type": "number", "description": "页面视口坐标（CSS 像素）"}, clientY={"type": "number"},
@@ -126,7 +127,8 @@ TOOLS = {
                  offsetY={"type": "number"},
                  method={"type": "string", "enum": ["touch", "dom", "dom-touch", "event"]},
                  holdMs={"type": "integer", "description": "按下到抬起的间隔，默认 50"},
-                 count={"type": "integer", "description": "连续点击次数，默认 1"})),
+                 count={"type": "integer", "description": "连续点击次数，默认 1"},
+                 force={"type": "boolean", "description": "被遮挡时仍然点击（点到的是遮挡物），默认 false"})),
         "page", "tap"),
     "egret_drag": (
         "拖动/滑动：从目标对象中心（或 stageX/stageY、clientX/clientY）移动到 toStageX/toStageY、toClientX/toClientY 或偏移 dx/dy，可用于滚动列表。",
@@ -164,6 +166,15 @@ TOOLS = {
         obj({"expression": {"type": "string"}, "depth": {"type": "integer", "description": "返回值序列化深度，默认 3"}},
             ["expression"]),
         "page", "evaluate"),
+    "egret_get_errors": (
+        "读取页面运行期收集到的错误：未捕获异常、Promise 拒绝、资源加载失败和 console.error/warn。"
+        "用于操作或测试过程中发现潜在缺陷；只包含扩展开始收集之后发生的错误。",
+        obj({"sinceTs": {"type": "integer", "description": "只返回该时间戳（毫秒）之后的错误"},
+             "types": {"type": "array", "items": {"type": "string"},
+                       "description": "按类型过滤：error、unhandledrejection、resource、console.error、console.warn"},
+             "limit": {"type": "integer", "description": "最多返回条数，默认 50"},
+             "clear": {"type": "boolean", "description": "返回后清空缓冲区"}}),
+        "page", "getErrors"),
     "egret_screenshot": (
         "截取标签页当前可见区域（会先激活该标签页）。",
         obj({"format": {"type": "string", "enum": ["png", "jpeg"]}}),
@@ -200,7 +211,7 @@ STEP_ACTIONS = {
     "navigate": "egret_navigate", "tap": "egret_tap", "drag": "egret_drag", "setProps": "egret_set_props",
     "waitFor": "egret_wait_for", "evaluate": "egret_evaluate", "screenshot": "egret_screenshot",
 }
-QUERY_KEYS = ("hash", "id", "name", "className", "text", "source", "match", "rootHash", "index")
+QUERY_KEYS = ("hash", "id", "name", "className", "text", "source", "qaName", "match", "rootHash", "index")
 
 
 # ---------------------------------------------------------------- WebSocket 服务端
@@ -216,6 +227,24 @@ class ExtensionConnection:
         self.ready = False
         self.on_ready = None
         self.send_lock = asyncio.Lock()
+        self.last_seen = time.time()
+        self.pong = None
+
+    async def alive(self, timeout=2.0):
+        """确认连接对端仍在工作：扩展重载后旧 service worker 的连接可能仍然打开但不再应答。"""
+        if self.closed:
+            return False
+        if time.time() - self.last_seen < 2.0:
+            return True
+        self.pong = asyncio.get_running_loop().create_future()
+        try:
+            await self.send_text('{"type":"ping"}')
+            await asyncio.wait_for(self.pong, timeout)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+        finally:
+            self.pong = None
 
     async def send_text(self, text):
         data = text.encode("utf-8")
@@ -249,9 +278,14 @@ class ExtensionConnection:
             self.pending.pop(req_id, None)
 
     def on_message(self, text):
+        self.last_seen = time.time()
         try:
             msg = json.loads(text)
         except ValueError:
+            return
+        if msg.get("type") == "pong":
+            if self.pong and not self.pong.done():
+                self.pong.set_result(True)
             return
         if msg.get("type") == "hello":
             self.info.update(msg)
@@ -393,6 +427,13 @@ class Bridge:
             raise RuntimeError(
                 "Egret Agent Inspector 浏览器扩展未连接（ws://127.0.0.1:%d）。请确认浏览器已打开；"
                 "若尚未安装扩展，按 egret-install-extension skill 为用户安装。" % self.port)
+        if not await conn.alive():
+            # 多见于刚重载扩展：旧连接还在但已不再应答，丢弃它并等待新连接，避免干等到超时
+            conn.close()
+            self.connections = [c for c in self.connections if c is not conn]
+            conn = self.active or await self.wait_connected(min(CONNECT_WAIT, 10))
+            if conn is None:
+                raise RuntimeError("与浏览器扩展的连接已失效，且没有新的连接接入；请重试或确认浏览器仍在运行。")
         return await conn.request(method, params, timeout)
 
     async def wait_connected(self, seconds):
@@ -553,6 +594,12 @@ class McpServer:
         stop = args.get("stopOnFailure", True)
         results, image = [], None
         started = time.time()
+        base = {"tabId": tab_id} if tab_id is not None else {}
+        # 记录运行前的时间基准，运行结束后只取这期间新产生的页面错误
+        try:
+            since_ts = (await self.invoke("egret_get_errors", dict(base, limit=0)))["now"]
+        except Exception:  # noqa: BLE001
+            since_ts = None
         for index, step in enumerate(steps):
             step = dict(step)
             action = step.pop("action", None)
@@ -581,6 +628,14 @@ class McpServer:
         report = {"name": name, "passed": passed, "total": len(steps), "executed": len(results),
                   "failed": [r["index"] for r in results if not r["ok"]],
                   "durationMs": int((time.time() - started) * 1000), "steps": results}
+        if since_ts is not None:
+            try:
+                errors = await self.invoke("egret_get_errors", dict(base, sinceTs=since_ts, limit=20))
+                # 页面报错不直接判定用例失败，但必须报出来供排查
+                if errors.get("errors"):
+                    report["pageErrors"] = errors["errors"]
+            except Exception:  # noqa: BLE001
+                pass
         return report, image
 
     async def run_step(self, action, step):

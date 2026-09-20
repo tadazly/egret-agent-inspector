@@ -1,0 +1,6 @@
+interface:
+  display_name: "Egret 缺陷排查"
+  short_description: "自主操作游戏并发现报错、资源缺失和异常交互"
+  default_prompt: "使用 $egret-bug-hunt 试玩当前游戏页面，排查潜在缺陷并给出可复现的证据。"
+policy:
+  allow_implicit_invocation: true

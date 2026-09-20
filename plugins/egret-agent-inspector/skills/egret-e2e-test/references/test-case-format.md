@@ -6,9 +6,9 @@
   "steps": [
     { "action": "navigate", "url": "https://example.com/game/" },
     { "action": "waitFor", "className": "MainPanel", "timeoutMs": 30000 },
-    { "action": "tap", "source": "btn_notice_png" },
+    { "action": "tap", "qaName": "MainPanel__btn_notice" },
     { "action": "waitFor", "className": "NewNoticePanel", "stableMs": 300 },
-    { "action": "assert", "id": "txt_title", "expect": { "visible": true, "textContains": "公告" } },
+    { "action": "assert", "qaName": "NewNoticePanel__txt_title", "expect": { "visible": true, "textContains": "公告" } },
     { "action": "tap", "id": "btn_close", "note": "关闭公告" },
     { "action": "waitFor", "className": "NewNoticePanel", "state": "gone" }
   ]
@@ -35,4 +35,8 @@
 | `text` / `textContains` | 文本完全相等 / 包含 |
 | `props` | 属性值，如 `{ "selected": true, "enabled": false }` |
 
+查询条件即 `egret_find` 的条件：`qaName`、`id`、`name`、`className`、`text`、`source`、`match`、`rootHash`。
+
 每个步骤可加 `note` 说明意图，会原样出现在结果中。运行参数 `stopOnFailure`（默认 true）和 `screenshotOnFailure`（默认 true）在调用 `egret_run_steps` 时传入。
+
+结果中的 `pageErrors` 为用例运行期间页面产生的错误（未捕获异常、资源加载失败、console.error 等），不影响 `passed`，需要在报告中单独说明。

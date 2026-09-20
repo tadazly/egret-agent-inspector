@@ -40,6 +40,7 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | `egret-install-extension` | 为默认或指定浏览器安装、更新扩展 |
 | `egret-game-operation` | 查找组件并执行点击、拖动、输入、等待和截图 |
 | `egret-e2e-test` | 编写、运行和报告 E2E 用例 |
+| `egret-bug-hunt` | 探索式操作游戏，发现报错、异常界面和无响应交互 |
 
 ## MCP 工具
 
@@ -48,9 +49,11 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | 连接 | `egret_extension_status`、`egret_install_extension`、`egret_reload_extension`、`egret_list_tabs`、`egret_navigate` |
 | 查询 | `egret_status`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
 | 操作 | `egret_tap`、`egret_drag`、`egret_set_props`、`egret_wait_for`、`egret_evaluate`、`egret_screenshot` |
-| 测试 | `egret_run_steps`：批量执行步骤并断言，失败时附截图 |
+| 排错 | `egret_get_errors`：页面未捕获异常、Promise 拒绝、资源加载失败和 console.error/warn |
+| 测试 | `egret_run_steps`：批量执行步骤并断言，失败时附截图，并报告运行期间的页面错误 |
 
-组件可按 `id`（代码/EXML 中绑定的属性名）、`text`、`className`、`name` 或图片 `source` 定位。
+组件可按 `id`（代码/EXML 中绑定的属性名）、`qaName`、`text`、`className`、`name` 或图片 `source` 定位。
+`qaName` 为 `宿主短类名__部件名`（如 `SignPanel__btn_sign`）：组件自身写了 qaName 时直接使用，否则由绑定关系推导，因此正式构建中同样可用。
 
 ## DevTools 面板
 
