@@ -130,6 +130,7 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
     async def test_status_without_extension(self):
         res, data = await self.call("egret_extension_status", {"waitSeconds": 0.2})
         self.assertFalse(data["connected"])
+        self.assertTrue(data["bridgeAvailable"])
         self.assertTrue(data["bundledVersion"])
         self.assertIn("defaultBrowser", data["local"])
         res, _ = await self.call("egret_find", {"id": "x"})

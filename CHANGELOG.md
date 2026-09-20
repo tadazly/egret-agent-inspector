@@ -1,5 +1,11 @@
 # 更新日志
 
+## 3.4.1
+
+- 修复从 Codex 插件市场安装后只加载 Skills、未加载 `egret_*` MCP tools，导致 agent 无法安装浏览器扩展的问题。
+- 改进浏览器扩展安装 Skill：能区分 MCP bridge 端口冲突与扩展未安装，并在 tools 未加载时提供受限的 Python 3 降级流程。
+- 提升多 Codex 任务并行使用时的 bridge 容量，并改进 FairyGUI/UIContainer 弹窗、关闭控件与可见对象的识别。
+
 ## 3.4.0
 
 - 新增 `egret_scene`：一次拿到面板/弹窗栈与最上层面板里的可交互控件（含中心点和遮挡判定），替代反复截图试探。

@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "egret-agent-inspector": {
+      "command": "python",
+      "args": ["./server/egret_agent_inspector_mcp.py"],
+      "cwd": ".",
+      "enabled": true,
+      "default_tools_approval_mode": "approve",
+      "tools": {
+        "egret_evaluate": {
+          "approval_mode": "prompt"
+        }
+      },
+      "startup_timeout_sec": 20,
+      "tool_timeout_sec": 300
+    }
+  }
+}

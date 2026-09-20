@@ -13,7 +13,7 @@
 ## 约定
 
 - 文档使用简体中文，技术术语和标识符保留英文；保持精炼，不写实现细节。
-- MCP server 分别在 `.codex-plugin/plugin.json` 和 `.claude-plugin/plugin.json` 中声明，插件根目录不放 `.mcp.json`。
+- Codex 的 `.codex-plugin/plugin.json` 通过 `mcpServers: "./.mcp.json"` 引用插件根目录的 MCP 配置；Claude Code 继续在 `.claude-plugin/plugin.json` 中声明 MCP server。
 - 版本号用 `scripts/set_version.py` 同步修改；修改 `extension/mcp/pageAgent.js` 时同步提升其与 `bridge.js` 中的 agent 版本。
 - MCP stdio 的 stdout 只输出协议消息，日志写 stderr。
 - 不提交凭据、本地绝对路径或内部地址。

@@ -1,9 +1,10 @@
 // Egret Agent Inspector MCP 桥接：运行在扩展 service worker 中，作为 WebSocket 客户端连接本机 MCP server，
 // 把 MCP 工具请求转发到目标标签页（在页面 MAIN world 中执行 mcp/pageAgent.js）。
-const AGENT_VERSION = "1.1.2";
+const AGENT_VERSION = "1.1.4";
 const AGENT_FILE = "mcp/pageAgent.js";
 const BASE_PORT = 17800;
-const PORT_COUNT = 5;
+// Codex 会为并行任务分别启动 MCP 进程；预留足够端口，避免多个任务同时使用插件时耗尽 bridge。
+const PORT_COUNT = 16;
 const FAST_RETRY_DELAY = 2000;
 const MAX_RETRY_DELAY = 30000;
 
@@ -130,8 +131,12 @@ function isScriptableUrl(url) {
     return /^(https?|file):/i.test(url || "");
 }
 
-async function probeFrames(tabId) {
-    const results = await chrome.scripting.executeScript({
+async function probeFrames(tabId, timeoutMs = 2500) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`探测标签页 ${tabId} 超时`)), timeoutMs);
+    });
+    const request = chrome.scripting.executeScript({
         target: { tabId, allFrames: true },
         world: "MAIN",
         func: () => {
@@ -140,6 +145,12 @@ async function probeFrames(tabId) {
             return !!(el && el["egret-player"] || eg && eg.MainContext && eg.MainContext.instance && eg.MainContext.instance.stage || window.lark_stages && window.lark_stages.length);
         }
     });
+    let results;
+    try {
+        results = await Promise.race([request, timeout]);
+    } finally {
+        clearTimeout(timer);
+    }
     const hit = results.find((r) => r.result === true);
     return hit ? hit.frameId : null;
 }
@@ -268,8 +279,7 @@ async function handleRequest(method, params) {
     switch (method) {
         case "listTabs": {
             const tabs = await chrome.tabs.query({});
-            const out = [];
-            for (const t of tabs) {
+            return Promise.all(tabs.map(async (t) => {
                 const item = { tabId: t.id, windowId: t.windowId, active: t.active, title: t.title, url: t.url };
                 if (params.probe && isScriptableUrl(t.url)) {
                     try {
@@ -279,9 +289,8 @@ async function handleRequest(method, params) {
                     }
                 }
                 item.lastUsed = t.id === lastTabId;
-                out.push(item);
-            }
-            return out;
+                return item;
+            }));
         }
         case "navigate": {
             let tab;

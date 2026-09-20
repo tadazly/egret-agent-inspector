@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.1.2";
+    var VERSION = "1.1.4";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -483,7 +483,6 @@
             if (mId && !mId(bindId(o))) return;
             if (mQa && !mQa(qaNameOf(o))) return;
             if (p.touchableOnly && !effectiveTouchable(o)) return;
-            if (visibleOnly && !effectiveVisible(o)) return;
             results.push(o);
         });
         return results;
@@ -598,18 +597,73 @@
         var kids = visibleChildren(stage);
         var root = kids.length === 1 && numChildren(kids[0]) ? kids[0] : stage;
         var layers = visibleChildren(root);
-        var top = null;
+        var top = null, best = null, serial = 0;
         var queue = [{ o: root, d: 0 }];
         while (queue.length) {
             var it = queue.pop();
             var children = visibleChildren(it.o);
             if (it.o !== root) {
                 var r = stageRect(it.o);
-                // 渲染顺序靠后的覆盖前面的，所以最后一个满足条件的就是最上层
-                if (r && r.width * r.height >= area * 0.2 && children.length >= 2) top = it.o;
+                // 优先保留更深的面板，避免遍历到后面的 uiLayer/topLayer 等基础层时把真实弹窗覆盖掉。
+                var tag = className(it.o) + " " + (nameOf(it.o) || "") + " " + (bindId(it.o) || "");
+                var semantic = /panel|pop|dialog|view|window|fui/i.test(tag);
+                var structural = layers.indexOf(it.o) >= 0;
+                if (r && r.width * r.height >= area * 0.2 && children.length && (semantic || structural)) {
+                    var score = (semantic ? 10000000 : 0) + it.d * 100000 + serial;
+                    if (!best || score > best.score) best = { o: it.o, score: score };
+                }
             }
-            if (it.d >= 4) continue;
+            serial++;
+            if (it.d >= 8) continue;
             for (var i = children.length - 1; i >= 0; i--) queue.push({ o: children[i], d: it.d + 1 });
+        }
+        top = best && best.o;
+
+        // FairyGUI/UIContainer 的 getChildAt 树与 parent 链可能不完全一致；用真实命中结果回溯到
+        // ui/top 层的直属子项，能稳定识别盖在最上面的 ApplicationView/弹窗包装器。
+        var hitCounts = [];
+        var points = [[stage.stageWidth * 0.5, stage.stageHeight * 0.5],
+            [stage.stageWidth * 0.08, stage.stageHeight * 0.08], [stage.stageWidth * 0.92, stage.stageHeight * 0.08],
+            [stage.stageWidth * 0.08, stage.stageHeight * 0.92], [stage.stageWidth * 0.92, stage.stageHeight * 0.92]];
+        points.forEach(function (pt) {
+            var hit = hitTest(pt[0], pt[1]);
+            if (!hit) return;
+            var cur = hit, layer = null;
+            while (cur && cur !== root && cur !== stage) {
+                if (cur.parent && layers.indexOf(cur.parent) >= 0) {
+                    layer = cur.parent;
+                    break;
+                }
+                cur = cur.parent;
+            }
+            if (!cur || !layer) return;
+            var layerTag = className(layer) + " " + (nameOf(layer) || "") + " " + (bindId(layer) || "");
+            var panelTag = className(cur) + " " + (nameOf(cur) || "") + " " + (bindId(cur) || "");
+            if (!/ui|top|popup|modal|dialog/i.test(layerTag) && !/panel|pop|dialog|view|window|fui|container/i.test(panelTag)) return;
+            var rect = stageRect(cur);
+            if (!rect || rect.width * rect.height < area * 0.05) return;
+            var found = hitCounts.filter(function (x) { return x.o === cur; })[0];
+            if (found) found.count++;
+            else hitCounts.push({ o: cur, count: 1, layer: layer });
+        });
+        hitCounts.sort(function (a, b) {
+            if (b.count !== a.count) return b.count - a.count;
+            return layers.indexOf(b.layer) - layers.indexOf(a.layer);
+        });
+        if (hitCounts.length) {
+            top = hitCounts[0].o;
+            // 命中点常先落到全屏 BackgroundMask；同一层里渲染顺序更靠后的语义面板才是要操作的弹窗。
+            var layerChildren = visibleChildren(hitCounts[0].layer);
+            for (var j = layerChildren.length - 1; j >= 0; j--) {
+                var candidate = layerChildren[j];
+                var candidateTag = className(candidate) + " " + (nameOf(candidate) || "") + " " + (bindId(candidate) || "");
+                var candidateRect = stageRect(candidate);
+                if (/panel|pop|dialog|view|window|fui/i.test(candidateTag) && candidateRect &&
+                    candidateRect.width * candidateRect.height >= area * 0.05) {
+                    top = candidate;
+                    break;
+                }
+            }
         }
         var siblings = top && top.parent ? visibleChildren(top.parent) : layers;
         var stack = siblings.filter(function (o) {

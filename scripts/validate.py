@@ -46,10 +46,15 @@ def check_codex(errors):
     prompts = ui.get("defaultPrompt", [])
     if not prompts or len(prompts) > 3 or any(len(p) > 128 for p in prompts):
         errors.append(".codex-plugin/plugin.json: defaultPrompt must have 1-3 entries of <=128 chars")
-    server = manifest.get("mcpServers", {}).get(NAME, {})
+    if manifest.get("mcpServers") != "./.mcp.json":
+        errors.append(".codex-plugin/plugin.json: mcpServers must reference ./.mcp.json")
+    mcp = load(PLUGIN / ".mcp.json", errors)
+    server = mcp.get("mcpServers", {}).get(NAME, {})
+    if not server:
+        errors.append(f".mcp.json: mcpServers.{NAME} is required")
     for arg in server.get("args", []):
         if arg.startswith("./") and not (PLUGIN / arg).is_file():
-            errors.append(f".codex-plugin/plugin.json: missing {arg}")
+            errors.append(f".mcp.json: missing {arg}")
     market = load(ROOT / ".agents" / "plugins" / "marketplace.json", errors)
     entry = next((p for p in market.get("plugins", []) if p.get("name") == NAME), None)
     if not entry or entry.get("source", {}).get("path") != f"./plugins/{NAME}":
@@ -64,10 +69,6 @@ def check_claude(errors):
     entry = next((p for p in market.get("plugins", []) if p.get("name") == NAME), None)
     if not entry or entry.get("source") != f"./plugins/{NAME}":
         errors.append(".claude-plugin/marketplace.json: plugin entry missing or wrong source")
-    if (PLUGIN / ".mcp.json").exists():
-        errors.append("plugin root must not contain .mcp.json (Codex and Claude declare MCP servers in their own manifests)")
-
-
 def check_skills(errors):
     skills = sorted(p for p in (PLUGIN / "skills").iterdir() if p.is_dir())
     if not skills:
@@ -93,6 +94,15 @@ def check_python(errors):
             errors.append(str(e))
 
 
+def check_page_agent(errors):
+    page = (PLUGIN / "extension" / "mcp" / "pageAgent.js").read_text(encoding="utf-8")
+    bridge = (PLUGIN / "extension" / "mcp" / "bridge.js").read_text(encoding="utf-8")
+    page_version = re.search(r'var VERSION = "([^"]+)"', page)
+    bridge_version = re.search(r'const AGENT_VERSION = "([^"]+)"', bridge)
+    if not page_version or not bridge_version or page_version.group(1) != bridge_version.group(1):
+        errors.append("extension/mcp: pageAgent.js VERSION must match bridge.js AGENT_VERSION")
+
+
 def main():
     found, errors = versions()
     values = set(found.values())
@@ -102,6 +112,7 @@ def main():
     check_claude(errors)
     check_skills(errors)
     check_python(errors)
+    check_page_agent(errors)
     if errors:
         print("validation failed:", *("- " + e for e in errors), sep="\n", file=sys.stderr)
         return 1

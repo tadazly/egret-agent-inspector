@@ -1,6 +1,6 @@
 {
   "name": "egret-agent-inspector",
-  "version": "3.4.0",
+  "version": "3.4.1",
   "description": "读取和操作浏览器中 Egret 游戏的显示对象，支持 agent 驱动的 E2E 测试",
   "author": {
     "name": "tadazly"
@@ -34,18 +34,5 @@
     ],
     "brandColor": "#F5A623"
   },
-  "mcpServers": {
-    "egret-agent-inspector": {
-      "command": "python",
-      "args": ["./server/egret_agent_inspector_mcp.py"],
-      "cwd": ".",
-      "enabled": true,
-      "default_tools_approval_mode": "approve",
-      "tools": {
-        "egret_evaluate": { "approval_mode": "prompt" }
-      },
-      "startup_timeout_sec": 20,
-      "tool_timeout_sec": 300
-    }
-  }
+  "mcpServers": "./.mcp.json"
 }
