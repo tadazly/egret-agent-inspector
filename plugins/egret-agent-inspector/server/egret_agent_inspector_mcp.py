@@ -202,7 +202,8 @@ INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游�
 - 显示对象以 hash（Egret hashCode）标识；id 是组件在代码/EXML 中绑定的属性名。stageRect 为舞台坐标，screenRect 为页面视口 CSS 像素坐标。
 - 常用流程：egret_scene → 已知标识用 egret_find、自然语言目标用 egret_locate → egret_tap / egret_drag → 精确 egret_wait_for；已确认流程用 egret_run_steps。
 - 省上下文：egret_locate 会一次聚合 id/name/qaName/text/source、子树标签和监听证据；图片字可能有用时传 ocr=true，工具只在结构化结果歧义后用 Windows/macOS 本地 OCR 补证据。仍歧义才局部截图，不要连续 find/get_tree 试探或盲点。
-- 界面被弹窗挡住时用 egret_dismiss_popups；想知道某个控件背后是哪段代码用 egret_inspect_code。
+- 截图用于理解实际画面、图片字、布局和半透明遮罩；窗口未前台本身不表示截图陈旧。组件状态和精确命中同时参考显示列表。
+- 界面被弹窗挡住时用 egret_dismiss_popups；它会优先点关闭控件，没有时仅点击有真实监听的半透明遮罩。egret_scene 返回 transientOverlay 时是地图标题/加载过场，应短等复查而不是点击。想知道某个控件背后是哪段代码用 egret_inspect_code。
 - 探索开始前先用 egret_notes 查已有笔记，踩坑、确认入口或测出动画耗时后写回，避免下次重新摸索。
 - splan_test_command 仅在用户本轮明确授权且 probe 确认加载 debug.js 时使用。
 - 未指定 tabId 时自动选用最近使用或当前激活的含 Egret 游戏的标签页。"""
@@ -378,7 +379,8 @@ TOOLS = {
         "screenshot", None),
     "egret_scene": (
         "界面快照：舞台各层、当前面板/弹窗栈（最上层在最后）以及最上层面板里的可交互控件，"
-        "每个控件带中心点、遮挡和状态；仅纯引导或点按继续的 NPC 对话返回 recommendedTarget。"
+        "每个控件带中心点、遮挡和状态；纯引导、点按继续的 NPC 对话，以及无关闭控件但可点遮罩关闭的弹窗会返回 recommendedTarget。"
+        "无安全点击目标的全屏暗化、地图标题或加载过场返回 transientOverlay，应该短等后复查。"
         "普通按钮、地图入口和 NPC 必须用 egret_find 或 egret_locate 定位。",
         obj({"maxItems": {"type": "integer", "description": "最多返回多少个控件，默认 20，硬上限 50；0 表示只要面板栈"}}),
         "page", "scene"),
@@ -394,7 +396,8 @@ TOOLS = {
              "ocrLimit": {"type": "integer", "description": "最多 OCR 多少个候选，默认 12，硬上限 20"}}, ["description"]),
         "page", "locate"),
     "egret_dismiss_popups": (
-        "连续关闭最上层弹窗：优先点面板内的关闭控件，没有关闭控件就点面板之外的遮罩，每关一个都确认它确实消失。"
+        "连续关闭最上层弹窗：优先点面板内的关闭控件；没有关闭控件时只点击内容区外有真实点击监听的半透明/暗色遮罩，"
+        "包括全屏弹窗根节点内部的遮罩。每关一个都确认它确实消失。"
         "until 给出查询条件时匹配到即停止（例如主界面的某个组件）。返回关掉了哪些、卡在哪个。",
         obj({"max": {"type": "integer", "description": "最多关闭几个，默认 6"},
              "until": {"type": "object", "description": "停止条件：{qaName/id/name/text/...} 匹配到可见对象就停"},
@@ -895,7 +898,7 @@ class McpServer:
             refined["ocr"]["warnings"] = shot["warnings"]
             refined["ambiguous"] = True
             refined["recommendedTarget"] = None
-            refined["reason"] = "OCR 截图可能过期或不可用，只返回文字参考；激活浏览器窗口后重试才能用于点击消歧"
+            refined["reason"] = "当前截图状态被扩展明确标记为不可用，OCR 只返回文字参考；恢复窗口后重试才能用于点击消歧"
         return refined
 
     async def invoke(self, name, args):

@@ -1,6 +1,6 @@
 // Egret Agent Inspector MCP 桥接：运行在扩展 service worker 中，作为 WebSocket 客户端连接本机 MCP server，
 // 把 MCP 工具请求转发到目标标签页（在页面 MAIN world 中执行 mcp/pageAgent.js）。
-const AGENT_VERSION = "1.1.20";
+const AGENT_VERSION = "1.1.25";
 const AGENT_FILE = "mcp/pageAgent.js";
 const BASE_PORT = 17800;
 // Codex 会为并行任务分别启动 MCP 进程；预留足够端口，避免多个任务同时使用插件时耗尽 bridge。
@@ -311,11 +311,10 @@ async function handleRequest(method, params) {
         case "screenshot": {
             const tab = await resolveTab(params.tabId);
             if (!tab.active) await chrome.tabs.update(tab.id, { active: true });
-            // 窗口不在前台时合成器可能不更新，截到的是旧帧；如实告知，不要让断言依赖截图
+            // 窗口失焦不代表 captureVisibleTab 返回旧帧；只有明确不可可靠截图的状态才告警。
             const warnings = [];
             try {
                 const win = await chrome.windows.get(tab.windowId);
-                if (!win.focused) warnings.push("浏览器窗口不在前台，截图可能是过期画面；请以显示列表（find / get_tree）为准");
                 if (win.state === "minimized") warnings.push("浏览器窗口已最小化，截图不可用");
             } catch (e) { /* 窗口信息拿不到就不加警告 */ }
             // 截图按像素计费给模型，默认压到 jpeg + 限宽，够看清界面即可；要看细节就裁剪 rect

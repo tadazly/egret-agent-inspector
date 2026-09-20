@@ -19,6 +19,7 @@ LAUNCHER = SERVER.parents[1] / "scripts" / "start_mcp.js"
 SCRIPTS = SERVER.parents[1] / "scripts"
 WINDOWS_OCR = SCRIPTS / "ocr_windows.ps1"
 PAGE_AGENT = SERVER.parents[1] / "extension" / "mcp" / "pageAgent.js"
+BRIDGE = SERVER.parents[1] / "extension" / "mcp" / "bridge.js"
 sys.path.insert(0, str(SCRIPTS))
 import browser_extension  # noqa: E402
 PORT = 17890
@@ -30,6 +31,11 @@ NODES = {
 
 
 class BrowserExtensionTest(unittest.TestCase):
+    def test_unfocused_window_does_not_mark_screenshot_stale(self):
+        source = BRIDGE.read_text(encoding="utf-8")
+        self.assertNotIn("if (!win.focused)", source)
+        self.assertIn('win.state === "minimized"', source)
+
     def test_windows_ocr_source_is_windows_powershell_compatible(self):
         source = WINDOWS_OCR.read_bytes()
         self.assertTrue(source.startswith(b"\xef\xbb\xbf") or source.isascii())
@@ -70,7 +76,7 @@ class LauncherTest(unittest.TestCase):
 const fs = require("fs");
 const vm = require("vm");
 let source = fs.readFileSync(process.argv[1], "utf8");
-source = source.replace("\n    installErrorHooks();", "\n    window.__pageAgentTest = { semanticTerms, dialogueHasDecision, semanticActionOwner };\n    installErrorHooks();");
+source = source.replace("\n    installErrorHooks();", "\n    window.__pageAgentTest = { semanticTerms, dialogueHasDecision, semanticActionOwner, sceneInfo, findCloseControl, maskPointOutside, backdropDismissTargetOf, transientOverlayOf };\n    installErrorHooks();");
 const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480,
     visible: true, alpha: 1, touchEnabled: true, touchChildren: true, parent: null, children: [],
     get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; } };
@@ -81,11 +87,11 @@ global.document = { documentElement: { clientLeft: 0, clientTop: 0 },
     querySelector(s) { return s === ".egret-player" ? { "egret-player": player } : null; } };
 vm.runInThisContext(source, { filename: process.argv[1] });
 let serial = 10;
-function item(cls, name, text, parent, listener) {
+function item(cls, name, text, parent, listener, bounds, alpha) {
     const o = { __class: cls, hashCode: serial++, name: name || null, text: text || "", parent,
-        stage, visible: true, alpha: 1, touchEnabled: true, touchChildren: true, children: [],
+        stage, visible: true, alpha: alpha === undefined ? 1 : alpha, touchEnabled: true, touchChildren: true, children: [],
         get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; },
-        getTransformedBounds() { return { x: 0, y: 360, width: 600, height: cls.indexOf("Dialogue") >= 0 ? 120 : 40 }; } };
+        getTransformedBounds() { return bounds || { x: 0, y: 360, width: 600, height: cls.indexOf("Dialogue") >= 0 ? 120 : 40 }; } };
     if (listener) o.$EventDispatcher_props_ = { 1: { touchTap: [{ listener() {}, thisObject: o }] } };
     if (parent) parent.children.push(o);
     return o;
@@ -101,7 +107,32 @@ const decision = t.dialogueHasDecision(panel);
 const npc = item("mapStory.StoryInteractObject", "npc_Hamo_3", null, stage, false);
 const pet = item("iconManager.PetContainer", "1921_body", null, npc, true);
 const canonical = t.semanticActionOwner(pet, stage) === npc;
-process.stdout.write(JSON.stringify({ named, travel, passive, decision, canonical }));
+const login = item("newLogin.NewLogin", "newLogin", null, stage, false, { x: 0, y: 0, width: 800, height: 480 });
+const notice = item("eui.Image", "btn_notice", null, login, true, { x: 680, y: 20, width: 80, height: 40 });
+notice.source = "new_entry_panel_img_btn_notice_png";
+const noticeIsClose = !!t.findCloseControl(login);
+const popup = item("ui.ModalPopup", "rewardPopup", null, stage, false, { x: 0, y: 0, width: 800, height: 480 });
+const dim = item("eui.Rect", "dimMask", null, popup, true, { x: 0, y: 0, width: 800, height: 480 }, 0.55);
+const content = item("eui.Group", "acceptanceContent", null, popup, false, { x: 150, y: 80, width: 500, height: 320 });
+stage.$touchHandler = { findTarget(x, y) { return x >= 150 && x <= 650 && y >= 80 && y <= 400 ? content : dim; } };
+const modalScene = t.sceneInfo();
+const backdrop = t.backdropDismissTargetOf(modalScene.top);
+const transition = item("egret.DisplayObjectContainer", "mapTitleOverlay", null, stage, false, { x: 0, y: 0, width: 800, height: 480 });
+const transitionDim = item("eui.Rect", "transitionDim", null, transition, false, { x: 0, y: 0, width: 800, height: 480 }, 0.65);
+const transitionTitle = item("eui.Group", "locationTitle", "《黑色漩涡》", transition, false, { x: 300, y: 200, width: 200, height: 80 });
+stage.$touchHandler = { findTarget(x, y) { return x >= 300 && x <= 500 && y >= 200 && y <= 280 ? transitionTitle : transitionDim; } };
+const transitionScene = t.sceneInfo();
+const transientOverlay = t.transientOverlayOf(transitionScene.top);
+const transitionDismiss = t.backdropDismissTargetOf(transitionScene.top);
+const scene = item("game.MainScene", "mainScene", null, stage, false, { x: 0, y: 0, width: 800, height: 480 });
+const sceneBg = item("eui.Image", "sceneBackground", null, scene, true, { x: 0, y: 0, width: 800, height: 480 }, 1);
+const sceneContent = item("eui.Group", "content", null, scene, false, { x: 120, y: 60, width: 560, height: 360 });
+stage.$touchHandler = { findTarget(x, y) { return x >= 120 && x <= 680 && y >= 60 && y <= 420 ? sceneContent : sceneBg; } };
+const opaqueSceneBackdrop = t.maskPointOutside(scene);
+process.stdout.write(JSON.stringify({ named, travel, passive, decision, canonical, noticeIsClose,
+    modalTop: modalScene.top && modalScene.top.name, backdropReason: backdrop && backdrop.reason, backdropPoint: backdrop && backdrop.stagePoint,
+    transientReason: transientOverlay && transientOverlay.reason, transientAction: transientOverlay && transientOverlay.action,
+    transitionDismiss: !!transitionDismiss, opaqueSceneBackdrop: !!opaqueSceneBackdrop }));
 '''
         result = subprocess.run([node, "-e", script, str(PAGE_AGENT)], capture_output=True, text=True,
                                 encoding="utf-8", errors="replace", timeout=10, check=True)
@@ -111,6 +142,14 @@ process.stdout.write(JSON.stringify({ named, travel, passive, decision, canonica
         self.assertFalse(data["passive"])
         self.assertTrue(data["decision"])
         self.assertTrue(data["canonical"])
+        self.assertFalse(data["noticeIsClose"])
+        self.assertEqual(data["modalTop"], "acceptanceContent")
+        self.assertEqual(data["backdropReason"], "modal-backdrop-dismiss")
+        self.assertLess(data["backdropPoint"]["y"], 80)
+        self.assertEqual(data["transientReason"], "transient-overlay")
+        self.assertEqual(data["transientAction"], "wait")
+        self.assertFalse(data["transitionDismiss"])
+        self.assertFalse(data["opaqueSceneBackdrop"])
 
     def test_python_candidate_order(self):
         node = shutil.which("node")

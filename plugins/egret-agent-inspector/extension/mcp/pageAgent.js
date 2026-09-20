@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.1.20";
+    var VERSION = "1.1.25";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -612,7 +612,7 @@
                 var r = stageRect(it.o);
                 // 优先保留更深的面板，避免遍历到后面的 uiLayer/topLayer 等基础层时把真实弹窗覆盖掉。
                 var tag = className(it.o) + " " + (nameOf(it.o) || "") + " " + (bindId(it.o) || "");
-                var semantic = /panel|pop|dialog|alert|view|window|fui/i.test(tag);
+                var semantic = /panel|pop|dialog|alert|view|window|fui|loading|transition|overlay/i.test(tag);
                 var structural = layers.indexOf(it.o) >= 0;
                 if (r && r.width * r.height >= area * 0.2 && children.length && (semantic || structural)) {
                     var score = (semantic ? 10000000 : 0) + it.d * 100000 + serial;
@@ -645,7 +645,8 @@
             if (!cur || !layer) return;
             var layerTag = className(layer) + " " + (nameOf(layer) || "") + " " + (bindId(layer) || "");
             var panelTag = className(cur) + " " + (nameOf(cur) || "") + " " + (bindId(cur) || "");
-            if (!/ui|top|popup|modal|dialog|alert/i.test(layerTag) && !/panel|pop|dialog|alert|view|window|fui|container/i.test(panelTag)) return;
+            if (!/ui|top|popup|modal|dialog|alert|loading|transition|overlay/i.test(layerTag) &&
+                !/panel|pop|dialog|alert|view|window|fui|container|loading|transition|overlay|mask/i.test(panelTag)) return;
             var rect = stageRect(cur);
             if (!rect || rect.width * rect.height < area * 0.05) return;
             var found = hitCounts.filter(function (x) { return x.o === cur; })[0];
@@ -658,14 +659,18 @@
         });
         if (hitCounts.length) {
             top = hitCounts[0].o;
-            // 命中点常先落到全屏 BackgroundMask；同一层里渲染顺序更靠后的语义面板才是要操作的弹窗。
+            // 命中点常先落到全屏 BackgroundMask；同一层里渲染顺序更靠后的语义面板或
+            // 紧凑内容块才是要操作的弹窗。后者兼容“全屏 Popup 根节点 + 通用 eui.Group 内容”。
             var layerChildren = visibleChildren(hitCounts[0].layer);
             for (var j = layerChildren.length - 1; j >= 0; j--) {
                 var candidate = layerChildren[j];
                 var candidateTag = className(candidate) + " " + (nameOf(candidate) || "") + " " + (bindId(candidate) || "");
                 var candidateRect = stageRect(candidate);
-                if (/panel|pop|dialog|alert|view|window|fui/i.test(candidateTag) && candidateRect &&
-                    candidateRect.width * candidateRect.height >= area * 0.05) {
+                var candidateArea = candidateRect && candidateRect.width * candidateRect.height;
+                var semanticPanel = /panel|pop|dialog|alert|view|window|fui|loading|transition|overlay/i.test(candidateTag);
+                var compactContent = candidate !== hitCounts[0].o && candidateArea >= area * 0.03 &&
+                    candidateArea < area * 0.82 && !BACKDROP_RE.test(candidateTag);
+                if ((semanticPanel || compactContent) && candidateArea >= area * 0.03) {
                     top = candidate;
                     break;
                 }
@@ -680,7 +685,7 @@
         return { stage: stage, layers: layers, stack: stack.length ? stack : siblings, top: top };
     }
 
-    var CLOSE_RE = /close|关闭|關閉|quit|cancel|dismiss|btn_no|guanbi/i;
+    var CLOSE_RE = /close|关闭|關閉|quit|cancel|dismiss|guanbi|(?:^|[\s_-])btn_no(?:$|[\s_-])/i;
     var CLOSE_TEXTS = ["关闭", "取消", "确定", "确认", "知道了", "我知道了", "好的", "×", "X", "x"];
 
     // 弹窗里的关闭控件：命名五花八门，按关键字 + 体积 + 靠右上角的程度打分
@@ -708,27 +713,145 @@
         return best;
     }
 
-    // 没有关闭控件时的兜底：点面板包围盒之外的遮罩空白处
-    function maskPointOutside(panel) {
+    var BACKDROP_RE = /mask|遮罩|shade|shadow|scrim|backdrop|overlay|cover|dim|modal.?bg|dark.?bg|black.?bg/i;
+
+    function pointInRect(x, y, r) {
+        return !!r && x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height;
+    }
+
+    function backdropEvidence(o, stageArea) {
+        if (!o) return false;
+        var r = stageRect(o);
+        if (!r || r.width * r.height < stageArea * 0.45) return false;
+        var tag = [className(o), bindId(o), qaNameOf(o), nameOf(o), sourceOf(o)].filter(Boolean).join(" ");
+        if (BACKDROP_RE.test(tag)) return true;
+        var alphaValues = [];
+        ["alpha", "fillAlpha", "backgroundAlpha"].forEach(function (key) {
+            try {
+                var value = Number(o[key]);
+                if (isFinite(value)) alphaValues.push(value);
+            } catch (e) {}
+        });
+        // 大面积半透明 Rect/Bitmap 是常见的黑色遮罩；普通不透明场景背景不能据此误判。
+        return alphaValues.some(function (value) { return value > 0 && value < 0.95; });
+    }
+
+    function modalContentRect(panel) {
         var stage = getStage();
         var pr = stageRect(panel);
-        if (!pr) return null;
+        if (!stage || !pr) return null;
+        var area = stage.stageWidth * stage.stageHeight;
+        if (pr.width * pr.height < area * 0.82) return pr;
+        var best = null;
+        function consider(o) {
+            if (!o || o === panel || !effectiveVisible(o)) return;
+            var r = stageRect(o);
+            if (!r) return;
+            var ratio = r.width * r.height / area;
+            if (ratio < 0.03 || ratio >= 0.82) return;
+            var tag = [className(o), bindId(o), qaNameOf(o), nameOf(o), sourceOf(o)].filter(Boolean).join(" ");
+            if (BACKDROP_RE.test(tag)) return;
+            if (!best || ratio > best.ratio) best = { rect: r, ratio: ratio };
+        }
+        // 中心命中链通常从按钮/正文一路回到真正的弹窗内容容器。
+        var cur = hitTest(stage.stageWidth / 2, stage.stageHeight / 2);
+        for (var depth = 0; cur && depth < 12; depth++, cur = cur.parent) {
+            if (!isSelfOrAncestor(panel, cur)) break;
+            consider(cur);
+            if (cur === panel) break;
+        }
+        // 中心可能恰好落在镂空区域；再从子树中选择最大的非遮罩内容块。
+        if (!best) walk(panel, consider);
+        return best && best.rect;
+    }
+
+    // 识别内容区外的大面积半透明/遮罩背景，并区分它是否真的注册了点击监听。
+    // 兼容“内容面板 + 遮罩兄弟节点”和“全屏根节点内含遮罩”两种常见结构。
+    function backdropPointOutside(panel) {
+        var stage = getStage();
+        var pr = stageRect(panel);
+        if (!stage || !pr) return null;
         var w = stage.stageWidth, h = stage.stageHeight;
+        var area = w * h;
+        var contentRect = modalContentRect(panel);
+        if (!contentRect) {
+            if (!backdropEvidence(panel, area)) return null;
+            return { x: round(w / 2), y: round(h / 2), hit: panel, evidence: panel, contentRect: null,
+                listenerOwner: interactionListenersOf(panel).length ? panel : null,
+                actionable: interactionListenersOf(panel).length > 0 };
+        }
         var pts = [[w * 0.5, h * 0.06], [w * 0.5, h * 0.94], [w * 0.06, h * 0.5], [w * 0.94, h * 0.5],
             [w * 0.06, h * 0.06], [w * 0.94, h * 0.06], [w * 0.06, h * 0.94], [w * 0.94, h * 0.94]];
+        var passiveCandidate = null;
         for (var i = 0; i < pts.length; i++) {
             var x = round(pts[i][0]), y = round(pts[i][1]);
-            if (x >= pr.x && x <= pr.x + pr.width && y >= pr.y && y <= pr.y + pr.height) continue;
+            if (pointInRect(x, y, contentRect)) continue;
             var hit = hitTest(x, y);
-            if (!hit || isSelfOrAncestor(panel, hit)) continue;
-            var hr = stageRect(hit);
-            var big = hr && hr.width >= w * 0.8 && hr.height >= h * 0.8;
-            // 点到的必须像遮罩（铺满或命名含 mask/bg），否则可能是主界面，乱点会误触发功能
-            if (big || /mask|遮罩|bg|背景|shade|cover/i.test(className(hit) + " " + (nameOf(hit) || "") + " " + (sourceOf(hit) || ""))) {
-                return { x: x, y: y, hit: hit };
+            if (!hit) continue;
+            var related = isSelfOrAncestor(panel, hit) || !!(panel.parent && isSelfOrAncestor(panel.parent, hit));
+            if (!related) continue;
+            var evidence = null, listenerOwner = null, cursor = hit;
+            for (var depth = 0; cursor && depth < 12; depth++, cursor = cursor.parent) {
+                if (!listenerOwner && interactionListenersOf(cursor).length) listenerOwner = cursor;
+                if (!evidence && backdropEvidence(cursor, area)) evidence = cursor;
+                if (cursor === panel.parent || cursor === stage) break;
+            }
+            // 有些全屏 Dialog/Popup 把遮罩点击监听直接挂在根节点上，没有可辨识的 mask 子节点。
+            var panelTag = className(panel) + " " + (nameOf(panel) || "") + " " + (bindId(panel) || "");
+            var rootCatchesBackdrop = pr.width * pr.height >= area * 0.82 &&
+                /popup|modal|dialog|alert|window/i.test(panelTag) &&
+                isSelfOrAncestor(panel, hit) && interactionListenersOf(panel).length > 0;
+            if (evidence || rootCatchesBackdrop) {
+                var candidate = { x: x, y: y, hit: hit, evidence: evidence || panel, contentRect: contentRect,
+                    listenerOwner: listenerOwner || (rootCatchesBackdrop ? panel : null),
+                    actionable: !!listenerOwner || rootCatchesBackdrop };
+                if (candidate.actionable) return candidate;
+                if (!passiveCandidate) passiveCandidate = candidate;
             }
         }
-        return null;
+        return passiveCandidate;
+    }
+
+    // 只有真实点击监听证明这个遮罩能处理点击时，才把它作为“关闭弹窗”目标。
+    function maskPointOutside(panel) {
+        var candidate = backdropPointOutside(panel);
+        return candidate && candidate.actionable ? candidate : null;
+    }
+
+    function backdropDismissTargetOf(panel) {
+        if (!panel || findCloseControl(panel)) return null;
+        var mp = maskPointOutside(panel);
+        if (!mp) return null;
+        var result = recommendationAt(panel, { x: mp.x, y: mp.y }, "modal-backdrop-dismiss", mp.hit);
+        result.actionHint = "当前顶层弹窗没有关闭控件，可点击内容区外的半透明遮罩关闭；点击后确认弹窗 hash 已消失";
+        if (mp.contentRect) result.contentRect = {
+                x: round(mp.contentRect.x), y: round(mp.contentRect.y),
+                width: round(mp.contentRect.width), height: round(mp.contentRect.height)
+            };
+        return result;
+    }
+
+    function transientOverlayOf(panel) {
+        if (!panel || findCloseControl(panel) || continueTargetOf(panel)) return null;
+        var tags = [], cur = panel;
+        for (var depth = 0; cur && depth < 4; depth++, cur = cur.parent) {
+            tags.push(className(cur), nameOf(cur), bindId(cur), qaNameOf(cur), sourceOf(cur));
+        }
+        var namedTransition = /loading|transition|fade|switch.?map|map.?title|scene.?title|chapter.?title|location.?title|过场|转场/i
+            .test(tags.filter(Boolean).join(" "));
+        var backdrop = backdropPointOutside(panel);
+        // 有点击监听的普通遮罩由 modal-backdrop-dismiss 处理；已知 loading/转场层即使可点也不应盲点跳过。
+        if (!namedTransition && (!backdrop || backdrop.actionable)) return null;
+        var result = {
+            reason: "transient-overlay",
+            action: "wait",
+            waitMs: 3000,
+            panel: project(describe(panel, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center", "currentState"]),
+            actionHint: "这是没有安全点击目标的全屏暗化、地图标题或加载过场；先短等并重新调用 egret_scene，不要点遮罩。若 3 秒后同一 hash 仍存在，再截图和 hit_test 排查"
+        };
+        if (backdrop && backdrop.evidence) result.backdrop = project(describe(backdrop.evidence, { center: true }),
+            ["hash", "className", "id", "name", "qaName", "text", "center"]);
+        return result;
     }
 
     function eventMaps(o) {
@@ -1199,7 +1322,7 @@
     function actionableOverlayFor(targets) {
         var top = sceneInfo().top;
         if (!top) return null;
-        var recommendedTarget = continueTargetOf(top);
+        var recommendedTarget = continueTargetOf(top) || backdropDismissTargetOf(top);
         // 等待的对象若就是当前对话/引导面板，也必须提前返回其继续点击点。
         if (!recommendedTarget && targets.some(function (o) { return isSelfOrAncestor(top, o); })) return null;
         var actionable = !!recommendedTarget || interactionListenersOf(top).length > 0 || !!findCloseControl(top);
@@ -1686,9 +1809,14 @@
                 items: []
             };
             if (!si.top || maxItems <= 0) return out;
-            var recommendedTarget = continueTargetOf(si.top);
+            var recommendedTarget = continueTargetOf(si.top) || backdropDismissTargetOf(si.top);
             if (recommendedTarget) {
                 out.recommendedTarget = recommendedTarget;
+                return out;
+            }
+            var transientOverlay = transientOverlayOf(si.top);
+            if (transientOverlay) {
+                out.transientOverlay = transientOverlay;
                 return out;
             }
             var cand = [];
@@ -1738,13 +1866,14 @@
                 var beforeScene = sceneInfo();
                 var target = continueTargetOf(beforeScene.top);
                 if (!target) {
+                    var transientOverlay = transientOverlayOf(beforeScene.top);
                     var topTag = beforeScene.top && (className(beforeScene.top) + " " + (nameOf(beforeScene.top) || ""));
                     var dialogue = /dialogueIntegration|dialogueButtomMixed|dialogueBottomMixed|npcDialogue|plotDialogue/i.test(topTag || "");
                     var decision = dialogue && dialogueHasDecision(beforeScene.top);
-                    stopped = decision ? "decision-required" : "no-continuation";
+                    stopped = transientOverlay ? "transient-overlay" : decision ? "decision-required" : "no-continuation";
                     if (beforeScene.top) current = project(describe(beforeScene.top, { center: true }),
                         ["hash", "className", "id", "name", "qaName", "text", "center", "currentState"]);
-                    hint = decision ? "当前对白需要语义选择，使用 egret_locate 定位选项" :
+                    hint = transientOverlay ? transientOverlay.actionHint : decision ? "当前对白需要语义选择，使用 egret_locate 定位选项" :
                         "当前顶层界面不是可直接推进的对白或引导；调用 egret_scene 后定位下一目标";
                     break;
                 }
@@ -1850,13 +1979,14 @@
                     var mp = maskPointOutside(panel);
                     if (!mp) {
                         entry.ok = false;
-                        entry.note = "面板内没有可识别的关闭控件，包围盒之外也没有可点的遮罩";
+                        entry.note = "面板内没有可识别的关闭控件，内容区外也没有高置信的可点遮罩";
                         closed.push(entry);
                         stopped = "stuck";
                         break;
                     }
                     entry.via = "mask";
                     entry.point = { x: mp.x, y: mp.y };
+                    entry.control = bindId(mp.evidence) || qaNameOf(mp.evidence) || nameOf(mp.evidence) || sourceOf(mp.evidence) || className(mp.evidence);
                     await performGesture([{ x: mp.x, y: mp.y }], method, 50, null);
                 }
                 // 等这个面板真的消失；没消失就别接着点，否则会反复点同一个

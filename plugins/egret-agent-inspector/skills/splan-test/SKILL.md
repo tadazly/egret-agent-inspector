@@ -14,7 +14,7 @@ description: 为 Splan 项目的游戏（页面存在全局 MFC 对象）生成�
 
 ## 真实游玩
 
-1. 用 `egret_scene` 看当前界面；仅当 `recommendedTarget.reason` 是 `guide-hole`、`guide-continue` 或 `dialogue-continue` 时才直接点。按任务描述找普通按钮、列表项或 NPC 时只调用一次 `egret_locate`，可能是图片字时传 `ocr: true`，由工具先依据 `id/name/qaName/text/source` 推理、歧义后再用 Windows/macOS 本地 OCR 补证据；仍歧义才截候选区域视觉确认，禁止枚举候选乱点。主线找人统一描述为“任务目标 NPC”，优先使用 `role: quest-npc`；不要猜中文名对应哪个内部英文资源名。
+1. 用 `egret_scene` 看当前界面；仅当 `recommendedTarget.reason` 是 `guide-hole`、`guide-continue`、`dialogue-continue` 或 `modal-backdrop-dismiss` 时才直接点。最后一种表示无关闭按钮的弹窗存在有监听的可点遮罩，点击后必须确认原弹窗消失。返回 `transientOverlay` 表示地图标题/加载过场，按 `waitMs` 短等复查，不点黑色区域。按任务描述找普通按钮、列表项或 NPC 时只调用一次 `egret_locate`，可能是图片字时传 `ocr: true`，由工具先依据 `id/name/qaName/text/source` 推理、歧义后再用 Windows/macOS 本地 OCR 补证据；仍歧义才截候选区域视觉确认，禁止枚举候选乱点。主线找人统一描述为“任务目标 NPC”，优先使用 `role: quest-npc`；不要猜中文名对应哪个内部英文资源名。
 2. 连续的 `dialogue-continue` / `guide-continue` 用一次 `egret_advance max: 6, paceMs: 320, stableMs: 180` 均匀推进；工具会等待逐字文本稳定，并在选项或面板切换时停下。禁止用 `egret_run_steps` 重复点击 `talk_txt/bg`；工具也会拒绝这种脚本。`advanced: 0` 时立即读取 `stopped/current/hint` 并重新看一次场景，不做空等待。
 3. 未知或不可逆操作逐步验证；已确认的安全路线用短 `egret_run_steps` 批量跑到下一个检查点。
 4. 默认不点对白的“自动/AUTO”；手动快速推进只用 `egret_advance`。只有用户明确要求自动播放时才读取 `selected` 后开启一次，并等待正文变化验证。普通点击只等 2–3 秒；等待内容变化必须指定目标，不用空条件 `changed`。`interrupted` 后处理返回的 `overlay.recommendedTarget` 或关闭控件。
@@ -23,7 +23,7 @@ description: 为 Splan 项目的游戏（页面存在全局 MFC 对象）生成�
 
 浏览器闪退或扩展断连时改用 `egret-session-recovery`，恢复最近检查点后继续原目标。
 
-关闭卡住界面时先走可见关闭/返回；仍阻塞可用 `closeModule` 恢复，并记录该动作，不把它算作正常玩家验收。
+关闭卡住界面时先走可见关闭/返回；没有关闭控件时用 `egret_dismiss_popups {"max":1}` 尝试半透明遮罩并确认面板消失；仍阻塞才可用 `closeModule` 恢复，并记录该动作，不把它算作正常玩家验收。
 
 用户在当前任务明确允许测试命令，且 `splan_call probe` 返回 `debug.loaded: true` 时，才可调用 `splan_test_command` 补充货币、道具或能量。允许消耗已有资源不等于允许测试命令。
 
