@@ -1,5 +1,10 @@
 # 更新日志
 
+## 3.4.2
+
+- 修复只有 `python3`、没有 `python` 命令的系统无法启动 Codex MCP server，导致 marketplace 安装后只加载 Skills、不暴露 `egret_*` tools 的问题。
+- 浏览器 profile 因 macOS 权限限制不可读时，状态查询和扩展安装不再整体失败，并返回明确的降级提示。
+
 ## 3.4.1
 
 - 修复从 Codex 插件市场安装后只加载 Skills、未加载 `egret_*` MCP tools，导致 agent 无法安装浏览器扩展的问题。

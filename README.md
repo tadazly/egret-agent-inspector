@@ -4,7 +4,7 @@
 
 ## 安装
 
-需要 Chromium 浏览器（Chrome、Edge、Brave）和 Python 3.8+。macOS/Linux 需保证 `python` 命令指向 Python 3。
+需要 Chromium 浏览器（Chrome、Edge、Brave）和 Python 3.8+。Codex 需保证 `python3` 命令可用；Claude Code 的当前配置使用 `python`。
 
 ### Claude Code
 

@@ -179,9 +179,16 @@ def status():
         exe = find_executable(browser_id)
         if not exe and not os.path.isdir(info["data"].get(SYSTEM) or ""):
             continue
-        browsers.append({"id": browser_id, "name": info["name"], "executable": exe,
-                         "isDefault": browser_id == default_id, "extensionsPage": info["page"],
-                         "loaded": loaded_extensions(browser_id)})
+        browser = {"id": browser_id, "name": info["name"], "executable": exe,
+                   "isDefault": browser_id == default_id, "extensionsPage": info["page"]}
+        try:
+            browser["loaded"] = loaded_extensions(browser_id)
+        except OSError as e:
+            # macOS 的 App Sandbox/TCC 可能允许启动浏览器，却拒绝读取其 profile。
+            # 这只会让“是否已加载”变成未知，不应导致状态查询和扩展安装整体失败。
+            browser["loaded"] = []
+            browser["loadedInspectionError"] = str(e)
+        browsers.append(browser)
     target = install_dir()
     return {
         "platform": SYSTEM,
@@ -283,6 +290,8 @@ def install(browser, open_page):
     result = {"ok": True, "browser": browser_id, "browserName": BROWSERS[browser_id]["name"],
               "installDir": target, "version": version_of(target), "previousVersion": previous,
               "alreadyLoaded": bool(loaded), "legacyLoads": legacy}
+    if entry and entry.get("loadedInspectionError"):
+        result["loadedInspectionError"] = entry["loadedInspectionError"]
     if loaded:
         result["nextSteps"] = ["扩展已从该目录加载：调用 egret_reload_extension（或在扩展管理页点击“重新加载”）使新文件生效。"]
         return result
@@ -290,6 +299,8 @@ def install(browser, open_page):
     result["clipboard"] = copy_to_clipboard(target)
     result["openedExtensionsPage"] = open_page and open_extensions_page(browser_id)
     steps = []
+    if result.get("loadedInspectionError"):
+        steps.append("无法读取浏览器 profile 来确认扩展是否已加载；请在扩展管理页检查现有 Egret Agent Inspector。已有则点击“重新加载”，没有再执行下列加载步骤。")
     if legacy:
         steps.append("先在扩展管理页移除旧的 Egret Inspector 扩展：" + "、".join(x["path"] for x in legacy))
     steps += [

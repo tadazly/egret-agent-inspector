@@ -52,6 +52,8 @@ def check_codex(errors):
     server = mcp.get("mcpServers", {}).get(NAME, {})
     if not server:
         errors.append(f".mcp.json: mcpServers.{NAME} is required")
+    elif server.get("command") != "python3":
+        errors.append(f".mcp.json: mcpServers.{NAME}.command must be python3")
     for arg in server.get("args", []):
         if arg.startswith("./") and not (PLUGIN / arg).is_file():
             errors.append(f".mcp.json: missing {arg}")

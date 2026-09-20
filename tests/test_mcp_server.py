@@ -9,16 +9,32 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "plugins" / "egret-agent-inspector" / "server" / "egret_agent_inspector_mcp.py"
+SCRIPTS = SERVER.parents[1] / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+import browser_extension  # noqa: E402
 PORT = 17890
 
 NODES = {
     "btn_notice": {"hash": 11, "className": "eui.Button", "id": "btn_notice", "text": "公告", "onStageVisible": True},
     "txt_title": {"hash": 12, "className": "eui.Label", "id": "txt_title", "text": "系统公告", "onStageVisible": True},
 }
+
+
+class BrowserExtensionTest(unittest.TestCase):
+    def test_status_tolerates_unreadable_browser_profiles(self):
+        with mock.patch.object(browser_extension, "default_browser_raw", return_value="com.google.chrome"), \
+                mock.patch.object(browser_extension, "find_executable", return_value="/test/browser"), \
+                mock.patch.object(browser_extension, "loaded_extensions",
+                                  side_effect=PermissionError("profile access denied")):
+            status = browser_extension.status()
+        chrome = next(browser for browser in status["browsers"] if browser["id"] == "chrome")
+        self.assertEqual(chrome["loaded"], [])
+        self.assertIn("profile access denied", chrome["loadedInspectionError"])
 
 
 class FakeExtension:
