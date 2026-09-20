@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "plugins" / "egret-agent-inspector" / "server" / "egret_agent_inspector_mcp.py"
 LAUNCHER = SERVER.parents[1] / "scripts" / "start_mcp.js"
 SCRIPTS = SERVER.parents[1] / "scripts"
+WINDOWS_OCR = SCRIPTS / "ocr_windows.ps1"
+PAGE_AGENT = SERVER.parents[1] / "extension" / "mcp" / "pageAgent.js"
 sys.path.insert(0, str(SCRIPTS))
 import browser_extension  # noqa: E402
 PORT = 17890
@@ -28,6 +30,17 @@ NODES = {
 
 
 class BrowserExtensionTest(unittest.TestCase):
+    def test_windows_ocr_source_is_windows_powershell_compatible(self):
+        source = WINDOWS_OCR.read_bytes()
+        self.assertTrue(source.startswith(b"\xef\xbb\xbf") or source.isascii())
+        if sys.platform == "win32" and shutil.which("powershell"):
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(WINDOWS_OCR), str(ROOT / "missing-ocr-spec.json")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+            self.assertNotIn("ParserError", result.stderr)
+            self.assertNotEqual(result.returncode, 0)
+
     def test_status_tolerates_unreadable_browser_profiles(self):
         with mock.patch.object(browser_extension, "default_browser_raw", return_value="com.google.chrome"), \
                 mock.patch.object(browser_extension, "find_executable", return_value="/test/browser"), \
@@ -50,6 +63,55 @@ class BrowserExtensionTest(unittest.TestCase):
 
 
 class LauncherTest(unittest.TestCase):
+    def test_page_agent_story_semantics(self):
+        node = shutil.which("node")
+        self.assertTrue(node, "node is required")
+        script = r'''
+const fs = require("fs");
+const vm = require("vm");
+let source = fs.readFileSync(process.argv[1], "utf8");
+source = source.replace("\n    installErrorHooks();", "\n    window.__pageAgentTest = { semanticTerms, dialogueHasDecision, semanticActionOwner };\n    installErrorHooks();");
+const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480,
+    visible: true, alpha: 1, touchEnabled: true, touchChildren: true, parent: null, children: [],
+    get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; } };
+const player = { stage };
+global.window = { addEventListener() {}, devicePixelRatio: 1, innerWidth: 800, innerHeight: 480,
+    egret: { getQualifiedClassName(o) { return o.__class || "Object"; } } };
+global.document = { documentElement: { clientLeft: 0, clientTop: 0 },
+    querySelector(s) { return s === ".egret-player" ? { "egret-player": player } : null; } };
+vm.runInThisContext(source, { filename: process.argv[1] });
+let serial = 10;
+function item(cls, name, text, parent, listener) {
+    const o = { __class: cls, hashCode: serial++, name: name || null, text: text || "", parent,
+        stage, visible: true, alpha: 1, touchEnabled: true, touchChildren: true, children: [],
+        get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; },
+        getTransformedBounds() { return { x: 0, y: 360, width: 600, height: cls.indexOf("Dialogue") >= 0 ? 120 : 40 }; } };
+    if (listener) o.$EventDispatcher_props_ = { 1: { touchTap: [{ listener() {}, thisObject: o }] } };
+    if (parent) parent.children.push(o);
+    return o;
+}
+const t = window.__pageAgentTest;
+const named = t.semanticTerms("任务目标萨帕尼克 NPC").terms;
+const travel = t.semanticTerms("前往新白沙罗域的地图入口或传送点").terms;
+const panel = item("dialogueIntegration.DialogueButtomMixed", null, null, stage, true);
+item("eui.Label", "talk_txt", "这里好像不一样了", panel, true);
+const passive = t.dialogueHasDecision(panel);
+item("eui.Label", null, "接受", panel, true);
+const decision = t.dialogueHasDecision(panel);
+const npc = item("mapStory.StoryInteractObject", "npc_Hamo_3", null, stage, false);
+const pet = item("iconManager.PetContainer", "1921_body", null, npc, true);
+const canonical = t.semanticActionOwner(pet, stage) === npc;
+process.stdout.write(JSON.stringify({ named, travel, passive, decision, canonical }));
+'''
+        result = subprocess.run([node, "-e", script, str(PAGE_AGENT)], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=10, check=True)
+        data = json.loads(result.stdout)
+        self.assertTrue({"任务目标", "npc", "萨帕尼克"}.issubset(data["named"]))
+        self.assertTrue({"地图", "传送", "新白沙罗域"}.issubset(data["travel"]))
+        self.assertFalse(data["passive"])
+        self.assertTrue(data["decision"])
+        self.assertTrue(data["canonical"])
+
     def test_python_candidate_order(self):
         node = shutil.which("node")
         self.assertTrue(node, "node is required")
@@ -211,6 +273,15 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         res, _ = await self.call("egret_find", {"id": "x"})
         self.assertTrue(res["isError"])
         self.assertIn("egret-install-extension", res["content"][0]["text"])
+
+    async def test_repeated_dialogue_taps_are_rejected(self):
+        res, message = await self.call("egret_run_steps", {"screenshotOnFailure": False, "steps": [
+            {"action": "tap", "qaName": "DialogueButtomMixed__talk_txt", "optional": True},
+            {"action": "tap", "qaName": "DialogueButtomMixed__talk_txt", "optional": True},
+            {"action": "tap", "qaName": "DialogueButtomMixed__talk_txt", "optional": True},
+        ]})
+        self.assertTrue(res["isError"])
+        self.assertIn("advance", message)
 
     async def test_install_extension(self):
         res, data = await self.call("egret_install_extension", {"browser": "chrome", "openPage": False})

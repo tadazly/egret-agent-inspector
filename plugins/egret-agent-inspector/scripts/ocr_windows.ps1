@@ -6,7 +6,7 @@ Add-Type -AssemblyName System.Runtime.WindowsRuntime
 
 $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
 $null = [Windows.Storage.FileAccessMode, Windows.Storage, ContentType = WindowsRuntime]
-$null = [Windows.Storage.Streams.IRandomAccessStreamWithContentType, Windows.Storage.Streams, ContentType = WindowsRuntime]
+$null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Storage.Streams, ContentType = WindowsRuntime]
 $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
 $null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
 $null = [Windows.Globalization.Language, Windows.Globalization, ContentType = WindowsRuntime]
@@ -24,7 +24,7 @@ function Await-WinRT($Operation, [Type]$ResultType) {
 
 $spec = Get-Content -LiteralPath $SpecPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $file = Await-WinRT ([Windows.Storage.StorageFile]::GetFileFromPathAsync($spec.image)) ([Windows.Storage.StorageFile])
-$stream = Await-WinRT ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
+$stream = Await-WinRT ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
 $decoder = Await-WinRT ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
 $bitmap = Await-WinRT ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
 
@@ -40,7 +40,9 @@ if ($null -eq $engine) {
     $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
 }
 if ($null -eq $engine) {
-    throw "Windows OCR 不可用；请在系统语言设置中安装中文（简体）或英文 OCR 语言包"
+    # Keep this script ASCII-only. Windows PowerShell 5.1 reads BOM-less scripts
+    # using the active ANSI code page, which can turn UTF-8 source into invalid syntax.
+    throw "Windows OCR is unavailable; install Simplified Chinese or English OCR language support in Windows Settings"
 }
 
 $result = Await-WinRT ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])

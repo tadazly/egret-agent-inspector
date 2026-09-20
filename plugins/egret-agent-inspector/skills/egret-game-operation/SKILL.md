@@ -20,6 +20,8 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 - 只知道“剧情按钮”“第二个 NPC”这类自然语言描述时，先调用一次 `egret_locate`。它会同时分析 `id/name/qaName/text/source`、子树标签和点击监听；用户描述的是可见按钮文字、文字可能烘焙在图片里时同一次调用传 `ocr: true`，结构化结果歧义后才会在 Windows/macOS 本地批量 OCR 候选区域。
 - `ambiguous: false` 才能直接使用 `recommendedTarget`；歧义时先根据 `evidence/labels` 缩小 `rootHash` 或补充描述。结构化信息与 OCR 仍无法消歧时，才用 `egret_screenshot` 截候选区域做视觉确认；禁止按第一项盲点，也不要用多轮 `find/get_tree` 枚举猜测。
 - `egret_scene` 的 `recommendedTarget` 只允许用于 `guide-hole`、`guide-continue` 或 `dialogue-continue`；普通按钮、地图入口和 NPC 必须用 `egret_find` 或 `egret_locate` 定位，不能从场景顺序推断目标。连续的对话/引导用 `egret_advance`；不要逐个尝试 `shap1/2/3/4`、箭头或遮罩碎片。
+- `egret_advance` 返回 `advanced: 0` 时看 `stopped/current/hint`：这表示工具明确没有点击，不要空等，也不要改点 `AUTO` 或生成重复 `talk_txt` 点击。重新调用一次 `egret_scene`，按返回状态定位选项或下一目标。
+- `egret_locate` 的 `role: task-tracker` 表示可先点任务追踪触发游戏导航；`role: quest-npc` 表示带任务气泡的 NPC。主线找人优先描述为“任务目标 NPC”，避免猜测中文角色名对应的内部英文资源名。
 - 结果中的 `hash` 可在后续调用中直接使用，界面重建后会失效，需要重新查找。
 - 不要用 `touchableOnly: true` 找按钮：弹窗关闭按钮常是 `touchEnabled` 为假的图片，点击由父容器接管，会被这个条件过滤掉。
 - 位置已知而定位条件不明时，用 `egret_screenshot` 看清位置，再用 `egret_hit_test` 按 `clientX`/`clientY` 反查该点的对象，取其 `hash` 操作。

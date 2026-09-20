@@ -119,6 +119,10 @@ def check_ocr(errors):
         errors.append("scripts/ocr_macos.swift: missing")
     if not powershell.is_file():
         errors.append("scripts/ocr_windows.ps1: missing")
+    else:
+        source = powershell.read_bytes()
+        if not source.startswith(b"\xef\xbb\xbf") and not source.isascii():
+            errors.append("scripts/ocr_windows.ps1: Windows PowerShell 5.1 requires UTF-8 BOM or ASCII-only source")
     xcrun = shutil.which("xcrun")
     if sys.platform == "darwin" and xcrun and subprocess.run(
             [xcrun, "swiftc", "-parse", str(swift)], capture_output=True).returncode:

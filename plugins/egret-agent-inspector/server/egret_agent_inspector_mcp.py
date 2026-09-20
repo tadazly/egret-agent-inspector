@@ -168,7 +168,7 @@ def run_fast_ocr(image_data, candidates, scale):
                 raise RuntimeError(decoded["error"])
         else:
             completed = subprocess.run(([binary, spec_path] if command is None else command + [spec_path]),
-                                       capture_output=True, text=True, timeout=5)
+                                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
             if completed.returncode:
                 raise RuntimeError(completed.stderr.strip() or "本地 OCR 执行失败")
             decoded = json.loads(completed.stdout)
@@ -343,7 +343,8 @@ TOOLS = {
     "egret_advance": (
         "仅推进当前可点任意处继续的 GuideMask 或 NPC 对话，自动使用这两类界面的 recommendedTarget；"
         "不用于选择普通按钮、地图入口或 NPC。"
-        "max 默认 1；批量推进会等文本稳定并保持均匀节奏，遇到选项、面板切换或点击后无变化即停止。",
+        "max 默认 1；批量推进会等文本稳定并保持均匀节奏，遇到选项、面板切换或点击后无变化即停止。"
+        "advanced=0 时会返回 stopped/current/hint 解释为何没有点击。",
         obj({"max": {"type": "integer", "description": "最多推进次数，默认 1，硬上限 12"},
              "waitMs": {"type": "integer", "description": "每次点击后等待界面变化，默认 1200，最大 5000"},
              "paceMs": {"type": "integer", "description": "连续两次点击的最小间隔，默认 320，最大 2000"},
@@ -383,7 +384,8 @@ TOOLS = {
         "page", "scene"),
     "egret_locate": (
         "按自然语言描述一次定位按钮、入口、列表项或 NPC。综合 id/name/qaName/text/source、子树标签和真实监听器评分，"
-        "返回 evidence、labels 与候选；只有唯一高置信匹配才给 recommendedTarget。ocr=true 时仅在结构化结果仍歧义后，"
+        "返回 evidence、labels、role/actionHint 与候选；任务追踪和带主线标记的 NPC 会明确标注。"
+        "只有唯一高置信匹配才给 recommendedTarget。ocr=true 时仅在结构化结果仍歧义后，"
         "对候选区域做一次本地快速 OCR 并重新评分，不上传图片。",
         obj({"description": {"type": "string", "description": "目标描述，如“任务面板中的剧情按钮”或“萨帕尼克 NPC"},
              "rootHash": {"type": "integer", "description": "可选，限定在已知面板/容器子树中"},
@@ -467,7 +469,7 @@ TOOLS = {
         "action 取 navigate/tap/drag/advance/setProps/waitFor/assert/evaluate/sleep/screenshot/dismissPopups/scene/openModule/closeModule，"
         "其余参数与对应 egret_* 工具相同；步骤可加 optional（失败不影响结论）和 retry（失败重试次数）；"
         "waitFor 未满足即失败；assert 用查询条件定位对象并校验 expect：{exists, visible, count, text, textContains, props:{属性:值}}。"
-        "也可用 file 传入 JSON 用例文件的绝对路径（格式 {name, steps}）。",
+        "也可用 file 传入 JSON 用例文件的绝对路径（格式 {name, steps}）。连续对白 tap 会被拒绝，必须用 advance。",
         obj({"steps": {"type": "array", "items": {"type": "object"}},
              "file": {"type": "string", "description": "JSON 用例文件绝对路径，与 steps 二选一"},
              "name": {"type": "string", "description": "用例名称"},
@@ -1078,6 +1080,18 @@ class McpServer:
             name = name or (spec.get("name") if isinstance(spec, dict) else None) or os.path.basename(args["file"])
         if not isinstance(steps, list) or not steps:
             raise ValueError("需要提供非空的 steps 数组或 file")
+        dialogue_taps = 0
+        for step in steps:
+            target = " ".join(str(step.get(key, "")) for key in ("qaName", "id", "name"))
+            if step.get("action") == "tap" and re.search(
+                    r"dialogue.*(?:talk_txt|bg)|(?:talk_txt|dialogue_text)", target, re.I):
+                dialogue_taps += 1
+                if dialogue_taps >= 3:
+                    raise ValueError(
+                        "连续对白不能用重复 tap 步骤；改用 "
+                        "{\"action\":\"advance\",\"max\":6,\"paceMs\":320,\"stableMs\":180}")
+            else:
+                dialogue_taps = 0
         tab_id = args.get("tabId")
         stop = args.get("stopOnFailure", True)
         results, image = [], None
@@ -1202,6 +1216,7 @@ def compact(res):
         return res
     out = {}
     for key in ("matched", "interrupted", "reason", "conditionIndex", "elapsedMs", "settledAfterMs", "total", "truncated", "method", "warnings",
+                "advanced", "hint", "current", "next",
                 "value", "url", "title", "props", "closed", "stopped", "stackDepth", "panelStack", "via", "moduleId", "ok",
                 "before", "after", "overlay"):
         if key in res and res[key] not in (None, []):

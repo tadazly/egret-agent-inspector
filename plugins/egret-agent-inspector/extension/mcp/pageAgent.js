@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.1.19";
+    var VERSION = "1.1.20";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -897,8 +897,13 @@
             if (!r || !pr || r.width * r.height > pr.width * pr.height * 0.45) return;
             var tag = className(o) + " " + (nameOf(o) || "") + " " + (bindId(o) || "") + " " + (qaNameOf(o) || "");
             var text = textOf(o) || "";
-            if (!interactionListenersOf(o).length || !text && !/button|btn|option|choice|select|item/i.test(tag)) return;
+            if (!interactionListenersOf(o).length) return;
             if (/auto|skip|speed|close|自动|跳过|倍速|关闭/i.test(tag + " " + text)) return;
+            // Dialogue text itself commonly owns the tap listener used to continue.
+            // Exclude known continuation labels; other interactive text or option-like
+            // controls remain decisions so advance still stops safely at choices.
+            if (/talk_txt|talk_name|dialogue.*text|txt.*talk|content.*text|op_tip/i.test(tag)) return;
+            if (!text && !/button|btn|option|choice|select|answer|reply|branch|item/i.test(tag)) return;
             found = true;
         });
         return found;
@@ -966,9 +971,15 @@
     function semanticTerms(description) {
         var raw = String(description || "").toLowerCase();
         var phrases = [];
-        ["进入游戏", "开始游戏", "立即前往", "回到基地", "返回基地"].forEach(function (phrase) {
-            if (normalizeSemantic(raw).indexOf(phrase) >= 0) phrases.push(phrase);
-        });
+        // Preserve semantic keywords as independent terms before removing filler.
+        // Otherwise Chinese task descriptions collapse into one unmatchable token.
+        ["任务目标", "主线目标", "剧情目标", "进入游戏", "开始游戏", "立即前往", "回到基地", "返回基地"]
+            .concat(Object.keys(SEMANTIC_ALIASES || {}).sort(function (a, b) { return b.length - a.length; }))
+            .forEach(function (phrase) {
+                if (raw.indexOf(phrase) < 0) return;
+                phrases.push(phrase);
+                raw = raw.split(phrase).join(" ");
+            });
         var ordinal = null;
         var ordinalMatch = raw.match(/第\s*([一二三四五六七八九十\d]+)\s*(?:个|项|只|名)?/);
         if (ordinalMatch) {
@@ -977,7 +988,7 @@
             if (ordinal) ordinal--;
         }
         raw = raw.replace(/第\s*[一二三四五六七八九十\d]+\s*(?:个|项|只|名)?/g, " ")
-            .replace(/点击|点一下|打开|选择|找到|查找|定位|进入|前往|当前|界面|里面|中的|按钮|控件|入口|图标|那个|这个|一个/g, " ");
+            .replace(/点击|点一下|打开|选择|找到|查找|查看|定位|进入|前往|当前|界面|里面|中的|按钮|控件|入口|图标|那个|这个|一个|目标|角色|地点|的|或|请/g, " ");
         var terms = raw.split(/[^0-9a-z\u3400-\u9fff]+/i).map(normalizeSemantic).filter(function (x) { return x.length >= 2; });
         terms = phrases.concat(terms);
         return { terms: terms.filter(function (x, i) { return terms.indexOf(x) === i; }), ordinal: ordinal };
@@ -991,6 +1002,10 @@
         "设置": ["setting", "settings", "option"], "登录": ["login", "signin"],
         "账号": ["account"], "客服": ["customer", "service"], "奖励": ["reward", "award"],
         "战斗": ["battle", "fight"], "自动": ["auto"], "跳过": ["skip"],
+        "地图": ["map"], "传送": ["transmap", "portal", "teleport", "transfer"],
+        "任务目标": ["cachetip", "maptip", "questmarker", "taskmarker"],
+        "主线目标": ["cachetip", "maptip", "questmarker", "taskmarker"],
+        "剧情目标": ["cachetip", "maptip", "questmarker", "taskmarker"],
         "进入游戏": ["start", "entergame"], "开始游戏": ["start", "entergame"],
         "立即前往": ["go", "goto", "enter"], "回到基地": ["backbase", "returnbase"], "返回基地": ["backbase", "returnbase"],
         "npc": ["npc", "storyinteractobject"]
@@ -1034,9 +1049,17 @@
 
     function semanticActionOwner(o, root) {
         var cur = o, fallback = null;
+        // All descendants of one StoryInteractObject represent the same NPC.
+        // Resolve the canonical NPC before considering child listeners.
+        for (var ownerDepth = 0; cur && ownerDepth < 8; ownerDepth++) {
+            var ownerTag = className(cur) + " " + (nameOf(cur) || "");
+            if (/storyInteractObject/i.test(ownerTag) || /(^|[_-])npc(?:[_-]|$)/i.test(ownerTag)) return cur;
+            if (cur === root || cur === getStage()) break;
+            cur = cur.parent;
+        }
+        cur = o;
         for (var depth = 0; cur && depth < 8; depth++) {
             var tag = className(cur) + " " + (nameOf(cur) || "") + " " + (bindId(cur) || "") + " " + (qaNameOf(cur) || "");
-            if (/storyInteractObject|npc/i.test(tag)) return cur;
             if (!fallback && /button|btn|item|tab|check|toggle|close/i.test(tag)) fallback = cur;
             if (interactionListenersOf(cur).length) return fallback || cur;
             if (cur === root || cur === getStage()) break;
@@ -1097,6 +1120,18 @@
                     evidence.push({ term: term, matchedAs: bestVariant, field: best.kind, value: best.value });
                 }
             });
+            var semanticBlob = entry.values.map(function (value) { return normalizeSemantic(value.value); }).join(" ");
+            var ownerTag = className(o) + " " + (nameOf(o) || "");
+            var npc = /storyInteractObject/i.test(ownerTag) || /(^|[_-])npc(?:[_-]|$)/i.test(ownerTag);
+            var questMarker = npc && /cachetip|maptip|questmarker|taskmarker/.test(semanticBlob);
+            var wantsQuestNpc = parsed.terms.some(function (term) {
+                return /^(任务目标|主线目标|剧情目标)$/.test(term);
+            });
+            if (questMarker && wantsQuestNpc) {
+                score += 30;
+                matchedTerms.push("任务目标");
+                evidence.push({ term: "任务目标", matchedAs: "quest-marker", field: "role", value: "quest-npc" });
+            }
             var description = normalizeSemantic(p.description);
             direct.forEach(function (value) {
                 var normalized = normalizeSemantic(value.value);
@@ -1110,6 +1145,13 @@
             info.labels = entry.values.filter(function (x) { return /text|source|qaName|id|name|ocr/.test(x.kind); })
                 .slice(0, 10).map(function (x) { return { field: x.kind, value: x.value }; });
             info.listeners = interactionListenersOf(o);
+            if (questMarker) {
+                info.role = "quest-npc";
+                info.actionHint = "主线任务标记 NPC，可直接点击 recommendedTarget";
+            } else if (/plotguidance|txtdesc/.test(semanticBlob)) {
+                info.role = "task-tracker";
+                info.actionHint = "先点击任务追踪触发游戏导航，再等待任务文字或地图状态变化";
+            }
             info._order = entry.order;
             var hit = info.center ? hitTest(info.center.x, info.center.y) : null;
             if (!reaches(o, hit)) {
@@ -1691,12 +1733,19 @@
             var paceMs = Math.min(Math.max(p.paceMs !== undefined ? +p.paceMs : 320, 0), 2000);
             var stableMs = Math.min(Math.max(p.stableMs !== undefined ? +p.stableMs : 180, 0), 1500);
             var method = p.method || (touchHandler() ? "touch" : "dom");
-            var steps = [], stopped = "limit", chainPanelHash = null, chainReason = null;
+            var steps = [], stopped = "limit", chainPanelHash = null, chainReason = null, current = null, hint = null;
             for (var n = 0; n < max; n++) {
                 var beforeScene = sceneInfo();
                 var target = continueTargetOf(beforeScene.top);
                 if (!target) {
-                    stopped = "no-continuation";
+                    var topTag = beforeScene.top && (className(beforeScene.top) + " " + (nameOf(beforeScene.top) || ""));
+                    var dialogue = /dialogueIntegration|dialogueButtomMixed|dialogueBottomMixed|npcDialogue|plotDialogue/i.test(topTag || "");
+                    var decision = dialogue && dialogueHasDecision(beforeScene.top);
+                    stopped = decision ? "decision-required" : "no-continuation";
+                    if (beforeScene.top) current = project(describe(beforeScene.top, { center: true }),
+                        ["hash", "className", "id", "name", "qaName", "text", "center", "currentState"]);
+                    hint = decision ? "当前对白需要语义选择，使用 egret_locate 定位选项" :
+                        "当前顶层界面不是可直接推进的对白或引导；调用 egret_scene 后定位下一目标";
                     break;
                 }
                 if (target.reason === "guide-hole") {
@@ -1760,8 +1809,11 @@
                 }
             }
             var rest = sceneInfo();
-            return { advanced: steps.length, stopped: stopped, steps: steps,
+            var result = { advanced: steps.length, stopped: stopped, steps: steps,
                 next: continueTargetOf(rest.top) };
+            if (current) result.current = current;
+            if (hint) result.hint = hint;
+            return result;
         },
 
         locate: function (p) {
