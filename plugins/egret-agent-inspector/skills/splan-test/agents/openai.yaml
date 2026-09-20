@@ -1,0 +1,6 @@
+interface:
+  display_name: "Splan 自动化测试"
+  short_description: "为 Splan 项目生成测试用例并自主排查缺陷"
+  default_prompt: "使用 $splan-test 为我指定的模块生成并运行测试，顺便排查其中的缺陷。"
+policy:
+  allow_implicit_invocation: true

@@ -1,6 +1,6 @@
 // Egret Agent Inspector MCP 桥接：运行在扩展 service worker 中，作为 WebSocket 客户端连接本机 MCP server，
 // 把 MCP 工具请求转发到目标标签页（在页面 MAIN world 中执行 mcp/pageAgent.js）。
-const AGENT_VERSION = "1.0.7";
+const AGENT_VERSION = "1.1.2";
 const AGENT_FILE = "mcp/pageAgent.js";
 const BASE_PORT = 17800;
 const PORT_COUNT = 5;
@@ -228,6 +228,42 @@ function waitTabComplete(tabId, timeoutMs) {
     });
 }
 
+// 裁剪/缩放截图：rect 为页面视口 CSS 像素（与 screenRect 一致），maxWidth<=0 表示不缩放
+async function resizeShot(dataUrl, format, quality, maxWidth, rect) {
+    const mimeType = `image/${format}`;
+    const raw = { mimeType: dataUrl.slice(5, dataUrl.indexOf(";")), data: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+    try {
+        const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+        // 截图分辨率是 CSS 像素 × devicePixelRatio，rect 用的是 CSS 像素，要按 dpr 换算
+        const ratio = rect && rect.dpr ? +rect.dpr : 1;
+        let sx = 0, sy = 0, sw = bitmap.width, sh = bitmap.height;
+        if (rect && rect.width > 0 && rect.height > 0) {
+            sx = Math.max(0, Math.round(rect.x * ratio));
+            sy = Math.max(0, Math.round(rect.y * ratio));
+            sw = Math.min(bitmap.width - sx, Math.round(rect.width * ratio));
+            sh = Math.min(bitmap.height - sy, Math.round(rect.height * ratio));
+        }
+        const scale = maxWidth > 0 && sw > maxWidth ? maxWidth / sw : 1;
+        const w = Math.max(1, Math.round(sw * scale));
+        const h = Math.max(1, Math.round(sh * scale));
+        if (scale === 1 && sw === bitmap.width && sh === bitmap.height) {
+            bitmap.close();
+            return { ...raw, width: sw, height: sh };
+        }
+        const canvas = new OffscreenCanvas(w, h);
+        canvas.getContext("2d").drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
+        bitmap.close();
+        const blob = await canvas.convertToBlob({ type: mimeType, quality: quality / 100 });
+        const buf = new Uint8Array(await blob.arrayBuffer());
+        let bin = "";
+        for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+        return { mimeType, data: btoa(bin), width: w, height: h };
+    } catch (e) {
+        log("截图缩放失败，返回原图", e);
+        return raw;
+    }
+}
+
 async function handleRequest(method, params) {
     switch (method) {
         case "listTabs": {
@@ -273,14 +309,13 @@ async function handleRequest(method, params) {
                 if (!win.focused) warnings.push("浏览器窗口不在前台，截图可能是过期画面；请以显示列表（find / get_tree）为准");
                 if (win.state === "minimized") warnings.push("浏览器窗口已最小化，截图不可用");
             } catch (e) { /* 窗口信息拿不到就不加警告 */ }
-            const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: params.format === "jpeg" ? "jpeg" : "png", quality: 80 });
-            const comma = dataUrl.indexOf(",");
-            return {
-                tabId: tab.id,
-                mimeType: dataUrl.slice(5, dataUrl.indexOf(";")),
-                data: dataUrl.slice(comma + 1),
-                warnings
-            };
+            // 截图按像素计费给模型，默认压到 jpeg + 限宽，够看清界面即可；要看细节就裁剪 rect
+            const format = params.format === "png" ? "png" : "jpeg";
+            const quality = params.quality === undefined ? 70 : Math.max(10, Math.min(100, +params.quality));
+            const maxWidth = params.maxWidth === undefined ? 900 : +params.maxWidth;
+            const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format, quality });
+            const shot = await resizeShot(dataUrl, format, quality, maxWidth, params.rect);
+            return { tabId: tab.id, mimeType: shot.mimeType, data: shot.data, width: shot.width, height: shot.height, warnings };
         }
         case "page": {
             const tab = await resolveTab(params.tabId);

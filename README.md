@@ -41,16 +41,22 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | `egret-game-operation` | 查找组件并执行点击、拖动、输入、等待和截图 |
 | `egret-e2e-test` | 编写、运行和报告 E2E 用例 |
 | `egret-bug-hunt` | 探索式操作游戏，发现报错、异常界面和无响应交互 |
+| `splan-control` | Splan 项目专属：模块事件直达界面、qaName 定位、连关强弹（页面有全局 `MFC` 时适用） |
+| `splan-test` | Splan 项目专属：生成并运行用例、自主探索找 bug、沉淀笔记 |
 
 ## MCP 工具
 
 | 类别 | 工具 |
 | --- | --- |
 | 连接 | `egret_extension_status`、`egret_install_extension`、`egret_reload_extension`、`egret_list_tabs`、`egret_navigate` |
-| 查询 | `egret_status`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
-| 操作 | `egret_tap`、`egret_drag`、`egret_set_props`、`egret_wait_for`、`egret_evaluate`、`egret_screenshot` |
-| 排错 | `egret_get_errors`：页面未捕获异常、Promise 拒绝、资源加载失败和 console.error/warn |
+| 查询 | `egret_scene`（界面快照：面板栈与可交互控件）、`egret_status`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
+| 操作 | `egret_tap`、`egret_drag`、`egret_dismiss_popups`、`egret_set_props`、`egret_wait_for`、`egret_evaluate`、`egret_screenshot` |
+| 排错 | `egret_get_errors`：页面未捕获异常、Promise 拒绝、资源加载失败和 console.error/warn；`egret_inspect_code`：控件背后的事件回调与源码片段 |
+| 记忆 | `egret_notes`：按游戏域名保存入口、定位条件、卡点解法、缺陷与耗时，跨会话复用 |
 | 测试 | `egret_run_steps`：批量执行步骤并断言，失败时附截图，并报告运行期间的页面错误 |
+| 项目专属 | `splan_call`：页面存在全局 `MFC` 时可用，模块事件开关界面、项目 QA 查找 |
+
+查询类工具支持 `fields` 只取需要的字段，`egret_screenshot` 默认压缩并限宽 900，可用 `rect` 只截局部，以控制上下文消耗。
 
 组件可按 `id`（代码/EXML 中绑定的属性名）、`qaName`、`text`、`className`、`name` 或图片 `source` 定位。
 `qaName` 为 `宿主短类名__部件名`（如 `SignPanel__btn_sign`）：组件自身写了 qaName 时直接使用，否则由绑定关系推导，因此正式构建中同样可用。
@@ -61,10 +67,12 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 
 ## 开发
 
+仓库根目录的 `.mcp.json` 会把本地这份 MCP server 挂进在本仓库打开的 Claude Code 会话，便于改完直接验证（改扩展文件后调用 `egret_reload_extension`）。
+
 ```powershell
 python scripts/validate.py
 python -m unittest discover -s tests -v
-python scripts/set_version.py 3.3.0
+python scripts/set_version.py 3.4.0
 ```
 
 发布：在本仓库中让 Codex 或 Claude Code “发布新版本”，由 `egret-agent-inspector-release` 技能完成。推送 `vX.Y.Z` tag 后，Release workflow 会创建 GitHub Release 并通知 [S Plugins](https://github.com/tadazly/s-plugins) 更新市场（需要仓库 Secret `S_PLUGINS_DISPATCH_TOKEN`）。

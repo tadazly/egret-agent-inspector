@@ -87,7 +87,7 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.install_dir = os.path.join(self.tmp.name, "extension")
         env = dict(os.environ, EGRET_MCP_PORT=str(PORT), EGRET_MCP_CONNECT_WAIT="2", PYTHONIOENCODING="utf-8",
-                   EGRET_EXTENSION_DIR=self.install_dir)
+                   EGRET_EXTENSION_DIR=self.install_dir, EGRET_NOTES_DIR=os.path.join(self.tmp.name, "notes"))
         self.proc = await asyncio.create_subprocess_exec(
             sys.executable, str(SERVER), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, env=env, limit=2 ** 24)
@@ -123,7 +123,8 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
     async def test_tools_listed(self):
         tools = {t["name"] for t in (await self.rpc("tools/list"))["tools"]}
         for name in ("egret_find", "egret_tap", "egret_extension_status", "egret_install_extension",
-                     "egret_reload_extension", "egret_run_steps"):
+                     "egret_reload_extension", "egret_run_steps", "egret_scene", "egret_dismiss_popups",
+                     "egret_inspect_code", "egret_notes", "splan_call"):
             self.assertIn(name, tools)
 
     async def test_status_without_extension(self):
@@ -142,6 +143,36 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(os.path.normcase(data["installDir"]), os.path.normcase(self.install_dir))
         self.assertTrue(os.path.isfile(os.path.join(self.install_dir, "manifest.json")))
         self.assertTrue(data["nextSteps"])
+
+    async def test_notes_roundtrip(self):
+        """笔记要能跨会话复用：写入后按关键词查得到，删除后查不到。"""
+        _, added = await self.call("egret_notes", {"action": "add", "scope": "demo", "entries": [
+            {"kind": "pitfall", "key": "notice-close", "summary": "公告面板的关闭按钮不可 touch，点父容器"}]})
+        self.assertEqual(added["added"], 1)
+        _, found = await self.call("egret_notes", {"action": "search", "scope": "demo", "q": "公告"})
+        self.assertEqual(found["notes"][0]["key"], "notice-close")
+        self.assertNotIn("updated", found["notes"][0])
+        await self.call("egret_notes", {"action": "remove", "scope": "demo", "key": "notice-close"})
+        _, gone = await self.call("egret_notes", {"action": "search", "scope": "demo", "q": "公告"})
+        self.assertEqual(gone["total"], 0)
+
+    async def test_optional_and_retry_steps(self):
+        """可选步骤失败不应判定用例失败：用于可能不出现的弹窗。"""
+        ext = FakeExtension()
+        await ext.connect()
+        try:
+            await self.call("egret_extension_status", {"waitSeconds": 2})
+            res, report = await self.call("egret_run_steps", {"screenshotOnFailure": False, "steps": [
+                {"action": "assert", "id": "missing", "optional": True},
+                {"action": "tap", "id": "btn_notice", "retry": 1},
+            ]})
+            self.assertFalse(res.get("isError"), report)
+            self.assertTrue(report["passed"])
+            self.assertEqual(report["skipped"], [0])
+            self.assertEqual(report["executed"], 2)
+        finally:
+            ext.task.cancel()
+            ext.writer.close()
 
     async def test_run_steps_with_fake_extension(self):
         ext = FakeExtension()

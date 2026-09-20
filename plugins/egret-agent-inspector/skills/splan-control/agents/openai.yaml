@@ -1,0 +1,6 @@
+interface:
+  display_name: "Splan 专属控制"
+  short_description: "用模块事件和 qaName 操作 Splan 项目的游戏"
+  default_prompt: "使用 $splan-control 打开我指定的模块界面并完成操作。"
+policy:
+  allow_implicit_invocation: true

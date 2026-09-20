@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "egret-agent-inspector": {
+      "command": "python",
+      "args": ["./plugins/egret-agent-inspector/server/egret_agent_inspector_mcp.py"]
+    }
+  }
+}

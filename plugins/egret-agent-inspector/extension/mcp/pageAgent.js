@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.0.7";
+    var VERSION = "1.1.2";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -201,6 +201,10 @@
         try {
             if (typeof o.text === "string") t = o.text;
             else if (typeof o.label === "string") t = o.label;
+            if (t === null || t === "") {
+                var w = ownerOf(o);
+                if (w && typeof w.text === "string" && w.text) t = w.text;
+            }
         } catch (e) {}
         if (t && t.length > 200) t = t.slice(0, 200) + "…";
         return t;
@@ -211,10 +215,36 @@
         var s;
         try {
             s = o.source;
+            if (!s) {
+                var w = ownerOf(o);
+                if (w && typeof w.url === "string") s = w.url;
+            }
         } catch (e) {
             return null;
         }
         return typeof s === "string" && s ? s : null;
+    }
+
+    // FairyGUI 这类框架把组件数据挂在显示对象的 $owner 上，显示对象本身没有 name/text/source
+    function ownerOf(o) {
+        try {
+            var w = o.$owner || o._owner;
+            return w && typeof w === "object" ? w : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function nameOf(o) {
+        var n = null;
+        try {
+            n = o.name || null;
+            if (!n) {
+                var w = ownerOf(o);
+                if (w && typeof w.name === "string") n = w.name || null;
+            }
+        } catch (e) {}
+        return n;
     }
 
     function visualAlpha(o) {
@@ -347,7 +377,7 @@
             hash: hashOf(o),
             className: className(o),
             id: bindId(o),
-            name: o.name || null
+            name: nameOf(o)
         };
         var qa = qaNameOf(o);
         if (qa) info.qaName = qa;
@@ -364,8 +394,21 @@
             info.stageRect = sr;
             info.screenRect = screenRect(sr);
         }
+        if (opts.center && info.stageRect) {
+            info.center = { x: round(info.stageRect.x + info.stageRect.width / 2), y: round(info.stageRect.y + info.stageRect.height / 2) };
+        }
         if (opts.path) info.path = pathOf(o);
         return info;
+    }
+
+    // 只保留调用方要的字段：批量结果的完整描述很容易把上下文撑爆
+    function project(info, fields) {
+        if (!fields || !fields.length) return info;
+        var out = {};
+        fields.forEach(function (k) {
+            if (info[k] !== undefined) out[k] = info[k];
+        });
+        return out;
     }
 
     function walk(root, fn) {
@@ -433,7 +476,7 @@
         walk(root, function (o) {
             if (visibleOnly && o !== stage && (!o.visible || o.alpha === 0)) return false;
             if (p.hash !== undefined && p.hash !== null && String(hashOf(o)) !== String(p.hash)) return;
-            if (mName && !mName(o.name)) return;
+            if (mName && !mName(nameOf(o))) return;
             if (mClass && !mClass(className(o))) return;
             if (mText && !mText(textOf(o))) return;
             if (mSource && !mSource(sourceOf(o))) return;
@@ -522,6 +565,173 @@
         return props;
     }
 
+    // 等目标的位置/尺寸/透明度在 settleMs 内不再变化：入场动画期间点上去会点偏
+    async function waitStable(o, settleMs) {
+        var key = null, since = Date.now(), deadline = since + Math.max(settleMs * 6, 2000);
+        while (Date.now() < deadline) {
+            var k = JSON.stringify(stageRect(o)) + "|" + visualAlpha(o);
+            if (k !== key) {
+                key = k;
+                since = Date.now();
+            } else if (Date.now() - since >= settleMs) {
+                return true;
+            }
+            await sleep(Math.min(80, settleMs));
+        }
+        return false;
+    }
+
+    function visibleChildren(o) {
+        var out = [];
+        for (var i = 0; i < numChildren(o); i++) {
+            var c = childAt(o, i);
+            if (c && c.visible && c.alpha !== 0) out.push(c);
+        }
+        return out;
+    }
+
+    // 当前界面结构：跳过只起包裹作用的根容器，按渲染顺序找出最上层那个“占地够大、有内容”的面板，
+    // 它的兄弟节点就是当前的面板/弹窗栈。只看舞台的直接子节点会停在空的层上。
+    function sceneInfo() {
+        var stage = requireStage();
+        var area = stage.stageWidth * stage.stageHeight;
+        var kids = visibleChildren(stage);
+        var root = kids.length === 1 && numChildren(kids[0]) ? kids[0] : stage;
+        var layers = visibleChildren(root);
+        var top = null;
+        var queue = [{ o: root, d: 0 }];
+        while (queue.length) {
+            var it = queue.pop();
+            var children = visibleChildren(it.o);
+            if (it.o !== root) {
+                var r = stageRect(it.o);
+                // 渲染顺序靠后的覆盖前面的，所以最后一个满足条件的就是最上层
+                if (r && r.width * r.height >= area * 0.2 && children.length >= 2) top = it.o;
+            }
+            if (it.d >= 4) continue;
+            for (var i = children.length - 1; i >= 0; i--) queue.push({ o: children[i], d: it.d + 1 });
+        }
+        var siblings = top && top.parent ? visibleChildren(top.parent) : layers;
+        var stack = siblings.filter(function (o) {
+            var r = stageRect(o);
+            return r && r.width * r.height >= area * 0.05;
+        });
+        if (!top) top = layers.length ? layers[layers.length - 1] : null;
+        return { stage: stage, layers: layers, stack: stack.length ? stack : siblings, top: top };
+    }
+
+    var CLOSE_RE = /close|关闭|關閉|quit|cancel|dismiss|btn_no|guanbi/i;
+    var CLOSE_TEXTS = ["关闭", "取消", "确定", "确认", "知道了", "我知道了", "好的", "×", "X", "x"];
+
+    // 弹窗里的关闭控件：命名五花八门，按关键字 + 体积 + 靠右上角的程度打分
+    function findCloseControl(panel) {
+        var pr = stageRect(panel);
+        if (!pr) return null;
+        var best = null;
+        walk(panel, function (o) {
+            if (o === panel) return;
+            if (!o.visible || o.alpha === 0) return false;
+            var r = stageRect(o);
+            if (!r || r.width < 10 || r.height < 10) return;
+            if (r.width * r.height > pr.width * pr.height * 0.35) return;
+            var tag = [bindId(o), qaNameOf(o), nameOf(o), sourceOf(o)].filter(Boolean).join(" ");
+            var t = textOf(o);
+            var score = 0;
+            if (CLOSE_RE.test(tag)) score += 10;
+            if (t && CLOSE_TEXTS.indexOf(String(t).trim()) >= 0) score += 8;
+            if (!score) return;
+            if (effectiveTouchable(o)) score += 2;
+            // 同分时取更靠右上、体积更小的，通常就是那个 X
+            score += (r.x - pr.x) / Math.max(pr.width, 1) - (r.y - pr.y) / Math.max(pr.height, 1);
+            if (!best || score > best.score) best = { o: o, score: score, rect: r };
+        });
+        return best;
+    }
+
+    // 没有关闭控件时的兜底：点面板包围盒之外的遮罩空白处
+    function maskPointOutside(panel) {
+        var stage = getStage();
+        var pr = stageRect(panel);
+        if (!pr) return null;
+        var w = stage.stageWidth, h = stage.stageHeight;
+        var pts = [[w * 0.5, h * 0.06], [w * 0.5, h * 0.94], [w * 0.06, h * 0.5], [w * 0.94, h * 0.5],
+            [w * 0.06, h * 0.06], [w * 0.94, h * 0.06], [w * 0.06, h * 0.94], [w * 0.94, h * 0.94]];
+        for (var i = 0; i < pts.length; i++) {
+            var x = round(pts[i][0]), y = round(pts[i][1]);
+            if (x >= pr.x && x <= pr.x + pr.width && y >= pr.y && y <= pr.y + pr.height) continue;
+            var hit = hitTest(x, y);
+            if (!hit || isSelfOrAncestor(panel, hit)) continue;
+            var hr = stageRect(hit);
+            var big = hr && hr.width >= w * 0.8 && hr.height >= h * 0.8;
+            // 点到的必须像遮罩（铺满或命名含 mask/bg），否则可能是主界面，乱点会误触发功能
+            if (big || /mask|遮罩|bg|背景|shade|cover/i.test(className(hit) + " " + (nameOf(hit) || "") + " " + (sourceOf(hit) || ""))) {
+                return { x: x, y: y, hit: hit };
+            }
+        }
+        return null;
+    }
+
+    function eventMaps(o) {
+        var maps = [];
+        try {
+            // Egret 5 把监听表存在 $EventDispatcher 上，并压成数字键：0=目标、1=普通监听、2=捕获监听
+            var props = o.$EventDispatcher_props_ || o.$EventDispatcher;
+            if (props) {
+                [props.eventsMap, props.captureEventsMap, props[1], props[2]].forEach(function (m) {
+                    if (m && typeof m === "object" && maps.indexOf(m) < 0) maps.push(m);
+                });
+            }
+        } catch (e) {}
+        return maps;
+    }
+
+    function fnSource(fn, maxChars) {
+        var src;
+        try {
+            src = Function.prototype.toString.call(fn);
+        } catch (e) {
+            return null;
+        }
+        src = src.replace(/\s+/g, " ").trim();
+        return src.length > maxChars ? src.slice(0, maxChars) + "…" : src;
+    }
+
+    // 对象自身类（不含引擎基类）上定义的方法名，便于按名字在项目源码里检索
+    function methodsOf(o) {
+        var proto = Object.getPrototypeOf(o);
+        if (!proto) return [];
+        if (/^(egret|eui|fairygui)\./.test(className(o) || "")) return [];
+        var names = [];
+        try {
+            Object.getOwnPropertyNames(proto).forEach(function (k) {
+                if (k === "constructor") return;
+                var d = Object.getOwnPropertyDescriptor(proto, k);
+                if (d && typeof d.value === "function") names.push(k);
+            });
+        } catch (e) {}
+        return names.slice(0, 80);
+    }
+
+    function listenersOf(o, maxChars) {
+        var out = [];
+        eventMaps(o).forEach(function (map) {
+            Object.keys(map).forEach(function (type) {
+                var bins = map[type];
+                if (!bins) return;
+                (bins.length !== undefined ? Array.prototype.slice.call(bins) : [bins]).forEach(function (bin) {
+                    if (!bin || typeof bin.listener !== "function") return;
+                    out.push({
+                        type: type,
+                        fn: bin.listener.name || null,
+                        thisClass: bin.thisObject ? className(bin.thisObject) : null,
+                        source: fnSource(bin.listener, maxChars)
+                    });
+                });
+            });
+        });
+        return out;
+    }
+
     function sleep(ms) {
         return new Promise(function (r) {
             setTimeout(r, ms);
@@ -558,6 +768,28 @@
         try {
             if (stage.$hitTest) return stage.$hitTest(x, y) || stage;
         } catch (e) {}
+        return null;
+    }
+
+    // 命中 h 是否等价于点到了 target：目标自身、其子节点或其祖先（点击常由父容器接管）
+    function reaches(target, h) {
+        return !!(target && h && (isSelfOrAncestor(target, h) || isSelfOrAncestor(h, target)));
+    }
+
+    // 在目标包围盒内寻找一个真正能命中目标的点：中心被遮挡、或中心落在名字条等空白处时使用
+    function probePoint(target, skipCenter) {
+        var r = stageRect(target);
+        if (!r || r.width < 2 || r.height < 2) return null;
+        var fs = [0.5, 0.35, 0.65, 0.2, 0.8];
+        for (var i = 0; i < fs.length; i++) {
+            for (var j = 0; j < fs.length; j++) {
+                if (skipCenter && i === 0 && j === 0) continue;
+                var x = round(r.x + r.width * fs[j]);
+                var y = round(r.y + r.height * fs[i]);
+                var h = hitTest(x, y);
+                if (reaches(target, h)) return { point: { x: x, y: y }, hit: h };
+            }
+        }
         return null;
     }
 
@@ -636,15 +868,22 @@
             var since = p.sinceTs !== undefined && p.sinceTs !== null ? +p.sinceTs : 0;
             var types = p.types && p.types.length ? p.types : null;
             var buf = errorBuffer();
+            // 已知噪音（如引擎告警、缺图刷屏）交给调用方用 exclude 折叠，避免淹没真正的信号
+            var excl = (p.exclude || []).map(function (x) { return String(x).toLowerCase(); });
+            var excluded = 0;
             var list = buf.filter(function (e) {
                 if (e.lastAt < since) return false;
-                return !types || types.some(function (t) {
-                    return e.type === t || e.type.indexOf(t) === 0;
-                });
+                if (types && !types.some(function (t) { return e.type === t || e.type.indexOf(t) === 0; })) return false;
+                var msg = String(e.message || "").toLowerCase();
+                if (excl.some(function (x) { return msg.indexOf(x) >= 0; })) {
+                    excluded++;
+                    return false;
+                }
+                return true;
             });
             var limit = p.limit !== undefined ? +p.limit : 50;
-            var out = { total: list.length, collectingSince: window.__egretInspectorErrorHooks || null, now: Date.now(),
-                errors: list.slice(-limit) };
+            var out = { total: list.length, excluded: excluded, collectingSince: window.__egretInspectorErrorHooks || null,
+                now: Date.now(), errors: list.slice(-limit) };
             if (p.clear) window.__egretInspectorErrors = [];
             return out;
         },
@@ -692,7 +931,8 @@
             var visibleOnly = !!p.visibleOnly;
             var withBounds = p.bounds !== false;
             var count = 0, truncated = false;
-            var rootNode = describe(root, { bounds: withBounds, path: true });
+            var fields = p.fields && p.fields.length ? p.fields : null;
+            var rootNode = project(describe(root, { bounds: withBounds, path: !fields }), fields);
             count++;
             var stack = [{ o: root, node: rootNode, depth: 0 }];
             while (stack.length) {
@@ -711,6 +951,7 @@
                     }
                     var cn = describe(c, { bounds: withBounds });
                     delete cn.onStageVisible;
+                    cn = project(cn, fields);
                     item.node.children.push(cn);
                     count++;
                     stack.push({ o: c, node: cn, depth: item.depth + 1 });
@@ -724,12 +965,13 @@
             var list = query(p);
             var limit = p.limit !== undefined ? +p.limit : 20;
             var keys = p.props || [];
+            var fields = p.fields && p.fields.length ? p.fields : null;
             return {
                 total: list.length,
                 results: list.slice(0, limit).map(function (o) {
-                    var info = describe(o, { path: true });
+                    var info = describe(o, { path: !fields, center: true });
                     if (keys.length) info.props = readProps(o, keys);
-                    return info;
+                    return project(info, fields);
                 })
             };
         },
@@ -771,22 +1013,32 @@
         tap: async function (p) {
             requireStage();
             var target = resolveTarget(p);
-            var pt = stagePointOf(p, target);
             var method = p.method || (touchHandler() ? "touch" : "dom");
             var warnings = [];
+            var settle = p.settleMs !== undefined ? +p.settleMs : 0;
+            if (settle && target) await waitStable(target, settle);
+            var pt = stagePointOf(p, target);
             var hit = hitTest(pt.x, pt.y);
             // 命中目标自身、其子节点或其祖先（点击常由父容器接管）都算能点到。某些 UI 框架（如 FairyGUI）
             // 的父链上带着 visible=false 的容器，此时 effectiveVisible 会误判，不要据此判断
-            var reachable = target && hit && (isSelfOrAncestor(target, hit) || isSelfOrAncestor(hit, target));
+            var reachable = reaches(target, hit);
             if (target && !reachable && !effectiveVisible(target)) warnings.push("目标对象在舞台上不可见");
             if (target && hit && method !== "event" && !reachable) {
                 var blocker = className(hit) + (bindId(hit) ? "#" + bindId(hit) : "");
-                // 挡住了还照点只会点到遮挡物上，不如直接失败，让调用方先处理遮挡再重试
-                if (!p.force) {
-                    throw new Error("目标被遮挡，未执行点击：该位置命中的是 " + blocker +
-                        "（通常是弹窗或全屏遮罩，先关闭它再重试；确需照点可传 force: true）");
+                // 中心点点不到不等于点不到：名字条、相邻控件、半透明装饰常压住中心，先在包围盒内换个点
+                var alt = p.probe === false || p.stageX !== undefined || p.clientX !== undefined ? null : probePoint(target, true);
+                if (alt) {
+                    pt = alt.point;
+                    hit = alt.hit;
+                    reachable = true;
+                    warnings.push("中心点被 " + blocker + " 遮挡，改点包围盒内未被遮挡的位置");
+                } else if (!p.force) {
+                    // 整个包围盒都点不到，多半是弹窗或全屏遮罩压在上面；报错让调用方先处理遮挡
+                    throw new Error("目标被遮挡，未执行点击：该位置命中的是 " + blocker + "（hash " + hashOf(hit) +
+                        "），包围盒内没有找到未被遮挡的点。先关闭遮挡物（egret_dismiss_popups）再重试；确需照点可传 force: true");
+                } else {
+                    warnings.push("点击位置命中的对象不在目标内部（可能被遮挡）：" + blocker);
                 }
-                warnings.push("点击位置命中的对象不在目标内部（可能被遮挡）：" + blocker);
             }
             var times = p.count || 1;
             for (var i = 0; i < times; i++) {
@@ -865,6 +1117,8 @@
                         matched: true,
                         state: state,
                         elapsedMs: Date.now() - start,
+                        // 最后一次视觉变化发生在何时：可直接作为该界面的动画时长/settle 参考值
+                        settledAfterMs: stableMs && stableSince ? stableSince - start : undefined,
                         total: list.length,
                         results: list.slice(0, 5).map(function (o) {
                             return describe(o, { path: true });
@@ -876,6 +1130,308 @@
                 }
                 await sleep(interval);
             }
+        },
+
+        scene: function (p) {
+            var si = sceneInfo();
+            var stage = si.stage;
+            var maxItems = p.maxItems !== undefined ? +p.maxItems : 30;
+            var brief = function (o) {
+                var d = describe(o, { center: true });
+                var out = project(d, ["hash", "className", "id", "name", "qaName", "text", "center"]);
+                var r = d.stageRect;
+                if (r) {
+                    out.size = [round(r.width), round(r.height)];
+                    if (r.width >= stage.stageWidth * 0.9 && r.height >= stage.stageHeight * 0.9) out.fullscreen = true;
+                }
+                return out;
+            };
+            var out = {
+                stageSize: [stage.stageWidth, stage.stageHeight],
+                layers: si.layers.map(function (l) {
+                    return { hash: hashOf(l), className: className(l), name: nameOf(l), children: numChildren(l) };
+                }),
+                panelStack: si.stack.map(brief),
+                top: si.top ? brief(si.top) : null,
+                items: []
+            };
+            if (!si.top || maxItems <= 0) return out;
+            var cand = [];
+            walk(si.top, function (o) {
+                if (o === si.top) return;
+                if (!o.visible || o.alpha === 0) return false;
+                if (cand.length >= maxItems * 4) return false;
+                var r = stageRect(o);
+                if (!r || r.width < 8 || r.height < 8) return;
+                var t = textOf(o);
+                var tag = className(o) + " " + (nameOf(o) || "") + " " + (bindId(o) || "");
+                var interactive = effectiveTouchable(o) || /button|btn|item|tab|check|close|toggle/i.test(tag);
+                if (!interactive && !t) return;
+                cand.push({ o: o, r: r, interactive: interactive });
+            });
+            cand.sort(function (a, b) {
+                return (b.interactive ? 1 : 0) - (a.interactive ? 1 : 0);
+            });
+            var probed = 0;
+            out.items = cand.slice(0, maxItems).map(function (c) {
+                var item = project(describe(c.o, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center"]);
+                var hit = item.center ? hitTest(item.center.x, item.center.y) : null;
+                if (!reaches(c.o, hit)) {
+                    // 点不到中心不等于点不到：先试包围盒内其他点，仍不行才标记为被遮挡
+                    var alt = probed++ < 8 ? probePoint(c.o, true) : null;
+                    if (alt) item.center = alt.point;
+                    else {
+                        item.occluded = true;
+                        item.blocker = hit ? className(hit) + "#" + hashOf(hit) : null;
+                    }
+                }
+                return item;
+            });
+            out.itemsTruncated = cand.length > maxItems;
+            return out;
+        },
+
+        dismissPopups: async function (p) {
+            var max = p.max !== undefined ? +p.max : 6;
+            var method = p.method || (touchHandler() ? "touch" : "dom");
+            var until = p.until || {};
+            var closed = [], stopped = "done";
+            for (var n = 0; n < max; n++) {
+                if (hasCriteria(until) && query(Object.assign({ visibleOnly: true }, until)).length) {
+                    stopped = "until";
+                    break;
+                }
+                var si = sceneInfo();
+                var panel = si.top;
+                if (!panel) {
+                    stopped = "empty";
+                    break;
+                }
+                var hash = hashOf(panel);
+                var entry = { panel: className(panel) + (nameOf(panel) ? "#" + nameOf(panel) : ""), hash: hash };
+                var btn = findCloseControl(panel);
+                if (btn) {
+                    var alt = probePoint(btn.o, false);
+                    var pt = alt ? alt.point : { x: round(btn.rect.x + btn.rect.width / 2), y: round(btn.rect.y + btn.rect.height / 2) };
+                    entry.via = "close";
+                    entry.control = bindId(btn.o) || qaNameOf(btn.o) || nameOf(btn.o) || sourceOf(btn.o) || className(btn.o);
+                    await performGesture([pt], method, 50, btn.o);
+                } else {
+                    var mp = maskPointOutside(panel);
+                    if (!mp) {
+                        entry.ok = false;
+                        entry.note = "面板内没有可识别的关闭控件，包围盒之外也没有可点的遮罩";
+                        closed.push(entry);
+                        stopped = "stuck";
+                        break;
+                    }
+                    entry.via = "mask";
+                    entry.point = { x: mp.x, y: mp.y };
+                    await performGesture([{ x: mp.x, y: mp.y }], method, 50, null);
+                }
+                // 等这个面板真的消失；没消失就别接着点，否则会反复点同一个
+                var gone = false;
+                for (var w = 0; w < 12 && !gone; w++) {
+                    await sleep(150);
+                    var now = sceneInfo().top;
+                    gone = !now || hashOf(now) !== hash;
+                }
+                entry.ok = gone;
+                closed.push(entry);
+                if (!gone) {
+                    entry.note = "点击后该面板仍在最上层";
+                    stopped = "stuck";
+                    break;
+                }
+            }
+            var rest = sceneInfo();
+            return {
+                closed: closed,
+                stopped: stopped,
+                remaining: rest.top ? project(describe(rest.top, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center"]) : null,
+                stackDepth: rest.stack.length
+            };
+        },
+
+        inspectCode: function (p) {
+            var o = resolveTarget(p);
+            if (!o) throw new Error("需要提供 hash 或查询条件");
+            var maxChars = p.maxChars !== undefined ? +p.maxChars : 400;
+            var out = {
+                hash: hashOf(o), className: className(o), id: bindId(o), qaName: qaNameOf(o),
+                methods: methodsOf(o), listeners: listenersOf(o, maxChars), ancestorListeners: []
+            };
+            // 按钮的点击常由父面板统一处理，往上找几层才看得到真正的业务回调
+            var cur = o.parent, depth = 0;
+            while (cur && depth < (p.ancestorDepth !== undefined ? +p.ancestorDepth : 4)) {
+                var ls = listenersOf(cur, maxChars).filter(function (l) {
+                    return /touch|tap|mouse|click/i.test(l.type);
+                });
+                if (ls.length) out.ancestorListeners.push({ className: className(cur), id: bindId(cur), hash: hashOf(cur), listeners: ls });
+                cur = cur.parent;
+                depth++;
+            }
+            var info = bindInfo(o);
+            if (info) out.host = { className: className(info.host), key: info.key, hash: hashOf(info.host), methods: methodsOf(info.host) };
+            return out;
+        },
+
+        // ---- Splan 项目专属：页面存在全局 MFC 时才可用；接口按 probe 现场探测，缺失时退回事件派发 ----
+        splan: async function (p) {
+            var W = window;
+            if (!W.MFC) throw new Error("当前页面没有全局 MFC 对象，splan_call 不适用于此项目");
+            var mm = W.MFC.moduleManager || null;
+            var consts = (W.xls && W.xls.ModuleConst) || W.ModuleConst || null;
+            var ge = W.GameEvent || (W.xls && W.xls.GameEvent) || null;
+            var tool = W.VilGeneralTool || (W.xls && W.xls.VilGeneralTool) || null;
+            var action = p.action || "probe";
+
+            // ModuleConst 里既有常量也有工具函数，只取常量部分
+            function constEntries() {
+                var out = [];
+                if (!consts) return out;
+                Object.keys(consts).forEach(function (k) {
+                    var v;
+                    try {
+                        v = consts[k];
+                    } catch (e) {
+                        return;
+                    }
+                    if (v === null || typeof v === "function" || typeof v === "object") return;
+                    out.push({ name: k, id: v });
+                });
+                return out;
+            }
+
+            function moduleId(m) {
+                if (m === undefined || m === null) throw new Error("需要提供 module");
+                if (typeof m === "number" || /^\d+$/.test(String(m))) return +m;
+                var entries = constEntries();
+                var hit = entries.filter(function (e) { return e.name === m; })[0] ||
+                    entries.filter(function (e) { return e.name.toLowerCase() === String(m).toLowerCase(); })[0];
+                if (!hit) throw new Error("模块常量表里没有 " + m + "，先用 action=listModules 查实际名字");
+                return hit.id;
+            }
+
+            // 用项目自己的接口判断模块是否已打开，比“界面变了没”准确
+            function moduleState(id) {
+                if (!mm || typeof mm.checkModuleOpen !== "function") return { known: false };
+                var r;
+                try {
+                    r = mm.checkModuleOpen(id, true);
+                } catch (e) {
+                    return { known: false, error: e && e.message };
+                }
+                if (r && typeof r === "object") return { known: true, open: true, panel: r };
+                return { known: true, open: !!r, panel: null };
+            }
+
+            function dispatch(type, data) {
+                if (tool && typeof tool.GlobalDispatchEvent === "function") {
+                    tool.GlobalDispatchEvent(type, data);
+                    return "VilGeneralTool.GlobalDispatchEvent";
+                }
+                var stage = getStage();
+                if (stage && stage.dispatchEventWith) {
+                    stage.dispatchEventWith(type, false, data);
+                    return "stage.dispatchEventWith";
+                }
+                throw new Error("没有可用的全局事件派发接口，请用 egret_evaluate 直接调用项目接口");
+            }
+
+            if (action === "probe") {
+                return {
+                    mfc: true,
+                    stageFound: !!getStage(),
+                    moduleManager: mm ? {
+                        className: className(mm),
+                        methods: methodsOf(mm).filter(function (k) { return k.charAt(0) !== "_"; })
+                    } : null,
+                    moduleConstCount: constEntries().length,
+                    events: ge ? { open: ge.OPEN_MODULE || null, close: ge.CLOSE_MODULE || null } : null,
+                    api: {
+                        openModule: !!(mm && mm.openModule),
+                        closeModule: !!(mm && mm.closeModule),
+                        checkModuleOpen: !!(mm && mm.checkModuleOpen),
+                        findByQaName: !!(tool && tool.FindByQaName),
+                        popupMgr: !!W.MFC.popupMgr
+                    },
+                    mfcKeys: Object.keys(W.MFC).slice(0, 40)
+                };
+            }
+
+            if (action === "listModules") {
+                var filter = p.filter ? String(p.filter).toLowerCase() : null;
+                var limit = p.limit !== undefined ? +p.limit : 60;
+                var list = constEntries().filter(function (e) {
+                    return !filter || e.name.toLowerCase().indexOf(filter) >= 0 || String(e.id).indexOf(filter) >= 0;
+                });
+                if (!list.length && !filter) throw new Error("没有找到模块常量表（ModuleConst）");
+                return { total: list.length, modules: list.slice(0, limit) };
+            }
+
+            if (action === "isOpen") {
+                var sid = moduleId(p.module);
+                var st = moduleState(sid);
+                return { module: p.module, moduleId: sid, known: st.known, open: !!st.open,
+                    panel: st.panel && st.panel.stage ? describe(st.panel, { center: true }) : null };
+            }
+
+            if (action === "openModule" || action === "closeModule") {
+                var opening = action === "openModule";
+                var id = moduleId(p.module);
+                var fn = mm && mm[opening ? "openModule" : "closeModule"];
+                var via;
+                if (typeof fn === "function" && !p.event) {
+                    fn.call(mm, id, p.payload);
+                    via = "MFC.moduleManager." + (opening ? "openModule" : "closeModule");
+                } else {
+                    var evt = p.event || (ge && (opening ? ge.OPEN_MODULE : ge.CLOSE_MODULE)) || (opening ? "open_module" : "close_module");
+                    via = dispatch(evt, p.payload !== undefined ? p.payload : id) + " (" + evt + ")";
+                }
+                var waitMs = p.waitMs !== undefined ? +p.waitMs : 4000;
+                var deadline = Date.now() + waitMs;
+                var state = { known: false }, ok = false;
+                while (Date.now() < deadline) {
+                    await sleep(150);
+                    state = moduleState(id);
+                    if (!state.known) break;
+                    if (opening ? state.open : !state.open) {
+                        ok = true;
+                        break;
+                    }
+                }
+                var panel = state.panel && state.panel.stage ? state.panel : null;
+                if (ok && panel) await waitStable(panel, 200);
+                var top = sceneInfo().top;
+                return {
+                    via: via, module: p.module, moduleId: id,
+                    ok: state.known ? ok : null,
+                    panel: panel ? describe(panel, { path: true, center: true }) : null,
+                    top: top ? project(describe(top, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center"]) : null
+                };
+            }
+
+            if (action === "qa") {
+                var qa = p.qaName;
+                if (!qa) throw new Error("需要提供 qaName");
+                if (tool && typeof tool.FindByQaName === "function") {
+                    var found = null;
+                    try {
+                        found = tool.FindByQaName(qa);
+                    } catch (e) {}
+                    if (found) return { via: "VilGeneralTool.FindByQaName", node: describe(found, { path: true, center: true }) };
+                }
+                var list = query({ qaName: qa, match: p.match || "exact", visibleOnly: p.visibleOnly !== false });
+                return { via: "displayList", total: list.length, node: list.length ? describe(list[0], { path: true, center: true }) : null };
+            }
+
+            if (action === "dispatch") {
+                if (!p.event) throw new Error("需要提供 event");
+                return { via: dispatch(p.event, p.payload), event: p.event };
+            }
+
+            throw new Error("未知的 action：" + action);
         },
 
         evaluate: async function (p) {

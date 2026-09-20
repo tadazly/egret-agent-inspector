@@ -1,5 +1,18 @@
 # 更新日志
 
+## 3.4.0
+
+- 新增 `egret_scene`：一次拿到面板/弹窗栈与最上层面板里的可交互控件（含中心点和遮挡判定），替代反复截图试探。
+- 新增 `egret_dismiss_popups`：连续关闭强制弹窗，没有关闭控件时点面板之外的遮罩，并确认每个弹窗确实消失。
+- 新增 `egret_inspect_code`：查看控件的事件回调、函数源码片段和所属面板方法，用于定位业务代码与缺陷位置。
+- 新增 `egret_notes`：按游戏域名保存入口、定位条件、卡点解法、缺陷和动画耗时，跨会话复用。
+- 新增 `splan_call` 与 `splan-control`、`splan-test` 两个 skill：页面存在全局 `MFC` 时，用模块事件直达界面并生成测试。
+- 降低上下文与截图消耗：`egret_find`/`egret_get_tree` 支持 `fields`，截图默认 jpeg 限宽 900 并支持 `rect` 局部截取。
+- `egret_tap` 支持 `settleMs` 等动画结束，中心点被遮挡时自动改点包围盒内未被遮挡的位置。
+- `egret_wait_for` 返回 `settledAfterMs`（实测动画耗时）；`egret_get_errors` 支持 `exclude` 折叠已知噪音。
+- `egret_run_steps` 步骤支持 `optional` 和 `retry`，新增 `dismissPopups`、`scene` 两种 action。
+- 定位支持 FairyGUI 等框架：`name`/`text`/`source` 会回落到显示对象的 `$owner`。
+
 ## 3.3.0
 
 - 新增 `qaName` 定位：结果中总会给出 `宿主短类名__部件名` 形式的标识，组件自身写了 qaName 时直接使用，可直接用于测试用例。
