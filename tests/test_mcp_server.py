@@ -419,14 +419,16 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
 
 class PluginRemovalTest(unittest.IsolatedAsyncioTestCase):
     async def test_plugin_dir_removable_while_running(self):
-        """卸载插件时 server 可能仍在运行，插件目录不能被其占用（Windows 会锁定进程的 cwd）。"""
+        """完整 Node→Python 启动链运行时也不能占用插件目录。"""
         with tempfile.TemporaryDirectory() as tmp:
             plugin = os.path.join(tmp, "plugin")
             shutil.copytree(SERVER.parents[1], plugin, ignore=shutil.ignore_patterns("__pycache__"))
+            node = shutil.which("node")
+            self.assertTrue(node, "node is required")
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, os.path.join(".", "server", SERVER.name), cwd=plugin,
+                node, os.path.join(".", "scripts", "start_mcp.js"), cwd=plugin,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                env=dict(os.environ, EGRET_MCP_PORT=str(PORT + 1)))
+                env=dict(os.environ, EGRET_PYTHON=sys.executable, EGRET_MCP_PORT=str(PORT + 1)))
             try:
                 proc.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n')
                 await proc.stdin.drain()

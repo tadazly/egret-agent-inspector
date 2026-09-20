@@ -2,6 +2,7 @@
 "use strict";
 
 const path = require("path");
+const os = require("os");
 const { spawn, spawnSync } = require("child_process");
 
 function pythonCandidates(platform = process.platform, env = process.env) {
@@ -39,8 +40,12 @@ function main() {
         process.exitCode = 1;
         return;
     }
+    // Codex 从插件目录启动本进程。Windows 会锁定进程的 cwd，即使 Python 子进程已经
+    // 切走，仍会导致卸载无法删除缓存目录；解析完绝对路径后父子进程都改用用户目录。
+    const runtimeCwd = os.homedir();
+    process.chdir(runtimeCwd);
     const child = spawn(candidate.command, [...candidate.args, server], {
-        cwd: pluginRoot,
+        cwd: runtimeCwd,
         env: process.env,
         stdio: "inherit",
         windowsHide: true,
