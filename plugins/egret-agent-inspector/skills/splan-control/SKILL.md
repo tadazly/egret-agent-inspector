@@ -1,26 +1,26 @@
 ---
 name: splan-control
-description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象时适用）：用模块事件直达界面、按 qaName 定位组件、连关开场强弹、借项目自身调试接口完成操作。在该项目中打开某个模块、走一段游戏流程或排查点击无响应时使用。
+description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象时适用）：按 qaName 操作真实 UI、处理弹窗，并在定向调试时使用模块与项目接口。用于打开界面、走游戏流程或排查点击无响应。
 ---
 
 # Splan 游戏操作
 
-前提：`splan_call {"action":"probe"}` 返回 `mfc: true`。不满足说明不是本项目，改用 `egret-game-operation`。
+前提：`splan_call {"action":"probe"}` 返回 `MFC: true`。不满足说明不是本项目，改用 `egret-game-operation`。
 
 ## 开场三步
 
 1. `egret_notes {"action":"search","q":"<模块或流程名>"}`：先看历史笔记里有没有入口、定位条件和已知坑。
-2. `splan_call {"action":"probe"}`：确认本次可用的调试接口；`toolMethods` 是项目自己的方法名，可直接用 `egret_evaluate` 调。
+2. `splan_call {"action":"probe"}`：确认模块、QA 与 debug 能力。
 3. `egret_scene`：看清当前面板栈。被弹窗压住时 `egret_dismiss_popups {"until":{"qaName":"<主界面组件>"}}`。
 
-## 直达目标界面
+## 调试直达
 
-逐级点击慢且容易被强弹打断，优先用模块事件：
+仅在用户要求调试直达或测试不验证玩家入口时使用模块事件；真实游玩遵循 `splan-test`：
 
 - `splan_call {"action":"listModules","filter":"<关键词>"}` 找模块常量名。
 - `splan_call {"action":"openModule","module":"<常量名>"}`；返回的 `dispatched` 是实际派发的事件与载荷，`changed`/`top` 是界面结果。
 - 界面没变时不要重复派发：用 `egret_inspect_code` 看入口按钮的点击回调，或 `egret_evaluate` 读项目接口，确认正确的事件名/载荷后用 `event`/`payload` 覆盖，并把结论写进 `egret_notes`。
-- 关闭用 `closeModule`。确实没有模块事件的界面才回到点击流程。
+- `closeModule` 可用于恢复无法通过 UI 关闭的阻塞界面，但不计入玩家路径验收。
 
 ## 定位与操作
 
@@ -40,3 +40,5 @@ description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象�
 ```
 
 `kind` 取 `entry`（入口怎么进）、`locator`（好用的定位条件）、`pitfall`（卡点与解法）、`timing`（实测动画耗时）、`fact`（已知噪音等事实）。一条一句话，同 key 覆盖，不要越记越长。
+
+真实 UI 路线用 `route`，模块直达用 `shortcut`，恢复操作用 `recovery`，不要混写。

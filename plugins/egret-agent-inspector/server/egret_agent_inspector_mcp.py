@@ -18,6 +18,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import struct
 import sys
 import time
@@ -52,10 +53,11 @@ WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游戏的显示对象，依赖浏览器中的 Egret Agent Inspector 扩展。
 - 首次使用或工具提示扩展未连接时，先调用 egret_extension_status；未连接则按 egret-install-extension skill 用 egret_install_extension 为用户安装扩展。
 - 显示对象以 hash（Egret hashCode）标识；id 是组件在代码/EXML 中绑定的属性名。stageRect 为舞台坐标，screenRect 为页面视口 CSS 像素坐标。
-- 常用流程：egret_scene（看清当前界面）→ egret_find / egret_inspect_code → egret_tap / egret_drag → egret_wait_for；可复现的用例用 egret_run_steps 批量执行。
+- 常用流程：egret_scene → egret_find / egret_interactables → egret_tap / egret_drag → egret_wait_for；内容更新用 changed，多种结果用 anyOf，已确认流程用 egret_run_steps。
 - 省上下文：优先用 egret_scene 和 egret_find 的 fields 取需要的字段，不要动辄 egret_get_tree 全量展开；截图只在需要看画面时用，判断状态一律以显示列表为准。
 - 界面被弹窗挡住时用 egret_dismiss_popups；想知道某个控件背后是哪段代码用 egret_inspect_code。
 - 探索开始前先用 egret_notes 查已有笔记，踩坑、确认入口或测出动画耗时后写回，避免下次重新摸索。
+- splan_test_command 仅在用户本轮明确授权且 probe 确认加载 debug.js 时使用。
 - 未指定 tabId 时自动选用最近使用或当前激活的含 Egret 游戏的标签页。"""
 
 
@@ -81,9 +83,15 @@ MATCH_PROPS = {
 }
 FIELDS_PROP = {"type": "array", "items": {"type": "string"},
                "description": "只返回这些字段以节省上下文，如 [\"hash\",\"qaName\",\"text\",\"center\"]；"
-                              "可选 hash/className/id/name/qaName/text/source/visible/onStageVisible/touchable/center/stageRect/screenRect/path"}
+                              "可选 hash/className/id/name/qaName/text/source/visible/onStageVisible/touchable/enabled/selected/currentState/center/stageRect/screenRect/path"}
 TARGET_PROPS = dict(MATCH_PROPS)
 TARGET_PROPS["index"] = {"type": "integer", "description": "按查询条件匹配到多个对象时取第几个，默认 0"}
+WAIT_CONDITION_PROPS = dict(MATCH_PROPS,
+                            state={"type": "string", "enum": ["visible", "exists", "hidden", "gone", "changed"]},
+                            watchProps={"type": "array", "items": {"type": "string"},
+                                        "description": "changed 观察的属性，默认 text/selected/currentState/enabled"},
+                            interruptOnOverlay={"type": "boolean", "description": "该条件等待时是否允许顶层界面提前中断"},
+                            **{"from": {"type": "object", "description": "changed 的已知旧属性；省略时以开始等待时的状态为基线"}})
 
 
 def obj(props, required=None):
@@ -107,11 +115,15 @@ TOOLS = {
     "egret_status": (
         "获取页面中 Egret 引擎状态：引擎版本、舞台尺寸、canvas 在页面中的位置、显示对象数量等。",
         obj({}), "page", "status"),
+    "egret_runtime_stats": (
+        "采集轻量运行态指标：Chromium JS heap（可用时）、Egret 显示对象与交互监听数量。"
+        "用于同一稳定检查点的多次对比；单次升高不能证明内存泄漏。",
+        obj({}), "page", "runtimeStats"),
     "egret_get_tree": (
         "获取显示对象树（从舞台或指定 hash 开始），每个节点包含 hash、className、id、name、text、可见性、坐标。",
         obj({"hash": {"type": "integer", "description": "子树根节点 hash，默认舞台"},
              "depth": {"type": "integer", "description": "展开深度，默认 3"},
-             "maxNodes": {"type": "integer", "description": "最多返回节点数，默认 300"},
+             "maxNodes": {"type": "integer", "description": "最多返回节点数，默认 80，硬上限 120"},
              "visibleOnly": {"type": "boolean", "description": "跳过不可见节点，默认 false"},
              "bounds": {"type": "boolean", "description": "是否计算坐标，默认 true"},
              "fields": FIELDS_PROP}),
@@ -138,6 +150,7 @@ TOOLS = {
                  method={"type": "string", "enum": ["touch", "dom", "dom-touch", "event"]},
                  holdMs={"type": "integer", "description": "按下到抬起的间隔，默认 50"},
                  count={"type": "integer", "description": "连续点击次数，默认 1"},
+                 details={"type": "boolean", "description": "返回完整 target/hit 详情；默认 false，只返回操作所需字段"},
                  settleMs={"type": "integer", "description": "先等目标位置/透明度稳定这么久再点，用于入场动画期间，如 300"},
                  probe={"type": "boolean", "description": "中心点被遮挡时自动在包围盒内改点未被遮挡的位置，默认 true"},
                  force={"type": "boolean", "description": "被遮挡时仍然点击（点到的是遮挡物），默认 false"})),
@@ -165,13 +178,27 @@ TOOLS = {
                  dispatchChange={"type": "boolean"}), ["props"]),
         "page", "setProps"),
     "egret_wait_for": (
-        "等待满足查询条件的显示对象出现/消失。state: visible（默认，可见）、exists（存在于舞台）、hidden（没有可见的匹配对象）、gone（没有任何匹配对象）。",
+        "等待显示对象出现、消失或内容变化。state: visible（默认）、exists、hidden、gone、changed；"
+        "anyOf 可并行等待多个条件；等待 hidden/gone 时出现可推进的引导或顶层界面会提前返回 interrupted。普通点击建议 timeoutMs 2000-3000。",
         obj(dict(MATCH_PROPS,
-                 state={"type": "string", "enum": ["visible", "exists", "hidden", "gone"]},
+                 state=WAIT_CONDITION_PROPS["state"],
+                 watchProps=WAIT_CONDITION_PROPS["watchProps"],
+                 **{"from": WAIT_CONDITION_PROPS["from"]},
+                 anyOf={"type": "array", "items": {"type": "object", "properties": WAIT_CONDITION_PROPS},
+                        "description": "候选条件数组，任一满足即返回 conditionIndex"},
+                 interruptOnOverlay={"type": "boolean", "description": "检测到新的可交互顶层界面时提前返回；hidden/gone 默认 true"},
+                 overlayGraceMs={"type": "integer", "description": "开始检测顶层界面的宽限时间，默认 600"},
                  timeoutMs={"type": "integer", "description": "超时，默认 10000，最大 120000"},
                  intervalMs={"type": "integer", "description": "轮询间隔，默认 200"},
                  stableMs={"type": "integer", "description": "匹配对象的位置、尺寸和透明度保持不变多久才算满足，用于等待打开动画结束，如 300"})),
         "page", "waitFor"),
+    "egret_advance": (
+        "推进当前可点任意处继续的 GuideMask 或 NPC 对话，自动使用 recommendedTarget。"
+        "max 默认 1；自动游玩可短批量推进连续对白，遇到选择、普通面板或点击后无变化即停止。",
+        obj({"max": {"type": "integer", "description": "最多推进次数，默认 1，硬上限 12"},
+             "waitMs": {"type": "integer", "description": "每次点击后等待界面变化，默认 1200，最大 5000"},
+             "method": {"type": "string", "enum": ["touch", "dom", "dom-touch"]}}),
+        "page", "advance"),
     "egret_evaluate": (
         "在页面中执行 JavaScript 表达式，或语句块（需显式 return，支持 await），可用辅助变量：$stage（舞台）、$obj(hash)（按 hash 取对象）、"
         "$find({id,name,className,text,...})（查询对象数组）、$describe(obj)。返回值会被安全序列化。",
@@ -199,9 +226,15 @@ TOOLS = {
         "screenshot", None),
     "egret_scene": (
         "界面快照：舞台各层、当前面板/弹窗栈（最上层在最后）以及最上层面板里的可交互控件，"
-        "每个控件带中心点和是否被遮挡。进入新界面、不确定当前状态或被弹窗挡住时先调它，比 egret_get_tree 省得多。",
-        obj({"maxItems": {"type": "integer", "description": "最多返回多少个控件，默认 30；0 表示只要面板栈"}}),
+        "每个控件带中心点、遮挡和状态；GuideMask 与点按继续的 NPC 对话直接返回 recommendedTarget。",
+        obj({"maxItems": {"type": "integer", "description": "最多返回多少个控件，默认 20，硬上限 50；0 表示只要面板栈"}}),
         "page", "scene"),
+    "egret_interactables": (
+        "列出当前顶层界面中实际注册了 touch/tap/mouse/click 回调的可见对象；返回监听类型、函数名、状态、中心点与遮挡。"
+        "引导/对话优先返回可直接点击的 recommendedTarget，地图代理监听则返回对应容器。",
+        obj({"rootHash": {"type": "integer", "description": "限定子树；默认当前顶层面板"},
+             "limit": {"type": "integer", "description": "最多返回条数，默认 30，硬上限 80"}}),
+        "page", "interactables"),
     "egret_dismiss_popups": (
         "连续关闭最上层弹窗：优先点面板内的关闭控件，没有关闭控件就点面板之外的遮罩，每关一个都确认它确实消失。"
         "until 给出查询条件时匹配到即停止（例如主界面的某个组件）。返回关掉了哪些、卡在哪个。",
@@ -221,10 +254,10 @@ TOOLS = {
         "缺陷和对应代码位置、动画耗时等，下次直接查，不必重新摸索。action：search（默认）/add/list/remove。",
         {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["search", "add", "list", "remove"]},
-            "q": {"type": "string", "description": "搜索关键词（匹配 key/summary/detail）"},
-            "kind": {"type": "string", "description": "按类型过滤：entry 入口、locator 定位、pitfall 卡点与解法、bug 缺陷、timing 耗时、suggestion 项目侧建议"},
+            "q": {"type": "string", "description": "搜索关键词；空格分词，命中任一词并按相关度排序"},
+            "kind": {"type": "string", "description": "按类型过滤：route 真实 UI 路线、checkpoint 稳定检查点、shortcut 调试直达、recovery 恢复、entry、locator、pitfall、bug、timing、fact、suggestion"},
             "entries": {"type": "array", "items": {"type": "object"},
-                        "description": "add 用：[{kind, key, summary, detail}]，key 相同则覆盖；summary 一句话讲清，不要贴大段内容"},
+                        "description": "add 用：[{kind,key,summary,detail,start,steps,expect,environment,lastVerifiedAt}]；route 的 steps 只记录稳定 UI 定位，不保存 hash"},
             "key": {"type": "string", "description": "remove 用：要删除的 key"},
             "scope": {"type": "string", "description": "笔记库名，默认按当前标签页域名"},
             "limit": {"type": "integer", "description": "最多返回条数，默认 20"}}},
@@ -242,10 +275,26 @@ TOOLS = {
              "waitMs": {"type": "integer", "description": "派发后等待界面变化的毫秒数，默认 2500"},
              "limit": {"type": "integer"}}),
         "page", "splan"),
+    "splan_test_command": (
+        "执行 Splan debug.js 提供的账号测试命令（如 addItem/addCoin/addEnergy）。仅当用户在当前任务明确授权，且页面确认加载 config/debug.js 时可用；会修改账号数据。",
+        obj({"subCmd": {"type": "string", "description": "cs_test_cmd.subCmd"},
+             "value1": {"description": "测试命令参数 1"},
+             "value2": {"description": "测试命令参数 2"},
+             "timeoutMs": {"type": "integer", "description": "等待服务端响应，默认 10000，最大 30000"},
+             "authorized": {"type": "boolean", "description": "仅用户本轮明确允许测试命令时传 true"}},
+            ["subCmd", "authorized"]),
+        "page", "splanTestCommand"),
     "egret_extension_status": (
         "检查浏览器扩展是否已连接：返回已连接的浏览器、扩展版本及是否需要更新（outdated）；未连接时附带本机浏览器、默认浏览器和扩展加载情况（local）。首次使用前调用。",
         {"type": "object", "properties": {"waitSeconds": {"type": "number", "description": "未连接时等待扩展连接的秒数，默认 8"}}},
         "extensionStatus", None),
+    "egret_reopen_browser": (
+        "浏览器闪退或已关闭时，用本机已安装的 Chromium 浏览器重新打开原 http(s) 页面；随后用 egret_extension_status 等扩展重连。",
+        {"type": "object", "properties": {
+            "url": {"type": "string", "description": "要恢复的完整 http(s) URL"},
+            "browser": {"type": "string", "enum": ["default", "chrome", "edge", "brave"], "description": "目标浏览器"}},
+         "required": ["url"]},
+        "reopenBrowser", None),
     "egret_install_extension": (
         "把插件自带的扩展复制到固定安装目录，并打开浏览器扩展管理页、复制目录路径到剪贴板。"
         "返回 ok=false 时安装失败；ok=true 时把 nextSteps 转告用户完成“加载已解压的扩展程序”。扩展已加载时只更新文件，随后调用 egret_reload_extension。",
@@ -259,7 +308,7 @@ TOOLS = {
         "reloadExtension", None),
     "egret_run_steps": (
         "按顺序批量执行 E2E 步骤并汇总结果，默认遇到失败即停止并附失败截图。steps 每项为 {action, ...参数}，"
-        "action 取 navigate/tap/drag/setProps/waitFor/assert/evaluate/sleep/screenshot/dismissPopups/scene/openModule/closeModule，"
+        "action 取 navigate/tap/drag/advance/setProps/waitFor/assert/evaluate/sleep/screenshot/dismissPopups/scene/openModule/closeModule，"
         "其余参数与对应 egret_* 工具相同；步骤可加 optional（失败不影响结论）和 retry（失败重试次数）；"
         "waitFor 未满足即失败；assert 用查询条件定位对象并校验 expect：{exists, visible, count, text, textContains, props:{属性:值}}。"
         "也可用 file 传入 JSON 用例文件的绝对路径（格式 {name, steps}）。",
@@ -273,7 +322,7 @@ TOOLS = {
 
 STEP_ACTIONS = {
     "navigate": "egret_navigate", "tap": "egret_tap", "drag": "egret_drag", "setProps": "egret_set_props",
-    "waitFor": "egret_wait_for", "evaluate": "egret_evaluate", "screenshot": "egret_screenshot",
+    "advance": "egret_advance", "waitFor": "egret_wait_for", "evaluate": "egret_evaluate", "screenshot": "egret_screenshot",
     "dismissPopups": "egret_dismiss_popups", "scene": "egret_scene",
 }
 QUERY_KEYS = ("hash", "id", "name", "className", "text", "source", "qaName", "match", "rootHash", "index")
@@ -282,7 +331,7 @@ QUERY_KEYS = ("hash", "id", "name", "className", "text", "source", "qaName", "ma
 # ---------------------------------------------------------------- 探索笔记（跨会话记忆）
 
 NOTES_ROOT = os.environ.get("EGRET_NOTES_DIR") or os.path.join(os.path.expanduser("~"), ".egret-agent-inspector", "notes")
-NOTE_FIELDS = ("kind", "key", "summary", "detail")
+NOTE_FIELDS = ("kind", "key", "summary", "detail", "start", "steps", "expect", "environment", "lastVerifiedAt")
 
 
 def notes_file(scope):
@@ -311,6 +360,24 @@ def write_notes(path, items):
     with open(path, "w", encoding="utf-8") as f:
         for it in items:
             f.write(json.dumps(it, ensure_ascii=False) + "\n")
+
+
+def validate_route_steps(steps):
+    forbidden_actions = {"openModule", "closeModule", "dispatch", "evaluate", "setProps", "testCommand"}
+
+    def walk(value):
+        if isinstance(value, dict):
+            if "hash" in value or "rootHash" in value:
+                raise ValueError("route.steps 不得保存临时 hash")
+            if value.get("action") in forbidden_actions or any(key in forbidden_actions for key in value):
+                raise ValueError("route.steps 只能记录真实 UI 操作")
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(steps)
 
 
 # ---------------------------------------------------------------- WebSocket 服务端
@@ -645,6 +712,10 @@ class McpServer:
                 loop = asyncio.get_running_loop()
                 return await loop.run_in_executor(None, browser_extension.install,
                                                   args.get("browser", "default"), args.get("openPage", True) is not False)
+            if bridge_method == "reopenBrowser":
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, browser_extension.open_url,
+                                                  args.get("browser", "default"), args["url"])
             if bridge_method == "reloadExtension":
                 res = await self.bridge.request("reloadExtension", {}, timeout)
                 await asyncio.sleep(1)
@@ -653,10 +724,24 @@ class McpServer:
                 return status
             if bridge_method == "page":
                 tab_id = args.pop("tabId", None)
+                if page_method == "getTree":
+                    args["depth"] = min(max(int(args.get("depth", 3)), 0), 8)
+                    args["maxNodes"] = min(max(int(args.get("maxNodes", 80)), 1), 120)
+                elif page_method == "find":
+                    args["limit"] = min(max(int(args.get("limit", 20)), 1), 50)
+                elif page_method == "scene":
+                    args["maxItems"] = min(max(int(args.get("maxItems", 20)), 0), 50)
+                elif page_method == "interactables":
+                    args["limit"] = min(max(int(args.get("limit", 30)), 1), 80)
+                elif page_method == "advance":
+                    args["max"] = min(max(int(args.get("max", 1)), 1), 12)
+                    args["waitMs"] = min(max(int(args.get("waitMs", 1200)), 100), 5000)
+                elif page_method == "splan" and args.get("action") == "listModules":
+                    args["limit"] = min(max(int(args.get("limit", 60)), 1), 200)
                 if page_method == "waitFor":
                     args["timeoutMs"] = min(int(args.get("timeoutMs", 10000)), 120000)
                     timeout = args["timeoutMs"] / 1000.0 + 15
-                if page_method in ("tap", "drag", "dismissPopups", "splan"):
+                if page_method in ("tap", "drag", "advance", "dismissPopups", "splan", "splanTestCommand"):
                     # 这些方法内部会等界面变化（动画、弹窗消失、模块 js 加载），比普通查询慢得多
                     timeout = REQUEST_TIMEOUT + 30
                 res = await self.bridge.request("page", {"tabId": tab_id, "method": page_method, "params": args}, timeout)
@@ -699,12 +784,20 @@ class McpServer:
         if action in ("search", "list"):
             q = (args.get("q") or "").lower()
             kind = args.get("kind")
-            hits = [it for it in items
-                    if (not kind or it.get("kind") == kind)
-                    and (not q or q in json.dumps(it, ensure_ascii=False).lower())]
-            hits.sort(key=lambda it: it.get("updated", 0), reverse=True)
+            terms = [term for term in re.split(r"\s+", q) if term]
+            scored = []
+            for item in items:
+                if kind and item.get("kind") != kind:
+                    continue
+                text = json.dumps(item, ensure_ascii=False).lower()
+                score = sum(1 for term in terms if term in text)
+                if terms and not score:
+                    continue
+                scored.append((score, item))
+            scored.sort(key=lambda pair: (pair[0], pair[1].get("updated", 0)), reverse=True)
+            hits = [item for _, item in scored]
             return {"scope": scope, "total": len(hits), "notes": [{k: v for k, v in it.items() if k in NOTE_FIELDS}
-                                                                  for it in hits[:limit]]}
+                                                                   for it in hits[:limit]]}
         path = notes_file(scope or "default")
         items = read_notes(path)
         if action == "add":
@@ -717,13 +810,21 @@ class McpServer:
                     raise ValueError("每条笔记都需要 summary")
                 key = e.get("key") or e["summary"][:40]
                 item = {"kind": e.get("kind", "fact"), "key": key, "summary": e["summary"], "updated": now}
-                if e.get("detail"):
-                    item["detail"] = e["detail"]
+                for field in NOTE_FIELDS:
+                    if field not in ("kind", "key", "summary") and e.get(field) is not None:
+                        value = e[field]
+                        if field == "steps" and (not isinstance(value, list) or len(value) > 30):
+                            raise ValueError("route.steps 必须是最多 30 项的数组")
+                        if field == "steps" and item["kind"] == "route":
+                            validate_route_steps(value)
+                        if len(json.dumps(value, ensure_ascii=False)) > 8000:
+                            raise ValueError("笔记字段过长：%s" % field)
+                        item[field] = value
                 # 同一个 key 直接覆盖：笔记要越记越准，不是越记越多
                 items = [it for it in items if it.get("key") != key or it.get("kind") != item["kind"]]
                 items.append(item)
             write_notes(path, items)
-            return {"scope": scope, "added": len(entries), "total": len(items), "file": path}
+            return {"scope": scope, "added": len(entries), "total": len(items)}
         if action == "remove":
             key = args.get("key")
             kept = [it for it in items if it.get("key") != key]
@@ -890,8 +991,9 @@ def compact(res):
     if not isinstance(res, dict):
         return res
     out = {}
-    for key in ("matched", "elapsedMs", "settledAfterMs", "total", "method", "warnings", "value", "url", "title",
-                "props", "closed", "stopped", "stackDepth", "panelStack", "via", "moduleId", "ok"):
+    for key in ("matched", "interrupted", "reason", "conditionIndex", "elapsedMs", "settledAfterMs", "total", "truncated", "method", "warnings",
+                "value", "url", "title", "props", "closed", "stopped", "stackDepth", "panelStack", "via", "moduleId", "ok",
+                "before", "after", "overlay"):
         if key in res and res[key] not in (None, []):
             out[key] = res[key]
     target = res.get("target") or (res.get("results") or [None])[0]

@@ -1,5 +1,11 @@
 # 更新日志
 
+## 3.5.0
+
+- Codex MCP 改用跨平台 Node 启动器，自动选择 Windows 与 macOS/Linux 可用的 Python 3.8+ 命令。
+- 引导与 NPC 对话会返回可立即点击的目标，并支持短批量推进；等待复用中的对话面板消失也不再空等完整超时。
+- 新增浏览器闪退恢复与疑似内存泄漏排查技能，以及重开页面、轻量运行态采样工具。
+
 ## 3.4.2
 
 - 修复只有 `python3`、没有 `python` 命令的系统无法启动 Codex MCP server，导致 marketplace 安装后只加载 Skills、不暴露 `egret_*` tools 的问题。

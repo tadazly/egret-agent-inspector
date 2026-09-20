@@ -18,6 +18,8 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 - 定位条件因项目而异，一种找不到就换一种：文字做在图片里时 `text` 无效，类名被压缩或组件自定义时 `className` 无效，`id` 也可能整个项目都是空。
 - 结果里的 `path` 是给人看的，其中的层级名可能来自 id、`name` 或类名，不能原样当查询条件；要精确定位就用 `hash`。
 - 不清楚界面结构时，用 `egret_get_tree` 从某个面板的 `hash` 开始浏览，并限制 `depth` 和 `maxNodes`；不要从舞台全量展开。
+- 想知道当前哪些对象实际注册了点击回调时，用 `egret_interactables`；它也能发现由地图或父容器统一接管的交互。
+- `recommendedTarget` 出现时直接点击其 `stagePoint`。连续的 `dialogue-continue` / `guide-continue` 用 `egret_advance`；不要逐个尝试 `shap1/2/3/4`、箭头或遮罩碎片。
 - 结果中的 `hash` 可在后续调用中直接使用，界面重建后会失效，需要重新查找。
 - 不要用 `touchableOnly: true` 找按钮：弹窗关闭按钮常是 `touchEnabled` 为假的图片，点击由父容器接管，会被这个条件过滤掉。
 - 位置已知而定位条件不明时，用 `egret_screenshot` 看清位置，再用 `egret_hit_test` 按 `clientX`/`clientY` 反查该点的对象，取其 `hash` 操作。
@@ -27,19 +29,19 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 - 点击用 `egret_tap`，默认 `method: "touch"` 走引擎真实命中检测。目标被遮挡时工具直接报错且不会点击，错误信息里会给出挡住它的对象：先关掉它再重试，不要改用 `force` 或 `event` 硬点。
 - 滚动列表或拖动用 `egret_drag`，以列表对象为起点并给出 `dy`/`dx`。
 - 输入文本用 `egret_set_props` 设置 `text`，并加 `dispatchChange: true`。
-- 每次操作后用 `egret_wait_for` 等待预期界面出现（`visible`）或消失（`hidden`/`gone`），不要用固定等待代替。面板有打开动画时加 `stableMs: 300`，等动画结束再操作其中的组件。
+- 每次操作后用 `egret_wait_for` 等待预期状态；普通点击限 2–3 秒，只有明确的加载、网络或战斗切换才延长。内容更新用 `changed`，多种结果用 `anyOf`；返回 `interrupted` 时立即执行 `overlay.recommendedTarget` 或处理顶层弹窗。面板有动画时加 `stableMs: 300`。
 - 需要视觉确认时调用 `egret_screenshot`，但判断界面状态一律以显示列表为准：浏览器窗口不在前台时截图可能是过期画面（此时结果会带 `warnings`）。
 - `egret_evaluate` 用于读取模块数据、调用项目自身的调试接口；不要借它直接改写业务状态来“让界面看起来正确”，除非用户明确要求。
 - 操作后如果界面没有预期变化，用 `egret_get_errors` 看这段时间页面是否报错，再决定是重试还是报告缺陷。
 
 ## 借助项目自身的调试接口
 
-逐级点击进入深层面板既慢又容易被弹窗打断。若项目提供了调试或测试接口，优先用 `egret_evaluate` 直接到达目标界面，再用本插件的工具操作和断言：
+仅在用户明确要求调试直达，或测试不包含入口验收时，才用项目调试接口到达目标界面：
 
 - 模块/面板的打开与关闭事件（如按模块 id 派发全局事件），比点击导航稳定得多；
 - 项目自带的 QA 查找、状态设置或跳转接口。
 
-先用 `egret_evaluate` 探测这些接口是否存在再使用，不存在时回到点击流程。这类接口通常只在 debug 构建中可用，用例中要写明依赖。
+真实玩家路径禁止用调试接口打开模块。界面无法通过 UI 关闭且阻塞任务时，可用模块关闭接口恢复，但要保留卡点证据。
 
 ## 弹窗
 

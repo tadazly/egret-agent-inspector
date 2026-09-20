@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "egret-agent-inspector": {
-      "command": "python3",
-      "args": ["./server/egret_agent_inspector_mcp.py"],
+      "command": "node",
+      "args": ["./scripts/start_mcp.js"],
       "cwd": ".",
       "enabled": true,
       "default_tools_approval_mode": "approve",

@@ -4,6 +4,8 @@
 import json
 import py_compile
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -52,8 +54,8 @@ def check_codex(errors):
     server = mcp.get("mcpServers", {}).get(NAME, {})
     if not server:
         errors.append(f".mcp.json: mcpServers.{NAME} is required")
-    elif server.get("command") != "python3":
-        errors.append(f".mcp.json: mcpServers.{NAME}.command must be python3")
+    elif server.get("command") != "node" or server.get("args") != ["./scripts/start_mcp.js"]:
+        errors.append(f".mcp.json: mcpServers.{NAME} must use the cross-platform Node launcher")
     for arg in server.get("args", []):
         if arg.startswith("./") and not (PLUGIN / arg).is_file():
             errors.append(f".mcp.json: missing {arg}")
@@ -96,6 +98,17 @@ def check_python(errors):
             errors.append(str(e))
 
 
+def check_node(errors):
+    launcher = PLUGIN / "scripts" / "start_mcp.js"
+    node = shutil.which("node")
+    if not launcher.is_file():
+        errors.append("scripts/start_mcp.js: missing")
+    elif not node:
+        errors.append("node: required to launch Codex MCP server")
+    elif subprocess.run([node, "--check", str(launcher)], capture_output=True).returncode:
+        errors.append("scripts/start_mcp.js: syntax error")
+
+
 def check_page_agent(errors):
     page = (PLUGIN / "extension" / "mcp" / "pageAgent.js").read_text(encoding="utf-8")
     bridge = (PLUGIN / "extension" / "mcp" / "bridge.js").read_text(encoding="utf-8")
@@ -114,6 +127,7 @@ def main():
     check_claude(errors)
     check_skills(errors)
     check_python(errors)
+    check_node(errors)
     check_page_agent(errors)
     if errors:
         print("validation failed:", *("- " + e for e in errors), sep="\n", file=sys.stderr)

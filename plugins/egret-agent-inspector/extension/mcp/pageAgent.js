@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.1.4";
+    var VERSION = "1.1.9";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -388,6 +388,12 @@
         info.visible = !!o.visible;
         info.onStageVisible = effectiveVisible(o);
         info.touchable = effectiveTouchable(o);
+        ["enabled", "selected", "currentState"].forEach(function (k) {
+            try {
+                var v = o[k];
+                if (v !== undefined && (typeof v === "boolean" || typeof v === "string" || typeof v === "number")) info[k] = v;
+            } catch (e) {}
+        });
         info.childCount = numChildren(o);
         if (opts.bounds !== false) {
             var sr = stageRect(o);
@@ -606,7 +612,7 @@
                 var r = stageRect(it.o);
                 // 优先保留更深的面板，避免遍历到后面的 uiLayer/topLayer 等基础层时把真实弹窗覆盖掉。
                 var tag = className(it.o) + " " + (nameOf(it.o) || "") + " " + (bindId(it.o) || "");
-                var semantic = /panel|pop|dialog|view|window|fui/i.test(tag);
+                var semantic = /panel|pop|dialog|alert|view|window|fui/i.test(tag);
                 var structural = layers.indexOf(it.o) >= 0;
                 if (r && r.width * r.height >= area * 0.2 && children.length && (semantic || structural)) {
                     var score = (semantic ? 10000000 : 0) + it.d * 100000 + serial;
@@ -639,7 +645,7 @@
             if (!cur || !layer) return;
             var layerTag = className(layer) + " " + (nameOf(layer) || "") + " " + (bindId(layer) || "");
             var panelTag = className(cur) + " " + (nameOf(cur) || "") + " " + (bindId(cur) || "");
-            if (!/ui|top|popup|modal|dialog/i.test(layerTag) && !/panel|pop|dialog|view|window|fui|container/i.test(panelTag)) return;
+            if (!/ui|top|popup|modal|dialog|alert/i.test(layerTag) && !/panel|pop|dialog|alert|view|window|fui|container/i.test(panelTag)) return;
             var rect = stageRect(cur);
             if (!rect || rect.width * rect.height < area * 0.05) return;
             var found = hitCounts.filter(function (x) { return x.o === cur; })[0];
@@ -658,7 +664,7 @@
                 var candidate = layerChildren[j];
                 var candidateTag = className(candidate) + " " + (nameOf(candidate) || "") + " " + (bindId(candidate) || "");
                 var candidateRect = stageRect(candidate);
-                if (/panel|pop|dialog|view|window|fui/i.test(candidateTag) && candidateRect &&
+                if (/panel|pop|dialog|alert|view|window|fui/i.test(candidateTag) && candidateRect &&
                     candidateRect.width * candidateRect.height >= area * 0.05) {
                     top = candidate;
                     break;
@@ -784,6 +790,174 @@
             });
         });
         return out;
+    }
+
+    function interactionListenersOf(o) {
+        var out = [];
+        eventMaps(o).forEach(function (map) {
+            Object.keys(map).forEach(function (type) {
+                if (!/touch|tap|mouse|click/i.test(type)) return;
+                var bins = map[type];
+                if (!bins) return;
+                (bins.length !== undefined ? Array.prototype.slice.call(bins) : [bins]).forEach(function (bin) {
+                    if (!bin || typeof bin.listener !== "function") return;
+                    out.push({ type: type, fn: bin.listener.name || null,
+                        thisClass: bin.thisObject ? className(bin.thisObject) : null });
+                });
+            });
+        });
+        return out;
+    }
+
+    function watchSnapshot(o, props) {
+        if (!o) return null;
+        var out = { hash: hashOf(o) };
+        (props && props.length ? props : ["text", "selected", "currentState", "enabled"]).forEach(function (k) {
+            try {
+                var v = k === "text" ? textOf(o) : o[k];
+                if (v !== undefined && v !== null && (typeof v !== "object" || Array.isArray(v))) out[k] = serialize(v, 1);
+            } catch (e) {}
+        });
+        return out;
+    }
+
+    function snapshotsEqual(after, before) {
+        if (before === null || before === undefined) return after === null || after === undefined;
+        if (after === null || after === undefined) return false;
+        if (typeof before !== "object") return JSON.stringify(after) === JSON.stringify(before);
+        return Object.keys(before).every(function (k) {
+            return JSON.stringify(after[k]) === JSON.stringify(before[k]);
+        });
+    }
+
+    function guideTargetOf(panel) {
+        if (!panel || !/guideMask\.GuideMask/i.test(className(panel))) return null;
+        var frame = null;
+        walk(panel, function (o) {
+            if (!frame && bindId(o) === "imgKuang") frame = o;
+        });
+        var r = frame && stageRect(frame);
+        if (!r || r.width < 4 || r.height < 4) return null;
+        var fractions = [0.5, 0.3, 0.7];
+        for (var yi = 0; yi < fractions.length; yi++) {
+            for (var xi = 0; xi < fractions.length; xi++) {
+                var point = { x: round(r.x + r.width * fractions[xi]), y: round(r.y + r.height * fractions[yi]) };
+                var hit = hitTest(point.x, point.y);
+                if (!hit || isSelfOrAncestor(panel, hit)) continue;
+                var owner = hit, cur = hit;
+                for (var depth = 0; cur && depth < 8; depth++) {
+                    if (interactionListenersOf(cur).length) {
+                        owner = cur;
+                        break;
+                    }
+                    if (/^(egret\.Stage|RootLayer)$/.test(className(cur))) break;
+                    cur = cur.parent;
+                }
+                return {
+                    reason: "guide-hole",
+                    stagePoint: point,
+                    screenPoint: stageToClient(point.x, point.y),
+                    hole: { x: round(r.x), y: round(r.y), width: round(r.width), height: round(r.height) },
+                    target: project(describe(owner, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "source",
+                        "touchable", "enabled", "selected", "currentState"]),
+                    hit: project(describe(hit, { bounds: false }), ["hash", "className", "id", "name", "qaName", "text", "source"])
+                };
+            }
+        }
+        return null;
+    }
+
+    function recommendationAt(panel, point, reason, preferred) {
+        var hit = hitTest(point.x, point.y);
+        var owner = preferred || hit || panel;
+        var cur = hit;
+        for (var depth = 0; cur && depth < 8 && isSelfOrAncestor(panel, cur); depth++) {
+            if (interactionListenersOf(cur).length) {
+                owner = cur;
+                break;
+            }
+            cur = cur.parent;
+        }
+        return {
+            reason: reason,
+            stagePoint: { x: round(point.x), y: round(point.y) },
+            screenPoint: stageToClient(point.x, point.y),
+            target: project(describe(owner, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "source",
+                "touchable", "enabled", "selected", "currentState"]),
+            hit: hit ? project(describe(hit, { bounds: false }), ["hash", "className", "id", "name", "qaName", "text", "source"]) : null
+        };
+    }
+
+    // 新手遮罩的纯文案提示和 NPC 对话都由整块界面接收点击；把安全点击点直接暴露给 agent，
+    // 避免它枚举遮罩碎片，或反复等待复用中的对话面板消失。
+    function passiveContinueTargetOf(panel) {
+        if (!panel) return null;
+        var panelTag = className(panel) + " " + (nameOf(panel) || "") + " " + (bindId(panel) || "");
+        var guide = /guideMask\.GuideMask/i.test(panelTag);
+        var dialogue = /dialogueIntegration|dialogueButtomMixed|dialogueBottomMixed|npcDialogue|plotDialogue/i.test(panelTag);
+        if (!guide && !dialogue) return null;
+
+        var preferred = null, preferredRect = null, largestListener = null, largestArea = 0;
+        walk(panel, function (o) {
+            if (!effectiveVisible(o)) return false;
+            var r = stageRect(o);
+            if (!r || r.width < 4 || r.height < 4) return;
+            var tag = className(o) + " " + (nameOf(o) || "") + " " + (bindId(o) || "") + " " + (qaNameOf(o) || "");
+            if (dialogue && !preferred && /talk_txt|dialogue.*text|txt.*talk|content.*text/i.test(tag)) {
+                preferred = o;
+                preferredRect = r;
+            }
+            if (interactionListenersOf(o).length && r.width * r.height > largestArea) {
+                largestListener = o;
+                largestArea = r.width * r.height;
+            }
+        });
+        var point;
+        if (preferredRect) point = { x: preferredRect.x + preferredRect.width / 2, y: preferredRect.y + preferredRect.height / 2 };
+        else if (largestListener) {
+            var probed = probePoint(largestListener, false);
+            var lr = stageRect(largestListener);
+            point = probed ? probed.point : { x: lr.x + lr.width / 2, y: lr.y + lr.height / 2 };
+            preferred = largestListener;
+        } else {
+            var stage = requireStage();
+            point = { x: stage.stageWidth / 2, y: stage.stageHeight / 2 };
+        }
+        return recommendationAt(panel, point, dialogue ? "dialogue-continue" : "guide-continue", preferred);
+    }
+
+    function continueTargetOf(panel) {
+        return guideTargetOf(panel) || passiveContinueTargetOf(panel);
+    }
+
+    function continuationSignature(panel, recommendation) {
+        var texts = [];
+        walk(panel, function (o) {
+            if (texts.length >= 6) return false;
+            var t = effectiveVisible(o) && textOf(o);
+            if (t && texts.indexOf(t) < 0) texts.push(t);
+        });
+        return [hashOf(panel), recommendation && recommendation.reason, texts.join("|")].join("::");
+    }
+
+    function actionableOverlayFor(targets) {
+        var top = sceneInfo().top;
+        if (!top) return null;
+        var recommendedTarget = continueTargetOf(top);
+        // 等待的对象若就是当前对话/引导面板，也必须提前返回其继续点击点。
+        if (!recommendedTarget && targets.some(function (o) { return isSelfOrAncestor(top, o); })) return null;
+        var actionable = !!recommendedTarget || interactionListenersOf(top).length > 0 || !!findCloseControl(top);
+        if (!actionable) {
+            walk(top, function (o) {
+                if (actionable) return false;
+                if (effectiveVisible(o) && interactionListenersOf(o).length) actionable = true;
+            });
+        }
+        if (!actionable) return null;
+        var result = project(describe(top, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center",
+            "touchable", "enabled", "selected", "currentState"]);
+        if (recommendedTarget) result.recommendedTarget = recommendedTarget;
+        return result;
     }
 
     function sleep(ms) {
@@ -980,8 +1154,8 @@
         getTree: function (p) {
             var stage = requireStage();
             var root = p.hash !== undefined && p.hash !== null ? byHash(p.hash) : stage;
-            var maxDepth = p.depth !== undefined ? +p.depth : 3;
-            var maxNodes = p.maxNodes !== undefined ? +p.maxNodes : 300;
+            var maxDepth = Math.min(Math.max(p.depth !== undefined ? +p.depth : 3, 0), 8);
+            var maxNodes = Math.min(Math.max(p.maxNodes !== undefined ? +p.maxNodes : 80, 1), 120);
             var visibleOnly = !!p.visibleOnly;
             var withBounds = p.bounds !== false;
             var count = 0, truncated = false;
@@ -1017,11 +1191,12 @@
         find: function (p) {
             if (!hasCriteria(p)) throw new Error("至少提供 id / qaName / name / className / text / source / hash 之一");
             var list = query(p);
-            var limit = p.limit !== undefined ? +p.limit : 20;
+            var limit = Math.min(Math.max(p.limit !== undefined ? +p.limit : 20, 1), 50);
             var keys = p.props || [];
             var fields = p.fields && p.fields.length ? p.fields : null;
             return {
                 total: list.length,
+                truncated: list.length > limit,
                 results: list.slice(0, limit).map(function (o) {
                     var info = describe(o, { path: !fields, center: true });
                     if (keys.length) info.props = readProps(o, keys);
@@ -1099,12 +1274,14 @@
                 if (i) await sleep(80);
                 await performGesture([pt], method, p.holdMs !== undefined ? +p.holdMs : 50, target);
             }
+            var compactFields = ["hash", "className", "id", "name", "qaName", "text", "onStageVisible", "touchable",
+                "enabled", "selected", "currentState", "center"];
             return {
                 method: method,
                 stagePoint: pt,
                 screenPoint: stageToClient(pt.x, pt.y),
-                target: target ? describe(target, { path: true }) : null,
-                hit: hit ? describe(hit, { path: true, bounds: false }) : null,
+                target: target ? (p.details ? describe(target, { path: true }) : project(describe(target, { center: true }), compactFields)) : null,
+                hit: hit ? (p.details ? describe(hit, { path: true, bounds: false }) : project(describe(hit, { bounds: false }), ["hash", "className", "id", "name", "qaName"])) : null,
                 warnings: warnings
             };
         },
@@ -1146,41 +1323,78 @@
         },
 
         waitFor: async function (p) {
-            var timeout = p.timeoutMs !== undefined ? +p.timeoutMs : 10000;
-            var interval = p.intervalMs !== undefined ? +p.intervalMs : 200;
-            var state = p.state || "visible";
-            var q = Object.assign({}, p, { visibleOnly: state === "visible" || state === "hidden" });
+            var timeout = Math.min(Math.max(p.timeoutMs !== undefined ? +p.timeoutMs : 10000, 0), 120000);
+            var interval = Math.min(Math.max(p.intervalMs !== undefined ? +p.intervalMs : 200, 20), 5000);
             var start = Date.now();
             var stableMs = p.stableMs ? +p.stableMs : 0;
             var lastKey = null;
             var stableSince = 0;
+            var overlayGraceMs = Math.min(Math.max(p.overlayGraceMs !== undefined ? +p.overlayGraceMs : 300, 0), 5000);
+            var conditions = p.anyOf && p.anyOf.length ? p.anyOf.map(function (c) { return Object.assign({}, c); }) : [p];
+            var baselines = conditions.map(function (c) {
+                if ((c.state || p.state) !== "changed") return null;
+                if (c.from !== undefined) return c.from;
+                var initial = getStage() ? query(Object.assign({}, c, { visibleOnly: false })) : [];
+                return watchSnapshot(initial[0], c.watchProps || p.watchProps);
+            });
             while (true) {
-                var list = getStage() ? query(q) : [];
-                var ok = state === "visible" || state === "exists" ? list.length > 0 : list.length === 0;
-                if (ok && stableMs && list.length) {
+                var matched = null;
+                var pending = [];
+                for (var ci = 0; ci < conditions.length && !matched; ci++) {
+                    var c = conditions[ci];
+                    var state = c.state || p.state || "visible";
+                    var q = Object.assign({}, c, { visibleOnly: state === "visible" || state === "hidden" });
+                    delete q.state;
+                    delete q.watchProps;
+                    delete q.from;
+                    var list = getStage() ? query(q) : [];
+                    var before = baselines[ci], after = watchSnapshot(list[0], c.watchProps || p.watchProps);
+                    var ok = state === "visible" || state === "exists" ? list.length > 0 :
+                        state === "changed" ? !snapshotsEqual(after, before) : list.length === 0;
+                    if (ok) matched = { index: ci, state: state, list: list, before: before, after: after };
+                    else pending.push({ condition: c, state: state, list: list });
+                }
+                if (matched && stableMs && matched.list.length && matched.state !== "changed") {
                     // 位置、尺寸和透明度在 stableMs 内保持不变才算满足，用于等待面板打开动画结束
-                    var key = JSON.stringify(stageRect(list[0])) + "|" + visualAlpha(list[0]);
+                    var key = matched.index + "|" + JSON.stringify(stageRect(matched.list[0])) + "|" + visualAlpha(matched.list[0]);
                     if (key !== lastKey) {
                         lastKey = key;
                         stableSince = Date.now();
                     }
-                    ok = Date.now() - stableSince >= stableMs;
+                    if (Date.now() - stableSince < stableMs) matched = null;
                 }
-                if (ok) {
+                if (matched) {
                     return {
                         matched: true,
-                        state: state,
+                        state: matched.state,
+                        conditionIndex: conditions.length > 1 ? matched.index : undefined,
                         elapsedMs: Date.now() - start,
                         // 最后一次视觉变化发生在何时：可直接作为该界面的动画时长/settle 参考值
                         settledAfterMs: stableMs && stableSince ? stableSince - start : undefined,
-                        total: list.length,
-                        results: list.slice(0, 5).map(function (o) {
-                            return describe(o, { path: true });
+                        total: matched.list.length,
+                        before: matched.state === "changed" ? matched.before : undefined,
+                        after: matched.state === "changed" ? matched.after : undefined,
+                        results: matched.list.slice(0, 1).map(function (o) {
+                            return project(describe(o, { center: true }), ["hash", "className", "id", "name", "qaName", "text",
+                                "onStageVisible", "touchable", "enabled", "selected", "currentState", "center"]);
                         })
                     };
                 }
+                if (Date.now() - start >= overlayGraceMs) {
+                    for (var pi = 0; pi < pending.length; pi++) {
+                        var item = pending[pi];
+                        var shouldInterrupt = item.condition.interruptOnOverlay !== undefined ? item.condition.interruptOnOverlay :
+                            p.interruptOnOverlay !== undefined ? p.interruptOnOverlay : item.state === "gone" || item.state === "hidden";
+                        if (!shouldInterrupt) continue;
+                        var overlay = actionableOverlayFor(item.list);
+                        if (overlay) return { matched: false, interrupted: true, reason: "actionable-overlay",
+                            conditionIndex: conditions.length > 1 ? pi : undefined, state: item.state,
+                            elapsedMs: Date.now() - start, overlay: overlay };
+                    }
+                }
                 if (Date.now() - start >= timeout) {
-                    return { matched: false, state: state, elapsedMs: Date.now() - start, total: list.length };
+                    return { matched: false, state: conditions.length > 1 ? "anyOf" : (conditions[0].state || p.state || "visible"),
+                        elapsedMs: Date.now() - start };
                 }
                 await sleep(interval);
             }
@@ -1189,10 +1403,11 @@
         scene: function (p) {
             var si = sceneInfo();
             var stage = si.stage;
-            var maxItems = p.maxItems !== undefined ? +p.maxItems : 30;
+            var maxItems = Math.min(Math.max(p.maxItems !== undefined ? +p.maxItems : 20, 0), 50);
             var brief = function (o) {
                 var d = describe(o, { center: true });
-                var out = project(d, ["hash", "className", "id", "name", "qaName", "text", "center"]);
+                var out = project(d, ["hash", "className", "id", "name", "qaName", "text", "center", "touchable",
+                    "enabled", "selected", "currentState"]);
                 var r = d.stageRect;
                 if (r) {
                     out.size = [round(r.width), round(r.height)];
@@ -1210,6 +1425,11 @@
                 items: []
             };
             if (!si.top || maxItems <= 0) return out;
+            var recommendedTarget = continueTargetOf(si.top);
+            if (recommendedTarget) {
+                out.recommendedTarget = recommendedTarget;
+                return out;
+            }
             var cand = [];
             walk(si.top, function (o) {
                 if (o === si.top) return;
@@ -1228,7 +1448,8 @@
             });
             var probed = 0;
             out.items = cand.slice(0, maxItems).map(function (c) {
-                var item = project(describe(c.o, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center"]);
+                var item = project(describe(c.o, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center",
+                    "touchable", "enabled", "selected", "currentState"]);
                 var hit = item.center ? hitTest(item.center.x, item.center.y) : null;
                 if (!reaches(c.o, hit)) {
                     // 点不到中心不等于点不到：先试包围盒内其他点，仍不行才标记为被遮挡
@@ -1243,6 +1464,51 @@
             });
             out.itemsTruncated = cand.length > maxItems;
             return out;
+        },
+
+        advance: async function (p) {
+            var max = Math.min(Math.max(p.max !== undefined ? +p.max : 1, 1), 12);
+            var waitMs = Math.min(Math.max(p.waitMs !== undefined ? +p.waitMs : 1200, 100), 5000);
+            var method = p.method || (touchHandler() ? "touch" : "dom");
+            var steps = [], stopped = "limit";
+            for (var n = 0; n < max; n++) {
+                var beforeScene = sceneInfo();
+                var target = continueTargetOf(beforeScene.top);
+                if (!target) {
+                    stopped = "no-continuation";
+                    break;
+                }
+                if (target.reason === "guide-hole") {
+                    stopped = "targeted-guide";
+                    break;
+                }
+                var before = continuationSignature(beforeScene.top, target);
+                await performGesture([target.stagePoint], method, 50, null);
+                var changed = false, afterTarget = null;
+                var deadline = Date.now() + waitMs;
+                while (Date.now() < deadline) {
+                    await sleep(80);
+                    var afterScene = sceneInfo();
+                    afterTarget = continueTargetOf(afterScene.top);
+                    if (!afterScene.top || !afterTarget || continuationSignature(afterScene.top, afterTarget) !== before) {
+                        changed = true;
+                        break;
+                    }
+                }
+                steps.push({ reason: target.reason, stagePoint: target.stagePoint,
+                    target: target.target, changed: changed });
+                if (!changed) {
+                    stopped = "unchanged";
+                    break;
+                }
+                if (!afterTarget) {
+                    stopped = "done";
+                    break;
+                }
+            }
+            var rest = sceneInfo();
+            return { advanced: steps.length, stopped: stopped, steps: steps,
+                next: continueTargetOf(rest.top) };
         },
 
         dismissPopups: async function (p) {
@@ -1305,6 +1571,69 @@
                 remaining: rest.top ? project(describe(rest.top, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center"]) : null,
                 stackDepth: rest.stack.length
             };
+        },
+
+        interactables: function (p) {
+            var si = sceneInfo();
+            var root = p.rootHash !== undefined && p.rootHash !== null ? byHash(p.rootHash) : (si.top || si.stage);
+            var limit = Math.min(Math.max(p.limit !== undefined ? +p.limit : 30, 1), 80);
+            var recommendedTarget = continueTargetOf(root);
+            if (recommendedTarget) return {
+                root: project(describe(root, { center: true }), ["hash", "className", "id", "name", "qaName", "text"]),
+                total: 1, truncated: false, recommendedTarget: recommendedTarget, items: []
+            };
+            var candidates = [];
+            walk(root, function (o) {
+                if (!effectiveVisible(o)) return false;
+                var listeners = interactionListenersOf(o);
+                if (!listeners.length) return;
+                var r = stageRect(o);
+                if (!r || r.width < 4 || r.height < 4 || r.x + r.width <= 0 || r.y + r.height <= 0 ||
+                    r.x >= si.stage.stageWidth || r.y >= si.stage.stageHeight) return;
+                var info = project(describe(o, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center",
+                    "touchable", "enabled", "selected", "currentState"]);
+                info.listeners = listeners;
+                var hit = info.center ? hitTest(info.center.x, info.center.y) : null;
+                if (!reaches(o, hit)) {
+                    var alt = probePoint(o, true);
+                    if (alt) info.center = alt.point;
+                    else {
+                        info.occluded = true;
+                        info.blocker = hit ? className(hit) + "#" + hashOf(hit) : null;
+                    }
+                }
+                candidates.push(info);
+            });
+            return { root: project(describe(root, { center: true }), ["hash", "className", "id", "name", "qaName", "text"]),
+                total: candidates.length, truncated: candidates.length > limit, items: candidates.slice(0, limit) };
+        },
+
+        runtimeStats: function () {
+            var stage = getStage();
+            var stats = { now: Date.now(), url: location.href, visibility: document.visibilityState,
+                agentVersion: VERSION, uptimeMs: performance && performance.now ? round(performance.now()) : null };
+            if (performance && performance.memory) {
+                stats.jsHeap = {
+                    usedBytes: performance.memory.usedJSHeapSize,
+                    totalBytes: performance.memory.totalJSHeapSize,
+                    limitBytes: performance.memory.jsHeapSizeLimit
+                };
+            } else stats.jsHeap = null;
+            if (stage) {
+                var total = 0, visible = 0, listenerOwners = 0, interactionListeners = 0;
+                walk(stage, function (o) {
+                    total++;
+                    if (effectiveVisible(o)) visible++;
+                    var listeners = interactionListenersOf(o);
+                    if (listeners.length) {
+                        listenerOwners++;
+                        interactionListeners += listeners.length;
+                    }
+                });
+                stats.egret = { displayObjects: total, visibleObjects: visible,
+                    interactionOwners: listenerOwners, interactionListeners: interactionListeners };
+            } else stats.egret = null;
+            return stats;
         },
 
         inspectCode: function (p) {
@@ -1393,9 +1722,28 @@
                 throw new Error("没有可用的全局事件派发接口，请用 egret_evaluate 直接调用项目接口");
             }
 
+            function debugInfo() {
+                var scriptLoaded = Array.prototype.some.call(document.scripts || [], function (s) {
+                    return /\/config\/debug\.js(?:[?#]|$)/i.test(s.src || "");
+                });
+                if (!scriptLoaded && W.performance && typeof W.performance.getEntriesByType === "function") {
+                    scriptLoaded = W.performance.getEntriesByType("resource").some(function (e) {
+                        return /\/config\/debug\.js(?:[?#]|$)/i.test(e.name || "");
+                    });
+                }
+                return {
+                    loaded: scriptLoaded && W.DEBUG === true && !!W.debugUI,
+                    scriptLoaded: scriptLoaded,
+                    debugFlag: W.DEBUG === true,
+                    debugUi: !!W.debugUI,
+                    testCommand: typeof W.cs_test_cmd === "function" && !!(W.MFC.online && W.MFC.online.send),
+                    commonCommands: ["addItem", "addCoin", "addEnergy", "setAttr", "processTask"]
+                };
+            }
+
             if (action === "probe") {
                 return {
-                    mfc: true,
+                    MFC: true,
                     stageFound: !!getStage(),
                     moduleManager: mm ? {
                         className: className(mm),
@@ -1410,13 +1758,14 @@
                         findByQaName: !!(tool && tool.FindByQaName),
                         popupMgr: !!W.MFC.popupMgr
                     },
-                    mfcKeys: Object.keys(W.MFC).slice(0, 40)
+                    debug: debugInfo(),
+                    MFCKeys: Object.keys(W.MFC).slice(0, 40)
                 };
             }
 
             if (action === "listModules") {
                 var filter = p.filter ? String(p.filter).toLowerCase() : null;
-                var limit = p.limit !== undefined ? +p.limit : 60;
+                var limit = Math.min(Math.max(p.limit !== undefined ? +p.limit : 60, 1), 200);
                 var list = constEntries().filter(function (e) {
                     return !filter || e.name.toLowerCase().indexOf(filter) >= 0 || String(e.id).indexOf(filter) >= 0;
                 });
@@ -1485,7 +1834,39 @@
                 return { via: dispatch(p.event, p.payload), event: p.event };
             }
 
+            if (action === "testCommand") {
+                var dbg = debugInfo();
+                if (!p.authorized) throw new Error("测试命令需要用户在当前任务中明确授权，并传 authorized: true");
+                if (!dbg.loaded || !dbg.testCommand) throw new Error("当前页面未确认加载 config/debug.js，或测试命令接口不可用");
+                if (!p.subCmd) throw new Error("需要提供 subCmd");
+                var cmd = new W.cs_test_cmd();
+                cmd.subCmd = String(p.subCmd);
+                if (p.value1 !== undefined) cmd.value1 = p.value1;
+                if (p.value2 !== undefined) cmd.value2 = p.value2;
+                return await new Promise(function (resolve) {
+                    var done = false;
+                    var timer = setTimeout(function () {
+                        if (done) return;
+                        done = true;
+                        resolve({ ok: false, timeout: true, subCmd: cmd.subCmd });
+                    }, Math.min(Math.max(+p.timeoutMs || 10000, 1000), 30000));
+                    W.MFC.online.send(cmd, function (body, error) {
+                        if (done) return;
+                        done = true;
+                        clearTimeout(timer);
+                        var failed = !body || !!(error && typeof error.isError === "function" && error.isError());
+                        resolve({ ok: !failed, subCmd: cmd.subCmd,
+                            value1: cmd.value1 === undefined ? null : cmd.value1,
+                            value2: cmd.value2 === undefined ? null : cmd.value2 });
+                    });
+                });
+            }
+
             throw new Error("未知的 action：" + action);
+        },
+
+        splanTestCommand: async function (p) {
+            return handlers.splan(Object.assign({}, p, { action: "testCommand" }));
         },
 
         evaluate: async function (p) {

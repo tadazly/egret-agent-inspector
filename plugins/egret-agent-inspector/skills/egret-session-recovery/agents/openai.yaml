@@ -1,0 +1,6 @@
+interface:
+  display_name: "Egret 会话恢复"
+  short_description: "恢复闪退现场并排查重复崩溃或内存增长"
+  default_prompt: "使用 $egret-session-recovery 恢复刚才中断的游戏验收；若再次闪退，收集内存与复现证据。"
+policy:
+  allow_implicit_invocation: true

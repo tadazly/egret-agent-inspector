@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import shutil
+import subprocess
 import struct
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "plugins" / "egret-agent-inspector" / "server" / "egret_agent_inspector_mcp.py"
+LAUNCHER = SERVER.parents[1] / "scripts" / "start_mcp.js"
 SCRIPTS = SERVER.parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import browser_extension  # noqa: E402
@@ -36,12 +38,45 @@ class BrowserExtensionTest(unittest.TestCase):
         self.assertEqual(chrome["loaded"], [])
         self.assertIn("profile access denied", chrome["loadedInspectionError"])
 
+    def test_open_url_uses_selected_browser_and_rejects_other_schemes(self):
+        with mock.patch.object(browser_extension, "status", return_value={"defaultBrowser": "chrome"}), \
+                mock.patch.object(browser_extension, "find_executable", return_value="/test/chrome"), \
+                mock.patch.object(browser_extension.subprocess, "Popen") as popen:
+            result = browser_extension.open_url("default", "https://example.test/game")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["browser"], "chrome")
+        popen.assert_called_once()
+        self.assertFalse(browser_extension.open_url("chrome", "file:///tmp/private")["ok"])
+
+
+class LauncherTest(unittest.TestCase):
+    def test_python_candidate_order(self):
+        node = shutil.which("node")
+        self.assertTrue(node, "node is required")
+        script = ("const x=require(" + json.dumps(str(LAUNCHER)) + ");"
+                  "process.stdout.write(JSON.stringify({win:x.pythonCandidates('win32',{}),mac:x.pythonCandidates('darwin',{})}));")
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True)
+        candidates = json.loads(result.stdout)
+        self.assertEqual([x["command"] for x in candidates["win"]], ["python", "py", "python3"])
+        self.assertEqual([x["command"] for x in candidates["mac"]], ["python3", "python"])
+
+    def test_launcher_initializes_mcp(self):
+        node = shutil.which("node")
+        env = dict(os.environ, EGRET_PYTHON=sys.executable, EGRET_MCP_PORT=str(PORT + 2),
+                   PYTHONIOENCODING="utf-8")
+        request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n"
+        result = subprocess.run([node, str(LAUNCHER)], cwd=SERVER.parents[1], env=env, input=request,
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, check=True)
+        response = json.loads(result.stdout.splitlines()[0])
+        self.assertEqual(response["result"]["serverInfo"]["name"], "egret-agent-inspector")
+
 
 class FakeExtension:
     """模拟扩展 service worker：连接 server 并按 id 查询假数据应答页面请求。"""
 
     def __init__(self):
         self.calls = []
+        self.page_params = []
 
     async def connect(self):
         self.reader, self.writer = await asyncio.open_connection("127.0.0.1", PORT)
@@ -80,6 +115,7 @@ class FakeExtension:
         if msg["method"] != "page":
             return {"id": msg["id"], "result": {"ok": True}}
         method, p = params["method"], params["params"]
+        self.page_params.append((method, p))
         node = NODES.get(p.get("id"))
         if method == "find":
             result = {"total": 1 if node else 0, "results": [node] if node else []}
@@ -89,6 +125,14 @@ class FakeExtension:
             result = {"method": "touch", "target": node, "warnings": []}
         elif method == "waitFor":
             result = {"matched": bool(node), "elapsedMs": 5}
+        elif method == "advance":
+            result = {"advanced": 1, "stopped": "done", "steps": []}
+        elif method == "runtimeStats":
+            result = {"jsHeap": {"usedBytes": 10}, "egret": {"displayObjects": 2}}
+        elif method == "getTree":
+            result = {"nodeCount": 1, "truncated": False, "tree": NODES["btn_notice"]}
+        elif method == "interactables":
+            result = {"total": 1, "truncated": False, "items": [NODES["btn_notice"]]}
         elif method == "getErrors":
             errors = [{"type": "console.error", "message": "boom", "at": 1, "lastAt": 1, "count": 1, "stack": None}]
             result = {"total": len(errors), "now": 100, "collectingSince": 0,
@@ -137,11 +181,20 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         return res, (text if res.get("isError") and not text.startswith("{") else json.loads(text))
 
     async def test_tools_listed(self):
-        tools = {t["name"] for t in (await self.rpc("tools/list"))["tools"]}
+        listed = (await self.rpc("tools/list"))["tools"]
+        tools = {t["name"] for t in listed}
         for name in ("egret_find", "egret_tap", "egret_extension_status", "egret_install_extension",
-                     "egret_reload_extension", "egret_run_steps", "egret_scene", "egret_dismiss_popups",
-                     "egret_inspect_code", "egret_notes", "splan_call"):
+                     "egret_reload_extension", "egret_reopen_browser", "egret_run_steps", "egret_scene",
+                     "egret_advance", "egret_runtime_stats", "egret_dismiss_popups",
+                     "egret_inspect_code", "egret_interactables", "egret_notes", "splan_call",
+                     "splan_test_command"):
             self.assertIn(name, tools)
+        wait = next(tool for tool in listed if tool["name"] == "egret_wait_for")["inputSchema"]["properties"]
+        self.assertIn("changed", wait["state"]["enum"])
+        self.assertIn("anyOf", wait)
+        self.assertIn("interruptOnOverlay", wait)
+        command = next(tool for tool in listed if tool["name"] == "splan_test_command")["inputSchema"]
+        self.assertIn("authorized", command["required"])
 
     async def test_status_without_extension(self):
         res, data = await self.call("egret_extension_status", {"waitSeconds": 0.2})
@@ -169,6 +222,18 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         _, found = await self.call("egret_notes", {"action": "search", "scope": "demo", "q": "公告"})
         self.assertEqual(found["notes"][0]["key"], "notice-close")
         self.assertNotIn("updated", found["notes"][0])
+        _, route = await self.call("egret_notes", {"action": "add", "scope": "demo", "entries": [{
+            "kind": "route", "key": "main-story", "summary": "从主场景进入主线",
+            "start": "主场景", "steps": [{"tap": {"qaName": "ToolbarNew__btn_task"}}],
+            "expect": {"text": "立即前往"}}]})
+        self.assertEqual(route["added"], 1)
+        self.assertNotIn("file", route)
+        _, multi = await self.call("egret_notes", {"action": "search", "scope": "demo", "q": "不存在 主线"})
+        self.assertEqual(multi["notes"][0]["steps"][0]["tap"]["qaName"], "ToolbarNew__btn_task")
+        rejected, message = await self.call("egret_notes", {"action": "add", "scope": "demo", "entries": [{
+            "kind": "route", "key": "bad", "summary": "错误路线", "steps": [{"action": "openModule", "module": "TASK_PANEL"}]}]})
+        self.assertTrue(rejected["isError"])
+        self.assertIn("真实 UI", message)
         await self.call("egret_notes", {"action": "remove", "scope": "demo", "key": "notice-close"})
         _, gone = await self.call("egret_notes", {"action": "search", "scope": "demo", "q": "公告"})
         self.assertEqual(gone["total"], 0)
@@ -214,6 +279,20 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(res["isError"])
             self.assertEqual(report["failed"], [0])
             self.assertEqual(report["executed"], 1)
+            _, _ = await self.call("egret_get_tree", {"depth": 99, "maxNodes": 999})
+            method, params = ext.page_params[-1]
+            self.assertEqual(method, "getTree")
+            self.assertEqual(params["depth"], 8)
+            self.assertEqual(params["maxNodes"], 120)
+            _, interactive = await self.call("egret_interactables", {"limit": 999})
+            self.assertEqual(interactive["total"], 1)
+            self.assertEqual(ext.page_params[-1][1]["limit"], 80)
+            _, advanced = await self.call("egret_advance", {"max": 999, "waitMs": 99999})
+            self.assertEqual(advanced["advanced"], 1)
+            self.assertEqual(ext.page_params[-1][1]["max"], 12)
+            self.assertEqual(ext.page_params[-1][1]["waitMs"], 5000)
+            _, stats = await self.call("egret_runtime_stats")
+            self.assertEqual(stats["egret"]["displayObjects"], 2)
         finally:
             ext.task.cancel()
             ext.writer.close()

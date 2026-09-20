@@ -4,7 +4,7 @@
 
 ## 安装
 
-需要 Chromium 浏览器（Chrome、Edge、Brave）和 Python 3.8+。Codex 需保证 `python3` 命令可用；Claude Code 的当前配置使用 `python`。
+需要 Chromium 浏览器（Chrome、Edge、Brave）、Node.js 和 Python 3.8+。Codex 启动器会在 Windows 选择 `python` / `py -3`，在 macOS/Linux 选择 `python3` / `python`；Claude Code 当前配置使用 `python`。
 
 ### Claude Code
 
@@ -41,6 +41,7 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | `egret-game-operation` | 查找组件并执行点击、拖动、输入、等待和截图 |
 | `egret-e2e-test` | 编写、运行和报告 E2E 用例 |
 | `egret-bug-hunt` | 探索式操作游戏，发现报错、异常界面和无响应交互 |
+| `egret-session-recovery` | 浏览器闪退后恢复验收现场；重复闪退时采样运行态指标 |
 | `splan-control` | Splan 项目专属：模块事件直达界面、qaName 定位、连关强弹（页面有全局 `MFC` 时适用） |
 | `splan-test` | Splan 项目专属：生成并运行用例、自主探索找 bug、沉淀笔记 |
 
@@ -48,15 +49,15 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 
 | 类别 | 工具 |
 | --- | --- |
-| 连接 | `egret_extension_status`、`egret_install_extension`、`egret_reload_extension`、`egret_list_tabs`、`egret_navigate` |
-| 查询 | `egret_scene`（界面快照：面板栈与可交互控件）、`egret_status`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
-| 操作 | `egret_tap`、`egret_drag`、`egret_dismiss_popups`、`egret_set_props`、`egret_wait_for`、`egret_evaluate`、`egret_screenshot` |
+| 连接 | `egret_extension_status`、`egret_install_extension`、`egret_reload_extension`、`egret_reopen_browser`、`egret_list_tabs`、`egret_navigate` |
+| 查询 | `egret_scene`（面板栈与控件状态）、`egret_interactables`（真实事件监听）、`egret_status`、`egret_runtime_stats`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
+| 操作 | `egret_tap`、`egret_advance`、`egret_drag`、`egret_dismiss_popups`、`egret_set_props`、`egret_wait_for`、`egret_evaluate`、`egret_screenshot` |
 | 排错 | `egret_get_errors`：页面未捕获异常、Promise 拒绝、资源加载失败和 console.error/warn；`egret_inspect_code`：控件背后的事件回调与源码片段 |
 | 记忆 | `egret_notes`：按游戏域名保存入口、定位条件、卡点解法、缺陷与耗时，跨会话复用 |
 | 测试 | `egret_run_steps`：批量执行步骤并断言，失败时附截图，并报告运行期间的页面错误 |
-| 项目专属 | `splan_call`：页面存在全局 `MFC` 时可用，模块事件开关界面、项目 QA 查找 |
+| 项目专属 | `splan_call`：模块与 QA 能力；`splan_test_command`：仅明确授权且加载 `debug.js` 时执行测试命令 |
 
-查询类工具支持 `fields` 只取需要的字段，`egret_screenshot` 默认压缩并限宽 900，可用 `rect` 只截局部，以控制上下文消耗。
+查询类工具限制返回规模；`egret_wait_for` 支持 `changed/anyOf`，`egret_screenshot` 默认压缩并可用 `rect` 只截局部。
 
 组件可按 `id`（代码/EXML 中绑定的属性名）、`qaName`、`text`、`className`、`name` 或图片 `source` 定位。
 `qaName` 为 `宿主短类名__部件名`（如 `SignPanel__btn_sign`）：组件自身写了 qaName 时直接使用，否则由绑定关系推导，因此正式构建中同样可用。

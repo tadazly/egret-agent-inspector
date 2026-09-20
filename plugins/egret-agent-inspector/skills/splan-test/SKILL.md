@@ -1,52 +1,37 @@
 ---
 name: splan-test
-description: 为 Splan 项目的游戏（页面存在全局 MFC 对象）生成并运行自动化测试，或自主探索排查潜在缺陷并沉淀可复用的经验。用户要求测试某个模块流程、生成测试用例、跑回归，或让 agent 自己玩游戏找 bug 时使用。
+description: 为 Splan 项目的游戏（页面存在全局 MFC 对象）生成和运行自动化测试，或按真实玩家路径自主游玩、发现缺陷并沉淀路线。用户要求测试流程、跑回归或让 agent 自己玩游戏找 bug 时使用。
 ---
 
-# Splan 自动化测试
+# Splan 测试
 
-前提同 `splan-control`（`splan_call probe` 返回 `mfc: true`），定位与操作手法复用该 skill。开工前先 `egret_notes search` 查历史经验。
+前提同 `splan-control`。开始前用 `egret_notes` 查询相关 `route`、定位与已知问题。
 
-## 一、生成用例
+## 选择模式
 
-1. **先验证再固化**：用例中的每个定位条件都要在真实页面上查到过（`egret_find` / `splan_call qa`），不要从源码猜 `qaName`。
-2. **入口用模块事件**：`splan_call openModule` 作为用例起点，比点击导航稳定；用例说明里写清依赖调试接口。
-3. **等待时长实测**：打开面板时用 `egret_wait_for` 带 `stableMs: 200`，返回的 `settledAfterMs` 就是该界面的动画耗时，按它设置等待和 `settleMs`，不要拍脑袋填。
-4. 写成 `egret_run_steps` 用例（格式见 egret-e2e-test skill 的 references/test-case-format.md），保存到项目的 `e2e/<用例名>.json`：
-   - 可能出现也可能不出现的步骤（开场弹窗、首充引导）加 `"optional": true`；偶发抖动加 `"retry": 1`。
-   - 清场用 `{"action":"dismissPopups","until":{"qaName":"<主界面组件>"}}`。
-5. 交付前完整跑一遍。
+- **真实游玩**：自由探索、自动游玩、验证玩家入口时默认使用。只操作当前界面可见控件，不用 `openModule`、`dispatch`、`evaluate` 或 `setProps` 进入玩法。
+- **定向回归**：用户只关心模块内部行为时，可用模块事件作为起点，并在结论中标明不是入口验收。
 
-## 二、页面错误纳入结论
+## 真实游玩
 
-`egret_run_steps` 的报告带 `pageErrors`（本次运行期间页面产生的错误）。它不直接判定用例失败，但必须在结论中说明是真实缺陷还是既有报错。
+1. 用 `egret_scene` 看当前界面；有 `recommendedTarget` 就直接点。连续的 `dialogue-continue` / `guide-continue` 用 `egret_advance max: 8` 短批推进；否则用 `egret_interactables`，未知子树才用受限的 `egret_get_tree`。
+2. 未知或不可逆操作逐步验证；已确认的安全路线用短 `egret_run_steps` 批量跑到下一个检查点。
+3. 对话的“自动”是 toggle：先看 `selected`，只在未开启时点击。普通点击只等 2–3 秒；`interrupted` 后立即执行返回的 `overlay.recommendedTarget`，或处理关闭控件。用 `changed/anyOf` 等文本、任务、选项或面板变化。
+4. 结束前检查进度 `x/y`、可见的“立即前往/继续”和未锁定章节；仍有可达入口就继续。
+5. 非阻断 warning 只记录。崩溃、掉线或恢复后仍无法推进时才停止当前分支；其他分支继续探索。
 
-已知噪音用 `exclude` 折叠，只保留计数：
+浏览器闪退或扩展断连时改用 `egret-session-recovery`，恢复最近检查点后继续原目标。
 
-```json
-{"exclude": ["Warning #1009", "Skin not found", "未设置红点信息"]}
-```
+关闭卡住界面时先走可见关闭/返回；仍阻塞可用 `closeModule` 恢复，并记录该动作，不把它算作正常玩家验收。
 
-确认过的噪音写进 `egret_notes`（`kind: "fact"`），不要每次重新判断。
+用户在当前任务明确允许测试命令，且 `splan_call probe` 返回 `debug.loaded: true` 时，才可调用 `splan_test_command` 补充货币、道具或能量。允许消耗已有资源不等于允许测试命令。
 
-## 三、自主探索找 bug
+走通新玩法后写 `kind: "route"`：记录环境、起点、稳定 UI 定位步骤和完成条件，不保存临时 `hash`；复用前核对环境。调试直达另记 `shortcut`，恢复动作记 `recovery`。
 
-一轮一个动作，动作前后各看一次状态（`egret_scene` + `egret_get_errors`），不要靠连续截图试探：
+## 定向回归
 
-- **界面**：文字截断或重叠、资源缺失、按钮点不到（`egret_scene` 的 `occluded`）、关不掉的弹窗、状态没刷新。
-- **代码**：可疑控件用 `egret_inspect_code` 拿到回调函数名与源码片段，再用该片段到项目源码里检索，定位到具体文件与方法。
-- **判定**：区分真实缺陷、环境问题（网络、账号、配置）和工具局限，只报有证据、可复现的。
+- 每个定位条件先在真实页面验证；等待时长用 `stableMs` 实测。
+- 用例写成 `egret_run_steps`；可选弹窗用 `optional`，偶发抖动用一次 `retry`，交付前完整跑一遍。
+- `pageErrors` 不直接判失败；区分真实缺陷、环境问题和已知噪音。
 
-每发现一个缺陷写一条笔记，把代码位置一并记下：
-
-```json
-{"action":"add","entries":[{"kind":"bug","key":"<模块>-<现象>","summary":"现象 + 触发路径","detail":"<类名>.<方法>，源码检索串：<片段>"}]}
-```
-
-项目侧的改进建议（弹窗缺关闭控件、命名不统一、遮挡层级等）记 `kind: "suggestion"`，一条一句话，收尾时汇总给用户。
-
-## 四、与项目现有测试的分工
-
-- 本插件负责**界面语义层**：显示对象、定位、命中与遮挡、组件属性断言、运行期错误。
-- 项目的 Playwright / AI Tester 负责**浏览器层**：固定环境、截图基线、OpenCV、内存与性能、弱网、多轮稳定性。
-- 两边不重复建设。本插件验证过的定位条件与实测耗时可直接用作 flow JSON 的 `target` 和 `settle_ms`；动作对应关系：`tap→click`、`waitFor→wait_panel`、`assert→verify`、`dismissPopups→close_popup`。
+本插件负责显示对象、命中、属性和运行期错误；固定环境、视觉基线、性能和弱网继续交给项目的 Playwright / AI Tester。

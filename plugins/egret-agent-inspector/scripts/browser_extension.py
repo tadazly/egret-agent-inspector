@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from urllib.parse import urlparse
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUNDLED_DIR = os.path.join(PLUGIN_ROOT, "extension")
@@ -272,6 +273,28 @@ def open_extensions_page(browser_id):
         return False
 
 
+def open_url(browser, url):
+    """用已安装的 Chromium 浏览器恢复一个 http(s) 页面；不修改 profile 或启动参数。"""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return {"ok": False, "error": "只允许打开有效的 http/https URL"}
+    info = status()
+    browser_id = info["defaultBrowser"] if browser == "default" else browser
+    if browser_id not in BROWSERS:
+        return {"ok": False, "error": "默认浏览器不是受支持的 Chromium 浏览器，请指定 chrome、edge 或 brave"}
+    exe = find_executable(browser_id)
+    if not exe:
+        return {"ok": False, "error": "未找到 %s 可执行文件" % BROWSERS[browser_id]["name"]}
+    try:
+        if SYSTEM == "Darwin":
+            subprocess.Popen(["open", "-a", exe, url])
+        else:
+            subprocess.Popen([exe, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        return {"ok": False, "error": "启动浏览器失败：%s" % e}
+    return {"ok": True, "browser": browser_id, "browserName": BROWSERS[browser_id]["name"], "url": url}
+
+
 def install(browser, open_page):
     info = status()
     browser_id = info["defaultBrowser"] if browser == "default" else browser
@@ -320,8 +343,16 @@ def main():
     p_install = sub.add_parser("install")
     p_install.add_argument("--browser", default="default", choices=["default"] + list(BROWSERS))
     p_install.add_argument("--no-open", action="store_true", help="不自动打开扩展管理页")
+    p_open = sub.add_parser("open")
+    p_open.add_argument("--browser", default="default", choices=["default"] + list(BROWSERS))
+    p_open.add_argument("--url", required=True)
     args = parser.parse_args()
-    result = status() if args.command == "status" else install(args.browser, not args.no_open)
+    if args.command == "status":
+        result = status()
+    elif args.command == "open":
+        result = open_url(args.browser, args.url)
+    else:
+        result = install(args.browser, not args.no_open)
     sys.stdout.reconfigure(encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("ok", True) else 1
