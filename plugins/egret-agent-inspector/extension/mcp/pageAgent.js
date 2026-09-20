@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.0.3";
+    var VERSION = "1.0.4";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -421,6 +421,22 @@
     var DEFAULT_PROPS = ["x", "y", "width", "height", "scaleX", "scaleY", "rotation", "anchorOffsetX", "anchorOffsetY", "alpha", "visible",
         "touchEnabled", "touchChildren", "enabled", "selected", "currentState", "skinName", "text", "label", "source", "textColor", "size"];
 
+    // 读取对象属性；withDefaults 为真时附带 DEFAULT_PROPS，显式指定的键展开得更深
+    function readProps(o, keys, withDefaults) {
+        var props = {};
+        (withDefaults ? DEFAULT_PROPS.concat(keys) : keys).forEach(function (k) {
+            var v;
+            try {
+                v = o[k];
+            } catch (e) {
+                return;
+            }
+            if (v === undefined || typeof v === "function") return;
+            props[k] = serialize(v, keys.indexOf(k) >= 0 ? 2 : 1);
+        });
+        return props;
+    }
+
     function sleep(ms) {
         return new Promise(function (r) {
             setTimeout(r, ms);
@@ -605,10 +621,13 @@
             if (!hasCriteria(p)) throw new Error("至少提供 id / name / className / text / source / hash 之一");
             var list = query(p);
             var limit = p.limit !== undefined ? +p.limit : 20;
+            var keys = p.props || [];
             return {
                 total: list.length,
                 results: list.slice(0, limit).map(function (o) {
-                    return describe(o, { path: true });
+                    var info = describe(o, { path: true });
+                    if (keys.length) info.props = readProps(o, keys);
+                    return info;
                 })
             };
         },
@@ -617,18 +636,7 @@
             var o = resolveTarget(p);
             if (!o) throw new Error("需要提供 hash 或查询条件");
             var info = describe(o, { path: true });
-            var props = {};
-            DEFAULT_PROPS.concat(p.props || []).forEach(function (k) {
-                var v;
-                try {
-                    v = o[k];
-                } catch (e) {
-                    return;
-                }
-                if (v === undefined || typeof v === "function") return;
-                props[k] = serialize(v, p.props && p.props.indexOf(k) >= 0 ? 2 : 1);
-            });
-            info.props = props;
+            info.props = readProps(o, p.props || [], true);
             var ancestors = [];
             var cur = o.parent;
             while (cur) {
@@ -664,9 +672,12 @@
             var pt = stagePointOf(p, target);
             var method = p.method || (touchHandler() ? "touch" : "dom");
             var warnings = [];
-            if (target && !effectiveVisible(target)) warnings.push("目标对象在舞台上不可见");
             var hit = hitTest(pt.x, pt.y);
-            if (target && hit && method !== "event" && !isSelfOrAncestor(target, hit)) {
+            // 命中测试能摸到目标，就说明它确实可见可点：某些 UI 框架（如 FairyGUI）的父链上
+            // 带着 visible=false 的容器，此时 effectiveVisible 会误判，不要据此发警告
+            var reachable = target && hit && isSelfOrAncestor(target, hit);
+            if (target && !reachable && !effectiveVisible(target)) warnings.push("目标对象在舞台上不可见");
+            if (target && hit && method !== "event" && !reachable) {
                 warnings.push("点击位置命中的对象不在目标内部（可能被遮挡）：" + className(hit) + (bindId(hit) ? "#" + bindId(hit) : ""));
             }
             var times = p.count || 1;

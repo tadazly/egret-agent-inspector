@@ -108,7 +108,8 @@ TOOLS = {
         "page", "getTree"),
     "egret_find": (
         "按 id / name / className / text / source / hash 查找显示对象，返回路径、可见性、可点击性及舞台/屏幕坐标。",
-        obj(dict(MATCH_PROPS, limit={"type": "integer", "description": "最多返回条数，默认 20"})),
+        obj(dict(MATCH_PROPS, limit={"type": "integer", "description": "最多返回条数，默认 20"},
+                 props={"type": "array", "items": {"type": "string"}, "description": "额外读取的属性名，附在每条结果的 props 中"})),
         "page", "find"),
     "egret_get_node": (
         "获取单个显示对象的详细信息：常用属性、祖先链、直接子节点；props 可额外读取任意属性（如 data、selectedIndex）。",
@@ -471,9 +472,12 @@ class McpServer:
                 return {"isError": not report["passed"], "content": content}
             res = await self.invoke(name, args)
             if name == "egret_screenshot":
+                note = {"tabId": res.get("tabId")}
+                if res.get("warnings"):
+                    note["warnings"] = res["warnings"]
                 return {"content": [
                     {"type": "image", "data": res["data"], "mimeType": res["mimeType"]},
-                    {"type": "text", "text": json.dumps({"tabId": res.get("tabId")})},
+                    {"type": "text", "text": json.dumps(note, ensure_ascii=False)},
                 ]}
             return {"content": [{"type": "text", "text": json.dumps(res, ensure_ascii=False)}]}
         except Exception as e:  # noqa: BLE001

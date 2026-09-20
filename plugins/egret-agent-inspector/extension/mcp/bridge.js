@@ -1,6 +1,6 @@
 // Egret Agent Inspector MCP 桥接：运行在扩展 service worker 中，作为 WebSocket 客户端连接本机 MCP server，
 // 把 MCP 工具请求转发到目标标签页（在页面 MAIN world 中执行 mcp/pageAgent.js）。
-const AGENT_VERSION = "1.0.3";
+const AGENT_VERSION = "1.0.4";
 const AGENT_FILE = "mcp/pageAgent.js";
 const BASE_PORT = 17800;
 const PORT_COUNT = 5;
@@ -266,12 +266,20 @@ async function handleRequest(method, params) {
         case "screenshot": {
             const tab = await resolveTab(params.tabId);
             if (!tab.active) await chrome.tabs.update(tab.id, { active: true });
+            // 窗口不在前台时合成器可能不更新，截到的是旧帧；如实告知，不要让断言依赖截图
+            const warnings = [];
+            try {
+                const win = await chrome.windows.get(tab.windowId);
+                if (!win.focused) warnings.push("浏览器窗口不在前台，截图可能是过期画面；请以显示列表（find / get_tree）为准");
+                if (win.state === "minimized") warnings.push("浏览器窗口已最小化，截图不可用");
+            } catch (e) { /* 窗口信息拿不到就不加警告 */ }
             const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: params.format === "jpeg" ? "jpeg" : "png", quality: 80 });
             const comma = dataUrl.indexOf(",");
             return {
                 tabId: tab.id,
                 mimeType: dataUrl.slice(5, dataUrl.indexOf(";")),
-                data: dataUrl.slice(comma + 1)
+                data: dataUrl.slice(comma + 1),
+                warnings
             };
         }
         case "page": {
