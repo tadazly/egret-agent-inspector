@@ -577,6 +577,8 @@ item("eui.Label", "msg", alert, { x: 300, y: 200, width: 200, height: 20 },
     { listener: true, text: "您的账号重复登录！" });
 const grp = item("eui.Group", "grp_btn", alert, { x: 350, y: 280, width: 100, height: 40 }, { listener: true });
 item("eui.Button", "confirm", grp, { x: 350, y: 280, width: 100, height: 40 }, { listener: true });
+// 弱标签也可能很长：名字长不代表是正文，这种容器仍然可点
+item("eui.Group", "grp_serverSelectLong", stage, { x: 20, y: 400, width: 160, height: 40 }, { listener: true });
 
 const t = window.__pageAgentTest;
 function summarize(table) {
@@ -629,6 +631,8 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["big"]["roles"][labels.index("您的账号重复登录！")], "text")
         # 已经作为动作列出来的文案不再在 text 里重复一遍
         self.assertNotIn("您的账号重复登录！", data["big"]["text"])
+        # 长的 qaName/name 是弱标签，不是界面文案，不能把可点的容器降级成正文
+        self.assertEqual(data["big"]["roles"][labels.index("grp_serverSelectLong")], "button")
 
 
 class RenderTableTest(unittest.TestCase):

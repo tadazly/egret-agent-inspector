@@ -1607,13 +1607,15 @@
     var TEXT_CLASS = /label|textfield|bitmaptext|richtext/i;
     var BUTTON_TAG = /button|btn|tab|close|confirm|item|cell/i;
 
-    function actionRoleOf(o, label) {
+    function actionRoleOf(o, label, from) {
         var tag = className(o) + " " + (nameOf(o) || "") + " " + (bindId(o) || "") + " " + (qaNameOf(o) || "");
         var blob = tag + " " + (label || "");
         for (var i = 0; i < FAST_ROLES.length; i++) if (FAST_ROLES[i][1].test(blob)) return FAST_ROLES[i][0];
+        if (BUTTON_TAG.test(tag)) return "button";
         // 弹窗正文、健康游戏忠告这类文字常常也挂着监听，标成 button 会诱导 agent 去点它。
-        // 文本类节点，或者一整句话当标签、命名里又没有按钮痕迹的，都按正文处理。
-        if (!BUTTON_TAG.test(tag) && (TEXT_CLASS.test(className(o)) || (label || "").length >= 12)) return "text";
+        // 只看界面上真实的文案：qaName/资源名这类弱标签再长也不是正文。
+        var realText = from === "text" || from === "childText";
+        if (TEXT_CLASS.test(className(o)) || (realText && label.length >= 12)) return "text";
         return "button";
     }
 
@@ -1812,7 +1814,7 @@
             var label = actionLabelOf(o);
             var entry = {
                 hash: hashOf(o),
-                role: actionRoleOf(o, label.label),
+                role: actionRoleOf(o, label.label, label.from),
                 label: label.label,
                 from: label.from,
                 size: [round(r.width), round(r.height)],
