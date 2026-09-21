@@ -1,6 +1,6 @@
 # 更新日志
 
-## 4.1.0
+## 5.0.0
 
 - 新增高速操作主循环 `egret_observe` / `egret_act`：`egret_observe` 一次快照产出带编号的动作表（角色、标签、状态、已解遮挡的点击点）和语义指纹 `marker`；`egret_act` 按编号执行，内部等界面稳定并等过加载过场，直接返回执行后的新动作表。原本「定位 → 点击 → 等待 → 再看一眼」四次往返压缩成一次。
 - 动作表用语义指纹而不是几何变化判断页面是否还是决策时那一页：循环播放的待机动画不会让编号作废；界面确实变了则返回 `stale: true` 和新动作表且不执行任何点击。
@@ -12,7 +12,7 @@
 - 动作表在显示列表遍历之外再做一遍网格命中扫描：FairyGUI 这类框架的父链上带 `visible=false` 的容器会把遍历剪断，弹窗右上角的关闭按钮等控件因此整个漏掉，现在能补回来。
 - 「只能点遮罩关闭」不再吞掉动作表：该判断只是推测，弹窗里通常仍有关闭/确定/领取按钮，遮罩点不动时 agent 不会无牌可打。
 - 奖励格子这类重复条目和被遮挡条目不再刷屏挤掉真正的按钮，按 `collapsed` 计数折叠。
-- 移除 `egret_scene`：其输出是 `egret_observe` 的子集。`egret_run_steps` 里的 `scene` 步骤自动落到 `egret_observe`，并新增 `observe` / `act` 步骤。
+- **不兼容变更**：移除 MCP 工具 `egret_scene`，其输出是 `egret_observe` 的子集。直接调用 `egret_scene` 的用法需要改成 `egret_observe`；`egret_run_steps` 里的 `scene` 步骤会自动落到 `egret_observe`，存盘的 E2E 用例不受影响，并新增 `observe` / `act` 步骤。
 
 ## 4.0.3
 
