@@ -316,25 +316,35 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         text = res["content"][0]["text"]
         return res, (text if res.get("isError") and not text.startswith("{") else json.loads(text))
 
+    async def call_text(self, name, args=None):
+        res = await self.rpc("tools/call", {"name": name, "arguments": args or {}})
+        return res, res["content"][0]["text"]
+
     async def test_tools_listed(self):
         listed = (await self.rpc("tools/list"))["tools"]
         tools = {t["name"] for t in listed}
-        for name in ("egret_find", "egret_tap", "egret_extension_status", "egret_install_extension",
+        for name in ("egret_find", "egret_extension_status", "egret_install_extension",
                      "egret_reload_extension", "egret_reopen_browser", "egret_run_steps", "egret_observe",
-                     "egret_act", "egret_advance", "egret_runtime_stats", "egret_dismiss_popups",
+                     "egret_act", "egret_runtime_stats",
                      "egret_inspect_code", "egret_locate", "egret_notes", "splan_call",
                      "splan_test_command"):
             self.assertIn(name, tools)
         self.assertNotIn("egret_interactables", tools)
         # egret_observe 是 egret_scene 的超集，旧工具不再暴露，减少 agent 的选择面
         self.assertNotIn("egret_scene", tools)
+        # 默认 core 档位：完全能被 egret_act / egret_observe 顶掉的工具不出现在工具面上
+        for name in ("egret_tap", "egret_advance", "egret_dismiss_popups", "egret_wait_for",
+                     "egret_get_tree", "egret_get_node", "egret_hit_test", "egret_status", "egret_set_props"):
+            self.assertNotIn(name, tools)
         observe = next(tool for tool in listed if tool["name"] == "egret_observe")["inputSchema"]["properties"]
         self.assertIn("ocr", observe)
         self.assertIn("rootHash", observe)
         act = next(tool for tool in listed if tool["name"] == "egret_act")["inputSchema"]["properties"]
         self.assertIn("steps", act)
         self.assertIn("marker", act)
-        wait = next(tool for tool in listed if tool["name"] == "egret_wait_for")["inputSchema"]["properties"]
+        self.assertIn("format", observe)
+        # 隐藏的工具只是不出现在工具面上，schema 本身照旧（EGRET_MCP_PROFILE=full 时会列出来）
+        wait = load_server().TOOLS["egret_wait_for"][1]["properties"]
         self.assertIn("changed", wait["state"]["enum"])
         self.assertIn("anyOf", wait)
         self.assertIn("interruptOnOverlay", wait)
@@ -349,24 +359,33 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         await ext.connect()
         try:
             await self.call("egret_extension_status", {"waitSeconds": 2})
-            _, table = await self.call("egret_observe", {})
+            _, text = await self.call_text("egret_observe", {})
+            # 默认是一行一个动作的紧凑文本，不是 JSON
+            self.assertIn("marker m1", text)
+            self.assertIn("1 btn_notice* button", text.splitlines())
+            self.assertIn("文案 hi", text.splitlines())
+            self.assertNotIn("screenRect", text)
+
+            _, table = await self.call("egret_observe", {"format": "json"})
             self.assertEqual(table["marker"], "m1")
-            # 平时不向页面索取几何信息，返回里也不该出现 screenRect，省上下文
+            # 几何信息只在 format=json 时带回，紧凑文本里不占上下文
             self.assertNotIn("screenRect", table["actions"][0])
             self.assertNotIn("captureSize", table)
-            self.assertEqual([p.get("rects") for m, p in ext.page_params if m == "observe"], [None])
 
-            _, acted = await self.call("egret_act", {"marker": "m1", "steps": [{"i": 1}]})
+            _, acted = await self.call("egret_act", {"marker": "m1", "steps": [{"i": 1}], "format": "json"})
             self.assertEqual(acted["stopped"], "done")
             sent = [p for m, p in ext.page_params if m == "act"][0]
             self.assertEqual(sent["steps"], [{"i": 1}])
             self.assertEqual(sent["marker"], "m1")
 
-            # ocr=true 才要 rects；OCR 后端不可用时也只降级成 ocr.available=false，不影响动作表
-            _, with_ocr = await self.call("egret_observe", {"ocr": True})
+            # 渲染和 OCR 都在 server 侧做，页面一律返回完整字段
+            self.assertTrue(all(p.get("detail") and p.get("rects")
+                                for m, p in ext.page_params if m in ("observe", "act")))
+
+            # OCR 后端不可用时只降级成 ocr.available=false，不影响动作表
+            _, with_ocr = await self.call("egret_observe", {"ocr": True, "format": "json"})
             self.assertIn("ocr", with_ocr)
             self.assertNotIn("screenRect", with_ocr["actions"][0])
-            self.assertEqual([p.get("rects") for m, p in ext.page_params if m == "observe"], [None, True])
 
             _, report = await self.call("egret_run_steps", {"screenshotOnFailure": False, "steps": [
                 {"action": "scene"}, {"action": "observe"}, {"action": "act", "steps": [{"i": 1}]}]})
@@ -489,6 +508,182 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         finally:
             ext.task.cancel()
             ext.writer.close()
+
+
+def load_server():
+    """server 模块只在用到时导入，和其它用例保持一致，避免影响 stdio 子进程测试。"""
+    sys.path.insert(0, str(SERVER.parent))
+    try:
+        import egret_agent_inspector_mcp as module
+    finally:
+        sys.path.pop(0)
+    return module
+
+
+class ActionTableTest(unittest.TestCase):
+    """动作表的噪音过滤与扫描预算：limit 调小不能把顶层面板的按钮弄丢。"""
+
+    def run_probe(self):
+        node = shutil.which("node")
+        self.assertTrue(node, "node is required")
+        script = r'''const fs = require("fs");
+let source = fs.readFileSync(process.argv[1], "utf8");
+source = source.replace("\n    installErrorHooks();",
+    "\n    window.__pageAgentTest = { buildActionTable };\n    installErrorHooks();");
+const vm = require("vm");
+const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480,
+    visible: true, alpha: 1, touchEnabled: true, touchChildren: true, parent: null, children: [],
+    get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; } };
+const player = { stage };
+global.window = { addEventListener() {}, devicePixelRatio: 1, innerWidth: 800, innerHeight: 480,
+    egret: { getQualifiedClassName(o) { return o.__class || "Object"; } } };
+global.document = { documentElement: { clientLeft: 0, clientTop: 0 },
+    querySelector(s) { return s === ".egret-player" ? { "egret-player": player } : null; } };
+vm.runInThisContext(source, { filename: process.argv[1] });
+
+let serial = 10;
+const painted = [];
+function item(cls, name, parent, bounds, opts) {
+    opts = opts || {};
+    const o = { __class: cls, hashCode: serial++, name: name || null, text: opts.text || "",
+        parent, stage, visible: true, alpha: 1, touchEnabled: true, touchChildren: true, children: [],
+        get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; },
+        getTransformedBounds() { return bounds; } };
+    if (opts.listener) o.$EventDispatcher_props_ = { 1: { touchTap: [{ listener() {}, thisObject: o }] } };
+    if (parent) parent.children.push(o);
+    painted.push({ o, bounds, solid: opts.solid !== false });
+    return o;
+}
+function inside(b, x, y) { return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height; }
+stage.$touchHandler = { findTarget(x, y) {
+    for (let i = painted.length - 1; i >= 0; i--) {
+        if (painted[i].solid && inside(painted[i].bounds, x, y)) return painted[i].o;
+    }
+    return stage;
+} };
+
+// 底层地图：一堆装饰格子，用来吃掉扫描预算
+const map = item("game.MapLayer", "mapLayer", stage, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
+for (let k = 0; k < 60; k++) {
+    item("eui.Image", "imgGrid", map, { x: (k % 10) * 80, y: Math.floor(k / 10) * 60, width: 70, height: 50 },
+        { listener: true });
+}
+// 点落在舞台外的格子
+item("eui.Image", "imgEdge", map, { x: -120, y: 100, width: 100, height: 50 }, { listener: true });
+// 顶层弹窗：文字 + 外层容器 + 确定按钮（容器与按钮同矩形）
+const alert = item("ui.SimpleAlert", "simpleAlert", stage, { x: 150, y: 115, width: 500, height: 250 },
+    { listener: true });
+item("eui.Label", "msg", alert, { x: 300, y: 200, width: 200, height: 20 },
+    { listener: true, text: "您的账号重复登录！" });
+const grp = item("eui.Group", "grp_btn", alert, { x: 350, y: 280, width: 100, height: 40 }, { listener: true });
+item("eui.Button", "confirm", grp, { x: 350, y: 280, width: 100, height: 40 }, { listener: true });
+
+const t = window.__pageAgentTest;
+function summarize(table) {
+    return { labels: (table.actions || []).map(a => a.label), roles: (table.actions || []).map(a => a.role),
+        count: (table.actions || []).length,
+        occludedHidden: table.occludedHidden || 0, omitted: table.omitted, text: table.text,
+        mode: table.mode, scope: table.scope, panel: table.panel && (table.panel.name || table.panel.className),
+        keys: Object.keys((table.actions || [])[0] || {}) };
+}
+process.stdout.write(JSON.stringify({
+    small: summarize(t.buildActionTable({ limit: 10 })),
+    big: summarize(t.buildActionTable({ limit: 30 })),
+    detail: summarize(t.buildActionTable({ limit: 30, detail: true })),
+    withOccluded: summarize(t.buildActionTable({ limit: 30, occluded: true }))
+}));
+'''
+        result = subprocess.run([node, "-e", script, str(PAGE_AGENT)], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=10, check=True)
+        return json.loads(result.stdout)
+
+    def test_small_limit_keeps_top_panel_actions(self):
+        data = self.run_probe()
+        # 60 个地图装饰格子在弹窗下面：扫描预算必须留得住顶层弹窗的确定按钮
+        self.assertIn("confirm", data["small"]["labels"])
+        self.assertIn("confirm", data["big"]["labels"])
+
+    def test_noise_rows_are_dropped(self):
+        data = self.run_probe()
+        labels = data["big"]["labels"]
+        # 点落在舞台外的条目、与子按钮同矩形的容器都不该占编号
+        self.assertNotIn("imgEdge", labels)
+        self.assertNotIn("grp_btn", labels)
+        # 被遮挡的条目默认只报数量
+        self.assertGreater(data["big"]["occludedHidden"], 0)
+        self.assertNotIn("occluded", data["big"]["keys"])
+        self.assertEqual(data["withOccluded"]["occludedHidden"], 0)
+        self.assertGreater(data["withOccluded"]["count"], data["big"]["count"])
+        # 重复的奖励格子折叠到三条
+        self.assertEqual(labels.count("imgGrid"), 3)
+
+    def test_rows_are_slim_unless_detail(self):
+        data = self.run_probe()
+        self.assertEqual(sorted(data["big"]["keys"]), ["i", "label", "role", "weak"])
+        self.assertIn("hash", data["detail"]["keys"])
+        self.assertIn("point", data["detail"]["keys"])
+
+    def test_prose_is_text_not_button(self):
+        data = self.run_probe()
+        labels = data["big"]["labels"]
+        self.assertEqual(data["big"]["roles"][labels.index("您的账号重复登录！")], "text")
+        # 已经作为动作列出来的文案不再在 text 里重复一遍
+        self.assertNotIn("您的账号重复登录！", data["big"]["text"])
+
+
+class RenderTableTest(unittest.TestCase):
+    def test_renders_one_line_per_action(self):
+        server = load_server()
+        table = {"panel": {"name": "newLogin.NewLogin"}, "mode": "normal", "marker": "abc123",
+                 "text": ["1 天龙星"],
+                 "actions": [{"i": 1, "label": "btn_start", "role": "button", "weak": True},
+                             {"i": 2, "label": "确定", "role": "confirm"},
+                             {"i": 3, "label": "cb_agree", "role": "tab", "on": True, "weak": True}],
+                 "occludedHidden": 4, "omitted": 4,
+                 "changed": "打开 SignPanel；顶层 SignPanel", "elapsedMs": 820}
+        text = server.render_action_table(table)
+        lines = text.splitlines()
+        self.assertIn("面板 newLogin.NewLogin", lines[0])
+        self.assertIn("marker abc123", lines[0])
+        self.assertIn("变化 打开 SignPanel；顶层 SignPanel", lines)
+        self.assertIn("1 btn_start* button", lines)
+        self.assertIn("2 确定 confirm", lines)
+        self.assertIn("3 cb_agree* tab 已选", lines)
+        self.assertTrue(any("被遮挡 4 条未列出" in line for line in lines))
+        # 同样内容的 JSON 要长得多
+        self.assertLess(len(text), len(json.dumps(table, ensure_ascii=False)))
+
+    def test_mode_without_actions_points_at_the_only_legal_op(self):
+        server = load_server()
+        table = {"mode": "guide-hole", "marker": "m1", "recommendedTarget": {"reason": "guide-hole"},
+                 "hint": "引导挖洞"}
+        text = server.render_action_table(table)
+        self.assertIn("mode guide-hole", text)
+        self.assertIn("recommended", text)
+
+
+class ToolProfileTest(unittest.TestCase):
+    def test_core_hides_tools_that_egret_act_already_covers(self):
+        server = load_server()
+        with mock.patch.object(server, "TOOL_PROFILE", "core"):
+            names = server.visible_tools()
+        self.assertIn("egret_observe", names)
+        self.assertIn("egret_act", names)
+        self.assertIn("egret_run_steps", names)
+        self.assertNotIn("egret_tap", names)
+        self.assertNotIn("egret_wait_for", names)
+        self.assertLess(len(names), len(server.TOOLS))
+
+    def test_minimal_keeps_only_the_main_loop_and_connection_tools(self):
+        server = load_server()
+        with mock.patch.object(server, "TOOL_PROFILE", "minimal"):
+            names = server.visible_tools()
+        self.assertEqual(set(names), set(server.MINIMAL_TOOLS))
+
+    def test_full_exposes_everything(self):
+        server = load_server()
+        with mock.patch.object(server, "TOOL_PROFILE", "full"):
+            self.assertEqual(len(server.visible_tools()), len(server.TOOLS))
 
 
 class PluginRemovalTest(unittest.IsolatedAsyncioTestCase):

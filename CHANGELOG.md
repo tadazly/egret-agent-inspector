@@ -1,5 +1,15 @@
 # 更新日志
 
+## 5.2.0
+
+- 修复动作表扫描预算被背景吃光：显示列表按「最上层子节点优先」遍历，发现上限与展示 `limit` 解耦。此前 `limit` 调到 12 以下时，顶层弹窗的确定按钮会整个从表里消失，只剩地图装饰格子；顶层面板的正文也会因此进不了 `text`。
+- 动作表输出改成一行一个动作的紧凑文本（编号、标签、role、状态），同样内容比原来的嵌套 JSON 省两三倍 token；需要 `hash`、坐标和完整字段时传 `format: "json"`。
+- 动作表默认只给能点的东西：被遮挡的条目只报数量不占编号（`occluded: true` 可以列出来），点落在舞台外的条目丢掉，与唯一子按钮同矩形的容器只留里面那层，弹窗正文这类文本节点标成 `role: text` 并并入 `text`。
+- `egret_act` 返回多一行「变化」，直接说明这一步把界面改成了什么样（打开/关闭了哪些面板、顶层是谁），不用自己 diff 前后两张动作表。
+- 整屏都是图片字按钮时自动补一次本地 OCR，不再需要模型先花一轮决定要不要 OCR；OCR 补过的标签保留原值在 `alt`。识别结果按显示对象 hash 在进程内复用，同一屏再看只花十几毫秒，不再每次都截图重认。
+- 收窄默认工具面：新增 `EGRET_MCP_PROFILE`，默认 `core` 隐藏完全能被 `egret_act` / `egret_observe` 顶掉的 `egret_tap`、`egret_advance`、`egret_dismiss_popups`、`egret_wait_for`、`egret_get_tree`、`egret_get_node`、`egret_hit_test`、`egret_status`、`egret_set_props`；`minimal` 只留主循环和连接类工具，`full` 恢复全部。被隐藏的工具仍可被 `egret_run_steps` 内部调用。
+- 点击后界面没有变化时的空等从 1200ms 降到 600ms，加载过场轮询从 300ms 降到 150ms。
+
 ## 5.0.0
 
 - 新增高速操作主循环 `egret_observe` / `egret_act`：`egret_observe` 一次快照产出带编号的动作表（角色、标签、状态、已解遮挡的点击点）和语义指纹 `marker`；`egret_act` 按编号执行，内部等界面稳定并等过加载过场，直接返回执行后的新动作表。原本「定位 → 点击 → 等待 → 再看一眼」四次往返压缩成一次。

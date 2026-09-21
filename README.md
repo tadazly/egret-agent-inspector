@@ -47,6 +47,8 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 
 ## MCP 工具
 
+工具面默认是 `core` 档位：完全能被 `egret_act` / `egret_observe` 顶掉的工具（`egret_tap`、`egret_advance`、`egret_dismiss_popups`、`egret_wait_for`、`egret_get_tree`、`egret_get_node`、`egret_hit_test`、`egret_status`、`egret_set_props`）不出现在工具列表里，避免模型放着主循环不用去挨个试。用环境变量 `EGRET_MCP_PROFILE` 切换：`minimal` 只留主循环和连接类工具（适合小模型长流程），`full` 列出全部。
+
 | 类别 | 工具 |
 | --- | --- |
 | 主循环 | `egret_observe`（带编号的动作表 + 语义指纹）、`egret_act`（按编号执行并返回执行后的新动作表） |
@@ -58,11 +60,13 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | 测试 | `egret_run_steps`：批量执行步骤并断言，失败时附截图，并报告运行期间的页面错误 |
 | 项目专属 | `splan_call`：模块与 QA 能力；`splan_test_command`：仅明确授权且加载 `debug.js` 时执行测试命令 |
 
-日常操作只用 `egret_observe` → `egret_act` 两个工具：看带编号的动作表，按编号执行，执行结果里直接带回新的动作表，不必每点一次再单独查询和等待。动作表用语义指纹判断界面是否还是决策时那一页，界面变了会返回 `stale: true` 和新表且不执行点击。引导挖洞、对白推进、加载过场和只能点遮罩关闭的弹窗都由 `mode` 指明唯一合法动作。
+日常操作只用 `egret_observe` → `egret_act` 两个工具：看带编号的动作表，按编号执行，执行结果里直接带回新的动作表，不必每点一次再单独查询和等待。动作表是一行一个动作的紧凑文本（编号、标签、role、状态），`egret_act` 的返回还会用一行「变化」说明这一步把界面改成了什么样。动作表用语义指纹判断界面是否还是决策时那一页，界面变了会返回 `stale` 和新表且不执行点击。引导挖洞、对白推进、加载过场和只能点遮罩关闭的弹窗都由 `mode` 指明唯一合法动作。
 
-图片字按钮在动作表里是弱标签，给 `egret_observe` 传 `ocr: true` 会在同一次调用里批量本地 OCR 补上真实文案（不上传图片）；结构化信息和 OCR 都定不下来时再截图做视觉确认——游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，这层兜底一直保留。
+被遮挡、点在舞台外和与子按钮重复的条目默认不占编号，只报数量；`limit` 只决定显示几行，不影响扫描范围。需要 `hash`、坐标和完整字段时传 `format: "json"`。
 
-查询类工具限制返回规模；`egret_locate` 只有在唯一高置信匹配时才返回可直接点击的目标；`egret_wait_for` 支持带明确目标的 `changed/anyOf`，`egret_screenshot` 默认压缩并可用 `rect` 只截局部。
+图片字按钮在动作表里标成 `*` 弱标签，整屏都是弱标签时会自动批量本地 OCR 补上真实文案（不上传图片），也可以用 `ocr` 显式开关；结构化信息和 OCR 都定不下来时再截图做视觉确认——游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，这层兜底一直保留。
+
+查询类工具限制返回规模；`egret_locate` 只有在唯一高置信匹配时才返回可直接点击的目标；等待用 `egret_act` 的 `{"op": "wait", "until": {...}}`（`full` 档位下也可以直接用 `egret_wait_for`），`egret_screenshot` 默认压缩并可用 `rect` 只截局部。
 
 组件可按 `id`（代码/EXML 中绑定的属性名）、`qaName`、`text`、`className`、`name` 或图片 `source` 定位。
 `qaName` 为 `宿主短类名__部件名`（如 `SignPanel__btn_sign`）：组件自身写了 qaName 时直接使用，否则由绑定关系推导，因此正式构建中同样可用。

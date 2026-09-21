@@ -11,7 +11,7 @@ description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象�
 
 1. `egret_notes {"action":"search","q":"<模块或流程名>"}`：先看历史笔记里有没有入口、定位条件和已知坑。
 2. `splan_call {"action":"probe"}`：确认模块、QA 与 debug 能力。
-3. `egret_observe`：看清当前面板栈和可点目标，按编号用 `egret_act` 操作。被弹窗压住时 `egret_dismiss_popups {"until":{"qaName":"<主界面组件>"}}`。
+3. `egret_observe`：看清当前面板栈和可点目标，按编号用 `egret_act` 操作。被弹窗压住时 `egret_act {"steps":[{"op":"dismiss","until":{"qaName":"<主界面组件>"}}]}`。
 
 ## 调试直达
 
@@ -26,8 +26,8 @@ description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象�
 
 - 定位优先 `qaName`（`宿主短类名__部件名`），其次 `id`、`text`、`source`；`splan_call {"action":"qa"}` 走项目自身的 QA 查找。
 - 批量查询带 `fields`（如 `["hash","qaName","text","center"]`），默认输出很啰嗦，很容易把上下文撑满。
-- 点击用 `egret_tap`：入场动画期间加 `settleMs: 300`；中心点被挡住时工具会自动改点包围盒内未被遮挡的位置，仍报“目标被遮挡”说明真有东西压在上面——先 `egret_dismiss_popups`，不要用 `force`。
-- 每步之后用 `egret_wait_for` 等预期结果，不要用固定 sleep 代替。
+- 点击用 `egret_act`：入场动画期间加 `settleMs: 300`；中心点被挡住时工具会自动改点包围盒内未被遮挡的位置，仍报“目标被遮挡”说明真有东西压在上面——先 `{"op":"dismiss"}`，不要用 `force`。
+- 每步之后用 `egret_act` 的 `{"op":"wait","until":{...}}` 等预期结果，不要用固定 sleep 代替。
 - `egret_observe` 返回 `mode: "transient"` 时是地图标题或加载过场，短等复查，不点暗色区域。
 - 普通弹窗（签到、活动、奖励）既有关闭按钮也能点遮罩关掉，优先点动作表里 `role: close` 的那一项；系统提示弹窗点遮罩关不掉，必须点确认按钮（`role: confirm`）。`mode: "modal-backdrop-dismiss"` 只是没找到关闭控件的推测，点一次遮罩没反应就回动作表找按钮，别重复点。
 - 界面没有预期变化时先 `egret_get_errors`，再决定重试还是报缺陷。

@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.2.1";
+    var VERSION = "1.4.0";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -417,7 +417,9 @@
         return out;
     }
 
-    function walk(root, fn) {
+    // topFirst 为真时按「最上层子节点优先」遍历：显示列表里后加入的子节点画在上面，
+    // 有扫描预算上限时必须先走它们，否则预算会被背景和地图吃光，顶层弹窗的按钮一个都收不到。
+    function walk(root, fn, topFirst) {
         var stack = [root];
         while (stack.length) {
             var o = stack.pop();
@@ -425,7 +427,9 @@
             var h = hashOf(o);
             if (h !== undefined) hashCache.set(String(h), o);
             if (fn(o) === false) continue;
-            for (var i = numChildren(o) - 1; i >= 0; i--) stack.push(childAt(o, i));
+            var n = numChildren(o);
+            if (topFirst) for (var k = 0; k < n; k++) stack.push(childAt(o, k));
+            else for (var i = n - 1; i >= 0; i--) stack.push(childAt(o, i));
         }
     }
 
@@ -1538,6 +1542,8 @@
     // 并用「语义指纹」而不是几何变化判断还是不是决策时看到的那一页，因此持续播放的动画不会让决策作废。
 
     var lastTable = null;
+    // 动作表对外只给编号和标签；hash、坐标和对象引用留在这里，编号靠它解析回真实对象
+    var lastEntries = [];
 
     function hashString(s) {
         var h = 5381;
@@ -1598,17 +1604,24 @@
         ["item", /item|cell|slot|card|grid|list/i]
     ];
 
+    var TEXT_CLASS = /label|textfield|bitmaptext|richtext/i;
+    var BUTTON_TAG = /button|btn|tab|close|confirm|item|cell/i;
+
     function actionRoleOf(o, label) {
-        var blob = className(o) + " " + (nameOf(o) || "") + " " + (bindId(o) || "") + " " +
-            (qaNameOf(o) || "") + " " + (label || "");
+        var tag = className(o) + " " + (nameOf(o) || "") + " " + (bindId(o) || "") + " " + (qaNameOf(o) || "");
+        var blob = tag + " " + (label || "");
         for (var i = 0; i < FAST_ROLES.length; i++) if (FAST_ROLES[i][1].test(blob)) return FAST_ROLES[i][0];
+        // 弹窗正文、健康游戏忠告这类文字常常也挂着监听，标成 button 会诱导 agent 去点它。
+        // 文本类节点，或者一整句话当标签、命名里又没有按钮痕迹的，都按正文处理。
+        if (!BUTTON_TAG.test(tag) && (TEXT_CLASS.test(className(o)) || (label || "").length >= 12)) return "text";
         return "button";
     }
 
     // 面板里的可见文案：给 agent 当页面正文用（任务描述、对白、数量）
     function panelTexts(root, budget) {
         var texts = [], stack = [], scanned = 0, total = 0;
-        for (var i = numChildren(root) - 1; i >= 0; i--) stack.push(childAt(root, i));
+        // 从最上层的子节点开始：弹窗正文是最后加入的子节点，从底层扫会被背景和地图吃光预算
+        for (var i = 0; i < numChildren(root); i++) stack.push(childAt(root, i));
         while (stack.length && scanned < 400 && total < budget) {
             var c = stack.pop();
             scanned++;
@@ -1618,7 +1631,7 @@
                 texts.push(t);
                 total += t.length;
             }
-            for (var j = numChildren(c) - 1; j >= 0; j--) stack.push(childAt(c, j));
+            for (var j = 0; j < numChildren(c); j++) stack.push(childAt(c, j));
         }
         return texts;
     }
@@ -1694,6 +1707,7 @@
         if (!root) {
             out.mode = "empty";
             out.marker = "empty";
+            lastEntries = [];
             lastTable = out;
             return out;
         }
@@ -1719,6 +1733,7 @@
                 out.hint = recommendedTarget.reason === "guide-hole"
                     ? "引导挖洞：只能点 recommendedTarget，用 egret_act 的 {op:\"recommended\"}"
                     : "连续对白/引导：用 egret_act 的 op=advance 一次推完，不要逐次点击";
+                lastEntries = [];
                 lastTable = out;
                 return out;
             }
@@ -1729,15 +1744,19 @@
             out.transientOverlay = transientOverlay;
             out.marker = hashString(["transient", si.top && hashOf(si.top), out.text.join("|")].join("#"));
             out.hint = "地图标题/加载过场，没有安全点击目标：用 op=wait 短等后看返回的新动作表";
+            lastEntries = [];
             lastTable = out;
             return out;
         }
 
+        // 发现阶段的上限不能跟展示 limit 绑死：limit 调小只应该少显示几行，
+        // 不能让还没扫到的弹窗按钮整个消失（limit=10 时「确定」按钮曾经就这样丢掉）。
+        var discoverCap = Math.max(limit * 3, 120);
         var seen = {}, owners = [], order = 0;
         walk(root, function (o) {
             if (o === root) return;
             if (!o.visible || o.alpha === 0) return false;
-            if (owners.length >= limit * 3) return false;
+            if (owners.length >= discoverCap) return false;
             var r = stageRect(o);
             if (!r || r.width < 6 || r.height < 6) return;
             if (r.x + r.width <= 0 || r.y + r.height <= 0 || r.x >= stage.stageWidth || r.y >= stage.stageHeight) return;
@@ -1748,7 +1767,7 @@
             if (seen[key]) return;
             seen[key] = true;
             owners.push({ o: owner, order: order++ });
-        });
+        }, true);
 
         // FairyGUI 这类框架的父链上带着 visible=false 的容器，显示列表遍历会在那里被剪掉，
         // 把真正能点的控件（常见的就是弹窗右上角的关闭按钮）整个漏掉。
@@ -1771,7 +1790,7 @@
                     points.push([sx0 + (sx1 - sx0) * fx, sy0 + (sy1 - sy0) * fy]);
                 });
             });
-            for (var pi = 0; pi < points.length && owners.length < limit * 3; pi++) {
+            for (var pi = 0; pi < points.length && owners.length < discoverCap; pi++) {
                 var hit = hitTest(round(points[pi][0]), round(points[pi][1]));
                 if (!hit) continue;
                 var hitOwner = semanticActionOwner(hit, root);
@@ -1785,7 +1804,7 @@
         }
 
         var probed = 0;
-        var entries = [];
+        var entries = [], offstage = 0, textOnly = [];
         owners.forEach(function (item) {
             var o = item.o;
             var r = stageRect(o);
@@ -1797,7 +1816,7 @@
                 label: label.label,
                 from: label.from,
                 size: [round(r.width), round(r.height)],
-                _y: r.y, _x: r.x, _o: o
+                _y: r.y, _x: r.x, _w: r.width, _h: r.height, _o: o
             };
             if (o.enabled === false) entry.off = true;
             if (o.selected === true) entry.on = true;
@@ -1813,9 +1832,22 @@
                     entry.blocker = hit ? shortClass(hit) + "#" + hashOf(hit) : null;
                 }
             }
+            // 点在舞台外的条目点不到（地图容器伸出舞台的边缘格子），只会让 agent 白点一轮
+            if (point.x < 0 || point.y < 0 || point.x > stage.stageWidth || point.y > stage.stageHeight) {
+                offstage++;
+                return;
+            }
+            // 没有自己的点击监听的纯文字节点是正文，不是按钮：并进 text，别占动作编号
+            if (entry.role === "text" && !interactionListenersOf(o).length) {
+                if (textOnly.indexOf(label.label) < 0) textOnly.push(label.label);
+                return;
+            }
             entry.point = point;
             entries.push(entry);
         });
+        if (textOnly.length) {
+            textOnly.forEach(function (t) { if (out.text.indexOf(t) < 0) out.text.push(t); });
+        }
         // 祖先-后代去重：容器和它装的按钮不该各占一行，同名的父子只留一行
         var indexed = {}, descendants = {};
         entries.forEach(function (e) { indexed[e.hash] = e; });
@@ -1837,7 +1869,18 @@
                 dropped[e.hash] = true;
                 return;
             }
-            kids.forEach(function (kid) { if (kid.label === e.label) dropped[kid.hash] = true; });
+            kids.forEach(function (kid) {
+                // 文案相同时留小的那个：外面那层大出一截就只是壳（弹窗面板带着正文当标签），
+                // 普通按钮和它的文字标签大小接近，留的仍然是按钮本身
+                if (kid.label === e.label) {
+                    if (e._w * e._h > kid._w * kid._h * 4) dropped[e.hash] = true;
+                    else dropped[kid.hash] = true;
+                }
+                // 包一层的容器和它唯一的按钮占同一块矩形（grp_btn / confirm），只留里面那个：
+                // 里层的 label 和 role 更具体，两行一模一样只会让模型二选一浪费一轮
+                else if (Math.abs(kid._x - e._x) <= 2 && Math.abs(kid._y - e._y) <= 2 &&
+                    Math.abs(kid._w - e._w) <= 2 && Math.abs(kid._h - e._h) <= 2) dropped[e.hash] = true;
+            });
         });
         entries = entries.filter(function (e) { return !dropped[e.hash]; });
 
@@ -1847,35 +1890,70 @@
             if (Math.abs(a._y - b._y) > 12) return a._y - b._y;
             return a._x - b._x;
         });
-        // 奖励格子这类一模一样的条目会几十个地刷屏，把真正的按钮挤出表外。
-        // 被遮挡的条目本来就点不了，只作为信号保留少量；其余同款各留前三个。
-        var repeats = {}, collapsed = 0, occludedKept = 0;
+        // 奖励格子这类一模一样的条目会几十个地刷屏，把真正的按钮挤出表外：同款各留前三个。
+        var repeats = {}, collapsed = 0;
         entries = entries.filter(function (e) {
-            if (e.occluded) {
-                if (occludedKept++ < 5) return true;
-                collapsed++;
-                return false;
-            }
+            if (e.occluded) return true;
             var key = e.role + "|" + e.label + "|" + e.size.join("x");
             repeats[key] = (repeats[key] || 0) + 1;
             if (repeats[key] <= 3) return true;
             collapsed++;
             return false;
         });
-        out.omitted = Math.max(0, entries.length - limit) + collapsed;
+        // 「整张表都被同一个对象挡住」要在丢掉遮挡项之前判断
+        var allOccluded = entries.length >= 3 && !entries.some(function (e) { return !e.occluded; });
+        var occludedHidden = 0;
+        if (!allOccluded && !p.occluded) {
+            // 被遮挡的条目 egret_act 本来就拒绝点击：默认只留计数，不占动作编号也不占上下文
+            var kept = entries.filter(function (e) { return !e.occluded; });
+            occludedHidden = entries.length - kept.length;
+            entries = kept;
+        }
+        out.omitted = Math.max(0, entries.length - limit) + collapsed + offstage;
         if (collapsed) out.collapsed = collapsed;
+        if (occludedHidden) out.occludedHidden = occludedHidden;
         entries = entries.slice(0, limit);
-        entries.forEach(function (entry, i) {
-            entry.i = i + 1;
-            delete entry._x;
-            delete entry._y;
-            delete entry._o;
+        entries.forEach(function (entry, i) { entry.i = i + 1; });
+        lastEntries = entries;
+        // 默认只给「编号 + 标签 + 角色 + 状态」：按编号决策时 hash/point/size 是死重量，
+        // 摆在眼前还会把模型引到 find/get_node 这些慢路径上去。detail=true 时才带回来。
+        var detail = !!p.detail;
+        out.actions = entries.map(function (e) {
+            var row = { i: e.i, label: e.label, role: e.role };
+            if (e.off) row.off = true;
+            if (e.on) row.on = true;
+            if (e.st) row.st = e.st;
+            if (e.occluded) row.occluded = true;
+            if (e.from !== "text" && e.from !== "childText") row.weak = true;
+            // rects 是 server 做 OCR 时要的：它也得拿到 hash 和 from 才能把识别结果写回来
+            if (detail || p.rects) {
+                row.hash = e.hash;
+                row.from = e.from;
+                if (e.screenRect) row.screenRect = e.screenRect;
+            }
+            if (detail) {
+                row.point = e.point;
+                row.size = e.size;
+                if (e.blocker) row.blocker = e.blocker;
+            }
+            return row;
         });
-        out.actions = entries;
+        // 全是弱标签时 server 会自动补一次本地 OCR，不用模型再花一轮决定要不要 OCR
+        var strongLabels = 0, weakLabels = 0;
+        entries.forEach(function (e) {
+            if (e.occluded || e.role === "text") return;
+            if (e.from === "text" || e.from === "childText") strongLabels++;
+            else weakLabels++;
+        });
+        if (weakLabels >= 2 && !strongLabels) out.needOcr = true;
+        // 已经作为动作列出来的文案不必在 text 里再抄一遍（标签有截断，按前缀比）
+        out.text = out.text.filter(function (t) {
+            return !entries.some(function (e) { return t.indexOf(e.label) === 0 || e.label.indexOf(t) === 0; });
+        });
         // 整张表都被同一个对象挡住：可能是过场遮罩，也可能是「点任意处继续」的全屏接管层
-        if (entries.length >= 3 && !entries.some(function (e) { return !e.occluded; })) {
+        if (allOccluded) {
             out.mode = "blocked";
-            out.blocker = entries[0].blocker;
+            out.blocker = entries[0] && entries[0].blocker;
             var center = { x: stage.stageWidth / 2, y: stage.stageHeight / 2 };
             var catcher = hitTest(center.x, center.y);
             var catcherRect = catcher && stageRect(catcher);
@@ -1911,12 +1989,41 @@
         return out;
     }
 
+    function panelTag(o) {
+        var name = qaNameOf(o) || bindId(o) || nameOf(o);
+        return tidy(name, 24) || shortClass(o);
+    }
+
+    function stackSnapshot() {
+        try {
+            return (sceneInfo().stack || []).map(function (o) { return { hash: hashOf(o), tag: panelTag(o) }; });
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // 一行说清这一步把界面改成了什么样：让调用方不必自己 diff 前后两张动作表
+    function stackDelta(before, after) {
+        if (!before || !after) return null;
+        var had = {}, has = {};
+        before.forEach(function (x) { had[x.hash] = 1; });
+        after.forEach(function (x) { has[x.hash] = 1; });
+        var opened = after.filter(function (x) { return !had[x.hash]; }).map(function (x) { return x.tag; });
+        var closed = before.filter(function (x) { return !has[x.hash]; }).map(function (x) { return x.tag; });
+        if (!opened.length && !closed.length) return null;
+        var parts = [];
+        if (opened.length) parts.push("打开 " + opened.slice(0, 3).join("、"));
+        if (closed.length) parts.push("关闭 " + closed.slice(0, 3).join("、"));
+        if (after.length) parts.push("顶层 " + after[after.length - 1].tag);
+        return parts.join("；");
+    }
+
     // 执行后等到「有用的状态」：先等指纹变化，再等它稳定；一直没变化就尽早返回，不空耗
     async function settleAfter(before, p) {
         var cap = Math.min(Math.max(p.timeoutMs !== undefined ? +p.timeoutMs : 3000, 0), 30000);
         var stableMs = Math.min(Math.max(p.stableMs !== undefined ? +p.stableMs : 250, 0), 5000);
         // 游戏点击常要等一次网络往返才有反应，比网页的两帧长得多；仍然没变化就尽早返回
-        var quietMs = Math.min(Math.max(p.quietMs !== undefined ? +p.quietMs : 1200, 60), Math.max(cap, 60));
+        var quietMs = Math.min(Math.max(p.quietMs !== undefined ? +p.quietMs : 600, 60), Math.max(cap, 60));
         var start = Date.now(), last = before, lastAt = Date.now(), changed = false;
         while (Date.now() - start < cap) {
             await sleep(60);
@@ -1935,7 +2042,7 @@
     function resolveFastTarget(step, fresh) {
         if (step.i !== undefined && step.i !== null) {
             if (!fresh) throw new Error("动作表已过期，编号不再有效：按返回的新动作表重新决策");
-            var entry = (lastTable && lastTable.actions || []).filter(function (a) { return a.i === +step.i; })[0];
+            var entry = lastEntries.filter(function (a) { return a.i === +step.i; })[0];
             if (!entry) throw new Error("动作表里没有编号 " + step.i);
             var o = byHash(entry.hash);
             if (!o) throw new Error("编号 " + step.i + "（" + entry.label + "）对应的对象已不在显示列表里");
@@ -2359,6 +2466,7 @@
                 fresh = true;
             }
             var started = Date.now();
+            var sceneBefore = stackSnapshot();
             var executed = [], stopped = "done";
             for (var n = 0; n < steps.length; n++) {
                 var step = steps[n] || {};
@@ -2473,7 +2581,7 @@
                 if (table.mode !== "transient" && table.mode !== "empty" && table.mode !== "blocked") break;
                 // blocked 多半是等不走的全屏接管层，短等确认它不是加载条就交回去
                 if (table.mode === "blocked" && Date.now() - loadingStart >= 1500) break;
-                await sleep(300);
+                await sleep(150);
                 table = buildActionTable(tableArgs);
             }
             var loadingMs = Date.now() - loadingStart;
@@ -2481,6 +2589,9 @@
             table.executed = executed;
             table.stopped = stopped;
             table.elapsedMs = Date.now() - started;
+            var delta = stackDelta(sceneBefore, stackSnapshot());
+            table.changed = delta || (executed.some(function (r) { return r.settle && r.settle.changed; })
+                ? "面板栈没变，界面内容有变化" : "界面没有变化");
             if (stopped === "done" && executed.length && executed.every(function (r) {
                 return r.settle && r.settle.changed === false;
             })) {

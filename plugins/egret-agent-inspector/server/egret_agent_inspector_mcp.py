@@ -206,8 +206,109 @@ def apply_ocr_labels(table, texts):
             action["alt"] = action["label"]
             action["label"] = text[:32]
             action["from"] = "ocr"
+            action.pop("weak", None)
             filled += 1
     return filled
+
+
+def render_action_table(table):
+    """动作表渲染成一行一条的紧凑文本。
+
+    同样的内容，嵌套 JSON 要多花两三倍 token，小模型还容易串行；这里只保留决策真正要用的东西。
+    需要 hash / 坐标做二次定位时用 format="json"。
+    """
+    lines, head = [], []
+    panel = table.get("panel") or {}
+    title = panel.get("name") or panel.get("className")
+    if title:
+        head.append("面板 %s" % title)
+    mode = table.get("mode")
+    if mode and mode != "normal":
+        head.append("mode %s" % mode)
+    if table.get("scope") == "stage":
+        head.append("scope stage（顶层不是模态面板，整个舞台都在表里）")
+    if table.get("marker"):
+        head.append("marker %s" % table["marker"])
+    if head:
+        lines.append(" | ".join(head))
+    if table.get("stale"):
+        lines.append("stale 界面已经不是做决策时那一页，未执行任何操作；按下面这张新表重选")
+    for warning in table.get("warnings") or []:
+        lines.append("警告 %s" % warning)
+    for rec in table.get("executed") or []:
+        target = rec.get("target") or {}
+        label = target.get("label") or target.get("reason") or rec.get("text") or ""
+        line = ("执行 %s %s" % (rec.get("op"), label)).strip()
+        if rec.get("error"):
+            line += " → 失败：%s" % rec["error"]
+        elif rec.get("expectMatched") is False:
+            line += " → expect 未满足"
+        result = rec.get("result") or {}
+        if isinstance(result, dict) and result.get("advanced") is not None:
+            line += " → 推进 %s 次（%s）" % (result.get("advanced"), result.get("stopped"))
+        if isinstance(result, dict) and result.get("closed") is not None:
+            line += " → 关掉 %s 个弹窗" % result.get("closed")
+        lines.append(line)
+    if table.get("changed"):
+        lines.append("变化 %s" % table["changed"])
+    if table.get("stopped") and table["stopped"] not in ("done", "stale"):
+        lines.append("中止 %s" % table["stopped"])
+    if table.get("newErrors"):
+        lines.append("页面报错 %s 条，首条：%s" % (table["newErrors"], table.get("firstError")))
+    texts = [t for t in (table.get("text") or []) if t]
+    if texts:
+        lines.append("文案 " + " / ".join(texts[:12]))
+    actions = table.get("actions") or []
+    if actions:
+        weak = any(a.get("weak") or a.get("from") in WEAK_LABEL_SOURCES for a in actions)
+        extra = []
+        if table.get("omitted"):
+            extra.append("省略 %d" % table["omitted"])
+        if table.get("occludedHidden"):
+            extra.append("被遮挡 %d 条未列出" % table["occludedHidden"])
+        if weak:
+            extra.append("* = 图片字弱标签，不确定就先 ocr 或截图")
+        lines.append("动作 %d 条%s" % (len(actions), ("（%s）" % "，".join(extra)) if extra else ""))
+        for a in actions:
+            flags = []
+            if a.get("off"):
+                flags.append("禁用")
+            if a.get("on"):
+                flags.append("已选")
+            if a.get("st"):
+                flags.append("st=%s" % a["st"])
+            if a.get("occluded"):
+                flags.append("被挡")
+            star = "*" if (a.get("weak") or a.get("from") in WEAK_LABEL_SOURCES) else ""
+            if a.get("alt"):
+                # OCR 识别美术字经常出错，原来的结构化标签留一手
+                flags.append("alt=%s" % a["alt"])
+            lines.append(" ".join(filter(None, [
+                str(a.get("i")), "%s%s" % (a.get("label"), star), a.get("role"), " ".join(flags)])))
+    elif mode in ("guide-hole", "guide-continue", "dialogue-continue", "transient", "empty"):
+        lines.append("动作 无（按 mode 走 recommended / advance / wait）")
+    if table.get("recommendedTarget"):
+        lines.append("推荐 {\"op\":\"recommended\"}（%s）" % table["recommendedTarget"].get("reason"))
+    if table.get("transientOverlay"):
+        lines.append("过场 %s：用 {\"op\":\"wait\",\"ms\":800} 短等" % table["transientOverlay"].get("reason"))
+    for sc in table.get("scrollers") or []:
+        dirs = "".join([d for d, k in (("↑", "canUp"), ("↓", "canDown"), ("←", "canLeft"), ("→", "canRight")) if sc.get(k)])
+        lines.append("可滚 %s %s → {\"op\":\"scroll\",\"hash\":%s,\"dy\":-200}" % (sc.get("label"), dirs, sc.get("hash")))
+    ocr = table.get("ocr") or {}
+    if ocr.get("filled"):
+        lines.append("ocr 补了 %s 个标签（%sms）" % (ocr["filled"], ocr.get("elapsedMs")))
+    elif ocr.get("error"):
+        lines.append("ocr 失败 %s" % ocr["error"])
+    if table.get("hint"):
+        lines.append("提示 %s" % table["hint"])
+    timing = []
+    if table.get("elapsedMs"):
+        timing.append("%sms" % table["elapsedMs"])
+    if table.get("waitedForLoadingMs"):
+        timing.append("等加载 %sms" % table["waitedForLoadingMs"])
+    if timing:
+        lines.append("耗时 " + " ".join(timing))
+    return "\n".join(lines)
 
 
 SUPPORTED_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
@@ -217,17 +318,35 @@ REQUEST_TIMEOUT = float(os.environ.get("EGRET_MCP_TIMEOUT", "30"))
 CONNECT_WAIT = float(os.environ.get("EGRET_MCP_CONNECT_WAIT", "20"))
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+# 工具越多，小模型越容易放着 observe/act 不用去挨个试别的工具。默认只暴露 core：
+# 把完全能被 egret_act / egret_observe 顶掉的那几个收起来，用 EGRET_MCP_PROFILE=full 可以全放出来。
+HIDDEN_IN_CORE = ("egret_tap", "egret_advance", "egret_dismiss_popups", "egret_wait_for",
+                  "egret_get_tree", "egret_get_node", "egret_hit_test", "egret_status", "egret_set_props")
+MINIMAL_TOOLS = ("egret_observe", "egret_act", "egret_screenshot", "egret_get_errors",
+                 "egret_extension_status", "egret_install_extension", "egret_reload_extension",
+                 "egret_list_tabs", "egret_navigate")
+TOOL_PROFILE = (os.environ.get("EGRET_MCP_PROFILE") or "core").strip().lower()
+
+
+def visible_tools():
+    """tools/list 暴露的工具；隐藏的工具仍可被 egret_run_steps 等内部路径调用。"""
+    if TOOL_PROFILE == "full":
+        return list(TOOLS)
+    if TOOL_PROFILE == "minimal":
+        return [name for name in TOOLS if name in MINIMAL_TOOLS]
+    return [name for name in TOOLS if name not in HIDDEN_IN_CORE]
+
 INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游戏的显示对象，依赖浏览器中的 Egret Agent Inspector 扩展。
-- 首次使用或工具提示扩展未连接时，先调用 egret_extension_status；未连接则按 egret-install-extension skill 用 egret_install_extension 为用户安装扩展。
-- 主循环只用两个工具：egret_observe 拿带编号的动作表 → egret_act 按编号执行并直接拿到执行后的新动作表。不要在每次点击后再单独调用查询或等待工具，egret_act 已经等过界面稳定和加载过场。
-- 用 i 编号时必须把上一次的 marker 传给 egret_act；界面已经变了会返回 stale=true 和新动作表且不执行，按新表重新决策即可。已确认的连续操作一次给多步 steps。
-- 对白与引导用 egret_act 的 op=advance 一次推完；弹窗用 op=dismiss；加载过场（mode=transient）用 op=wait。
-- 动作表里 label 的 from 为 text/childText 才是真实文案；其余是弱标签（文字烘在图片里）。需要按钮文字时给 egret_observe 传 ocr=true 批量本地 OCR，不上传图片。
-- 动作表和 OCR 都定不下来，或要看布局、颜色、半透明遮罩、战斗画面时再用 egret_screenshot；游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，视觉兜底该用就用。
-- 目标不在动作表里（在别的子树、需要语义消歧）用 egret_locate；已知稳定标识用 egret_find；精确等待用 egret_wait_for；坐标反查用 egret_hit_test。
-- 显示对象以 hash（Egret hashCode）标识；id 是组件在代码/EXML 中绑定的属性名。stageRect 为舞台坐标，screenRect 为页面视口 CSS 像素坐标。
+- 主循环只有两个工具：egret_observe 拿带编号的动作表 → egret_act 按编号执行并直接拿到执行后的新动作表。点完不要再单独调查询或等待工具，egret_act 已经等过界面稳定和加载过场。
+- 用 i 编号时必须把上一次的 marker 传给 egret_act；界面已经变了会返回 stale 和新动作表且不执行，按新表重新决策即可。已确认的连续操作一次给多步 steps。
+- 动作表是紧凑文本，一行一个动作：编号 标签 role 状态。标签带 * 是图片字弱标签，整屏都是弱标签时会自动补一次本地 OCR。需要 hash、坐标或完整字段时传 format="json"。
+- 返回里的「变化」一行说明上一步把界面改成了什么样，不用自己 diff 两张表。
+- 对白与引导用 op=advance 一次推完；弹窗用 op=dismiss；加载过场（mode=transient）用 op=wait。
+- 动作表和 OCR 都定不下来，或要看布局、颜色、半透明遮罩、战斗画面时用 egret_screenshot；游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，视觉兜底该用就用。
+- 目标不在动作表里（在别的子树、需要语义消歧）用 egret_locate；已知稳定标识用 egret_find。显示对象以 hash 标识，id 是组件在代码/EXML 中绑定的属性名；stageRect 是舞台坐标，screenRect 是页面视口 CSS 像素坐标。
 - 操作后界面没有预期变化时用 egret_get_errors 看页面报错；想知道某个控件背后是哪段代码用 egret_inspect_code。
-- 探索开始前先用 egret_notes 查已有笔记，踩坑、确认入口或测出动画耗时后写回，避免下次重新摸索。已确认的流程用 egret_run_steps 复跑。
+- 探索开始前先用 egret_notes 查已有笔记，踩坑、确认入口或测出动画耗时后写回。已确认的流程用 egret_run_steps 复跑。
+- 首次使用或工具提示扩展未连接时，先调用 egret_extension_status；未连接则按 egret-install-extension skill 安装扩展。
 - splan_test_command 仅在用户本轮明确授权且 probe 确认加载 debug.js 时使用。
 - 未指定 tabId 时自动选用最近使用或当前激活的含 Egret 游戏的标签页。"""
 
@@ -401,17 +520,18 @@ TOOLS = {
              "rect": {"type": "object", "description": "只截这个矩形：{x, y, width, height}，页面视口 CSS 像素"}}),
         "screenshot", None),
     "egret_observe": (
-        "高速动作表快照：一次返回面板栈、顶层面板的可见文案，以及顶层面板里所有可交互对象的带编号动作表"
-        "（i 编号、role 角色、label 标签、状态、已解遮挡的点击点），外加语义指纹 marker。"
+        "高速动作表快照：紧凑文本，一行一个可点的动作（编号 标签 role 状态），外加面板名、页面文案和语义指纹 marker。"
         "和 egret_act 配合构成主循环：看表 → 按编号执行 → 直接拿到新表。"
-        "mode=guide-continue/dialogue-continue 时只给 recommendedTarget，用 egret_act 的 op=advance 推进；"
-        "mode=transient 是加载过场、mode=blocked 是整表被过场遮罩挡住，都用 op=wait 短等；"
-        "mode=modal-backdrop-dismiss 表示弹窗只能点遮罩关闭，用 egret_act 的 {\"op\":\"recommended\"}。"
-        "label 的 from 为 text/childText 才是真实文案，其余是弱标签（图片字），需要按钮文字时传 ocr=true 批量本地 OCR 补。",
+        "标签带 * 表示文字烘在图片里（弱标签），整屏都是弱标签时会自动补一次本地 OCR。"
+        "mode=guide-continue/dialogue-continue 用 egret_act 的 op=advance 推进；mode=transient/blocked 用 op=wait 短等；"
+        "mode=modal-backdrop-dismiss 先用表里的 close/confirm，都没有才用 {\"op\":\"recommended\"}。"
+        "被遮挡的目标点不了，默认只报数量不列行；需要 hash/坐标做二次定位时传 format=\"json\"。",
         obj({"rootHash": {"type": "integer", "description": "限定在某个面板/容器子树内，默认当前顶层面板"},
-             "limit": {"type": "integer", "description": "动作表最多多少行，默认 30，硬上限 60"},
-             "ocr": {"type": "boolean", "description": "对图片字按钮批量本地 OCR 补标签，默认 false"},
-             "ocrLimit": {"type": "integer", "description": "最多 OCR 多少个弱标签控件，默认 12，硬上限 20"}}),
+             "limit": {"type": "integer", "description": "动作表最多多少行，默认 30，硬上限 60；调小只少显示几行，不影响扫描范围"},
+             "ocr": {"type": "boolean", "description": "强制或禁止本地 OCR 补标签；默认按需自动"},
+             "ocrLimit": {"type": "integer", "description": "最多 OCR 多少个弱标签控件，默认 12，硬上限 20"},
+             "occluded": {"type": "boolean", "description": "把被遮挡的条目也列出来，默认 false"},
+             "format": {"type": "string", "enum": ["lines", "json"], "description": "默认 lines 紧凑文本；json 带 hash、坐标和完整字段"}}),
         "page", "observe"),
     "egret_act": (
         "按动作表执行并直接返回执行后的新动作表：把点击、等待界面稳定、重新观察合并成一次调用，"
@@ -422,7 +542,8 @@ TOOLS = {
         "{\"op\":\"scroll\",\"i\":3,\"dy\":-200} 滚动列表；{\"op\":\"wait\",\"ms\":800} 或 {\"op\":\"wait\",\"until\":{查询条件}} 等待。"
         "编号只有传了上一次的 marker 且界面没变时才有效：界面已变会原样返回 stale=true 和新动作表，不执行任何点击。"
         "每步可加 expect（查询条件）校验结果，失败即停止并返回当前动作表；加 optional 则该步失败不影响结论。"
-        "已确认的连续操作可以一次给多步，但 i 编号只对第一步有效，后续步骤用查询条件或 op 定位。",
+        "已确认的连续操作可以一次给多步，但 i 编号只对第一步有效，后续步骤用查询条件或 op 定位。"
+        "返回的新表里「变化」一行直接说明这一步把界面改成了什么样，不用自己 diff 两张表。",
         obj({"steps": {"type": "array", "items": {"type": "object"},
                        "description": "1-10 个步骤，按顺序执行，失败即停止"},
              "marker": {"type": "string", "description": "上一次 observe/act 返回的 marker；用 i 编号时必须传"},
@@ -431,8 +552,10 @@ TOOLS = {
              "method": {"type": "string", "enum": ["touch", "dom", "dom-touch"]},
              "stableMs": {"type": "integer", "description": "界面稳定多久算落定，默认 250"},
              "timeoutMs": {"type": "integer", "description": "每步等待界面变化的上限，默认 3000"},
-             "quietMs": {"type": "integer", "description": "一直没变化就提前返回的时间，默认 1200"},
+             "quietMs": {"type": "integer", "description": "一直没变化就提前返回的时间，默认 600"},
              "loadingMs": {"type": "integer", "description": "结束时如果还在加载过场，最多再等多久，默认 6000"},
+             "occluded": {"type": "boolean", "description": "把被遮挡的条目也列出来，默认 false"},
+             "format": {"type": "string", "enum": ["lines", "json"], "description": "默认 lines 紧凑文本；json 带 hash、坐标和完整字段"},
              "screenshot": {"type": "boolean", "description": "附带一张压缩截图，默认 false"}}),
         "page", "act"),
     "egret_locate": (
@@ -834,6 +957,8 @@ class McpServer:
         self.bridge = bridge
         self.write_lock = asyncio.Lock()
         self.scope = None
+        # hash -> 识别出的文字（空串表示认过但没认出来），只在本进程内复用
+        self.ocr_cache = {}
 
     async def send(self, msg):
         data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
@@ -868,9 +993,10 @@ class McpServer:
             elif method == "ping":
                 await self.reply(req_id, {})
             elif method == "tools/list":
+                exposed = visible_tools()
                 await self.reply(req_id, {"tools": [
-                    {"name": name, "description": desc, "inputSchema": schema}
-                    for name, (desc, schema, _, _) in TOOLS.items()
+                    {"name": name, "description": TOOLS[name][0], "inputSchema": TOOLS[name][1]}
+                    for name in exposed
                 ]})
             elif method == "tools/call":
                 await self.reply(req_id, await self.call_tool(params.get("name"), params.get("arguments") or {}))
@@ -895,18 +1021,24 @@ class McpServer:
             if name == "egret_locate" and args.get("ocr") and res.get("ambiguous"):
                 res = await self.enrich_locate_with_ocr(args, res)
             if name in ("egret_observe", "egret_act"):
-                if args.get("ocr"):
-                    res = await self.enrich_table_with_ocr(args, res)
+                # 整屏都是图片字按钮时自动补一次本地 OCR：让模型专门花一轮决定「要不要 OCR」不划算
+                if args.get("ocr") or (args.get("ocr") is None and res.get("needOcr")):
+                    res = await self.enrich_table_with_ocr(args, res, reuse=args.get("ocr") is None)
                 for action in res.get("actions") or []:
                     action.pop("screenRect", None)
-                for key in ("devicePixelRatio", "viewportSize", "captureSize"):
+                for key in ("devicePixelRatio", "viewportSize", "captureSize", "needOcr"):
                     res.pop(key, None)
+                if args.get("format") == "json":
+                    body = json.dumps(res, ensure_ascii=False)
+                else:
+                    body = render_action_table(res)
                 if args.get("screenshot"):
                     shot = await self.invoke("egret_screenshot", {"tabId": args.get("tabId"), "maxWidth": 900})
                     return {"content": [
-                        {"type": "text", "text": json.dumps(res, ensure_ascii=False)},
+                        {"type": "text", "text": body},
                         {"type": "image", "data": shot["data"], "mimeType": shot["mimeType"]},
                     ]}
+                return {"content": [{"type": "text", "text": body}]}
             if name == "egret_screenshot":
                 note = {"tabId": res.get("tabId")}
                 if res.get("warnings"):
@@ -919,14 +1051,28 @@ class McpServer:
         except Exception as e:  # noqa: BLE001
             return {"isError": True, "content": [{"type": "text", "text": str(e)}]}
 
-    async def enrich_table_with_ocr(self, args, table):
-        """动作表里图片字按钮的标签是 qaName/资源名；一次截图批量 OCR 把真实文案补上。"""
+    async def enrich_table_with_ocr(self, args, table, reuse=False):
+        """动作表里图片字按钮的标签是 qaName/资源名；一次截图批量 OCR 把真实文案补上。
+
+        自动触发时按 hash 复用上次的识别结果：同一个按钮的图片字不会变，
+        否则每次 observe 都要多花一次截图和半秒 OCR。显式传 ocr=true 则强制重认。
+        """
         weak = set(WEAK_LABEL_SOURCES)
         limit = min(max(int(args.get("ocrLimit", 12)), 1), 20)
+        cached = 0
+        if reuse:
+            known = {}
+            for action in table.get("actions") or []:
+                hit = self.ocr_cache.get(str(action.get("hash")))
+                if hit:
+                    known[str(action["hash"])] = hit
+            cached = apply_ocr_labels(table, known) if known else 0
         candidates = [a for a in (table.get("actions") or [])
-                      if a.get("from") in weak and not a.get("occluded") and a.get("screenRect")][:limit]
+                      if a.get("from") in weak and not a.get("occluded") and a.get("screenRect")
+                      and not (reuse and str(a.get("hash")) in self.ocr_cache)][:limit]
         if not candidates:
-            table["ocr"] = {"available": True, "skipped": "no-weak-labels"}
+            table["ocr"] = {"available": True, "filled": cached,
+                            "skipped": "cached" if cached else "no-weak-labels"}
             return table
         try:
             shot = await self.invoke("egret_screenshot", {"tabId": args.get("tabId"), "format": "png", "maxWidth": 1600})
@@ -940,7 +1086,13 @@ class McpServer:
         except Exception as e:  # noqa: BLE001
             table["ocr"] = {"available": False, "error": str(e)}
             return table
-        ocr["filled"] = apply_ocr_labels(table, ocr.pop("texts", None) or {})
+        texts = ocr.pop("texts", None) or {}
+        # 认出来的和没认出来的都记下来，避免同一屏反复截图重认
+        for action in candidates:
+            key = str(action.get("hash"))
+            if len(self.ocr_cache) < 800:
+                self.ocr_cache[key] = texts.get(key, "")
+        ocr["filled"] = apply_ocr_labels(table, texts) + cached
         if shot.get("warnings"):
             ocr["warnings"] = shot["warnings"]
         table["ocr"] = ocr
@@ -1034,9 +1186,12 @@ class McpServer:
                 elif page_method in ("observe", "act"):
                     args["limit"] = min(max(int(args.get("limit", 30)), 1), 60)
                     args.pop("screenshot", None)
-                    if args.pop("ocr", None):
-                        args["rects"] = True
+                    args.pop("ocr", None)
                     args.pop("ocrLimit", None)
+                    args.pop("format", None)
+                    # 渲染和 OCR 都在 server 侧做，页面一律返回完整字段
+                    args["detail"] = True
+                    args["rects"] = True
                 elif page_method == "locate":
                     requested = int(args.get("limit", 8))
                     if args.get("ocr"):
