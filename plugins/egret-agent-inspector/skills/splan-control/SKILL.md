@@ -28,7 +28,8 @@ description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象�
 - 批量查询带 `fields`（如 `["hash","qaName","text","center"]`），默认输出很啰嗦，很容易把上下文撑满。
 - 点击用 `egret_tap`：入场动画期间加 `settleMs: 300`；中心点被挡住时工具会自动改点包围盒内未被遮挡的位置，仍报“目标被遮挡”说明真有东西压在上面——先 `egret_dismiss_popups`，不要用 `force`。
 - 每步之后用 `egret_wait_for` 等预期结果，不要用固定 sleep 代替。
-- `egret_observe` 返回 `mode: "transient"` 时是地图标题或加载过场，短等复查，不点暗色区域；只有 `modal-backdrop-dismiss` 才表示遮罩可安全点击。
+- `egret_observe` 返回 `mode: "transient"` 时是地图标题或加载过场，短等复查，不点暗色区域。
+- 普通弹窗（签到、活动、奖励）既有关闭按钮也能点遮罩关掉，优先点动作表里 `role: close` 的那一项；系统提示弹窗点遮罩关不掉，必须点确认按钮（`role: confirm`）。`mode: "modal-backdrop-dismiss"` 只是没找到关闭控件的推测，点一次遮罩没反应就回动作表找按钮，别重复点。
 - 界面没有预期变化时先 `egret_get_errors`，再决定重试还是报缺陷。
 - 主动结合截图理解实际画面、图片字、布局和半透明遮罩，结合显示列表判断组件状态、层级与命中；窗口未前台本身不表示截图陈旧。截图默认已压缩，需要细节时用 `rect` 只截目标区域。
 

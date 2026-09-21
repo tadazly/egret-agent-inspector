@@ -36,17 +36,28 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 
 ## mode 决定这一步能做什么
 
-只有 `mode: "normal"` 时才按编号自由选择目标。其余状态下工具只给一个合法动作：
+`mode: "normal"` 时按编号自由选择目标。其余状态下工具会指出该走哪一步：
 
 | mode | 含义 | 该做什么 |
 | --- | --- | --- |
-| `guide-hole` | 新手引导挖洞，只有洞里能点 | `egret_act {"steps": [{"op": "recommended"}]}` |
-| `guide-continue` / `dialogue-continue` | 点任意处继续的引导或 NPC 对白 | `{"op": "advance"}` 一次推完，不要逐次点 |
-| `modal-backdrop-dismiss` | 弹窗没有关闭控件，但遮罩可点 | `{"op": "recommended"}` |
+| `guide-hole` | 新手引导挖洞，只有洞里能点 | `egret_act {"steps": [{"op": "recommended"}]}`，此时没有动作表 |
+| `guide-continue` / `dialogue-continue` | 点任意处继续的引导或 NPC 对白 | `{"op": "advance"}` 一次推完，不要逐次点，此时没有动作表 |
+| `modal-backdrop-dismiss` | 没识别到关闭控件，推测遮罩可点；动作表照常给出 | 先用表里的关闭/确定按钮，都没有才 `{"op": "recommended"}` |
 | `transient` | 地图标题、章节标题、加载过场，没有安全点击目标 | `{"op": "wait", "ms": 800}`，不要点黑色区域 |
 | `blocked` | 整张表被同一个对象挡住 | 有 `recommendedTarget` 就 `{"op": "recommended"}`（战斗入场演出这类点任意处跳过），否则短等 |
 
 `advance` 返回 `advanced: 0` 时看 `stopped` / `hint`：这表示工具明确没有点击。不要空等，也不要改点 `AUTO` 或重复点 `talk_txt`；按返回的动作表定位选项或下一目标。
+
+## 弹窗
+
+游戏里两类弹窗的关法不一样，分清楚再动手：
+
+- **普通弹窗**（签到、活动、奖励、商店）：既有关闭按钮，也能点内容区外的遮罩关掉，两条路都通。优先点动作表里 `role` 为 `close` 的那一项，它比遮罩稳。
+- **系统提示弹窗**（一段文字加一个确认按钮的那种）：**点遮罩关不掉**，必须点「确定/确认/知道了」按钮，动作表里通常是 `role: confirm`。
+
+所以 `mode: "modal-backdrop-dismiss"` 只是"没找到关闭控件"的推测，不是"只能点遮罩"。点一次遮罩界面没变化（`settle.changed` 为 false、面板 hash 没消失）就立刻停手，回到动作表找 `close` / `confirm` 的按钮，不要重复点同一个遮罩。
+
+进入游戏后常有一串强制弹窗，逐个处理；每关一个都确认原弹窗的 `hash` 已经从面板栈里消失。批量清弹窗用 `egret_act {"steps": [{"op": "dismiss", "max": 3}]}`。
 
 ## 目标不在动作表里
 
