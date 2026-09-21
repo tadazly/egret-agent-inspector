@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.2.0";
+    var VERSION = "1.2.1";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -1711,14 +1711,18 @@
         if (recommendedTarget) {
             out.mode = recommendedTarget.reason;
             out.recommendedTarget = recommendedTarget;
-            out.marker = hashString([out.mode, si.top && hashOf(si.top), out.text.join("|")].join("#"));
-            out.hint = recommendedTarget.reason === "guide-hole"
-                ? "引导挖洞：只能点 recommendedTarget，用 egret_act 的 {op:\"recommended\"}"
-                : /dialogue|guide/.test(recommendedTarget.reason)
-                    ? "连续对白/引导：用 egret_act 的 op=advance 一次推完，不要逐次点击"
-                    : "顶层弹窗没有关闭控件，用 egret_act 的 {op:\"recommended\"} 点遮罩关闭";
-            lastTable = out;
-            return out;
+            // 引导挖洞和点任意处继续的对白确实只有一个合法目标，直接给它，不要让 agent 乱点。
+            // 「只能点遮罩关闭」只是推测，弹窗里通常仍有关闭/确定/领取按钮：继续把动作表一起给出，
+            // 否则遮罩点不动时 agent 手里什么都没有，只能空转。
+            if (recommendedTarget.reason !== "modal-backdrop-dismiss") {
+                out.marker = hashString([out.mode, si.top && hashOf(si.top), out.text.join("|")].join("#"));
+                out.hint = recommendedTarget.reason === "guide-hole"
+                    ? "引导挖洞：只能点 recommendedTarget，用 egret_act 的 {op:\"recommended\"}"
+                    : "连续对白/引导：用 egret_act 的 op=advance 一次推完，不要逐次点击";
+                lastTable = out;
+                return out;
+            }
+            out.hint = "没有识别到关闭控件：优先用动作表里的关闭/确定/领取按钮，都不行再用 egret_act 的 {op:\"recommended\"} 点遮罩";
         }
         if (transientOverlay) {
             out.mode = "transient";
@@ -1746,10 +1750,46 @@
             owners.push({ o: owner, order: order++ });
         });
 
+        // FairyGUI 这类框架的父链上带着 visible=false 的容器，显示列表遍历会在那里被剪掉，
+        // 把真正能点的控件（常见的就是弹窗右上角的关闭按钮）整个漏掉。
+        // 引擎自己的命中检测才是基准：在面板范围内扫一遍网格，把漏掉的动作宿主补回来。
+        var sweepRect = root === stage ? { x: 0, y: 0, width: stage.stageWidth, height: stage.stageHeight } : stageRect(root);
+        if (sweepRect) {
+            var sx0 = Math.max(0, sweepRect.x), sy0 = Math.max(0, sweepRect.y);
+            var sx1 = Math.min(stage.stageWidth, sweepRect.x + sweepRect.width);
+            var sy1 = Math.min(stage.stageHeight, sweepRect.y + sweepRect.height);
+            // 网格步长要小于常见按钮，否则 40px 的关闭按钮会整好从网眼里漏过去
+            var points = [], cols = 20, rows = 14;
+            for (var ci = 0; ci <= cols; ci++) {
+                for (var ri = 0; ri <= rows; ri++) {
+                    points.push([sx0 + (sx1 - sx0) * ci / cols, sy0 + (sy1 - sy0) * ri / rows]);
+                }
+            }
+            // 关闭按钮几乎总贴在左右边缘靠上的位置，这两条竖带再加密一遍
+            [0.03, 0.06, 0.10, 0.90, 0.94, 0.97].forEach(function (fx) {
+                [0.04, 0.08, 0.12, 0.17, 0.22, 0.88, 0.94].forEach(function (fy) {
+                    points.push([sx0 + (sx1 - sx0) * fx, sy0 + (sy1 - sy0) * fy]);
+                });
+            });
+            for (var pi = 0; pi < points.length && owners.length < limit * 3; pi++) {
+                var hit = hitTest(round(points[pi][0]), round(points[pi][1]));
+                if (!hit) continue;
+                var hitOwner = semanticActionOwner(hit, root);
+                if (!hitOwner || hitOwner === root || hitOwner === stage) continue;
+                if (root !== stage && !isSelfOrAncestor(root, hitOwner)) continue;
+                var hitKey = String(hashOf(hitOwner));
+                if (seen[hitKey]) continue;
+                seen[hitKey] = true;
+                owners.push({ o: hitOwner, order: order++ });
+            }
+        }
+
         var probed = 0;
-        var entries = owners.map(function (item) {
+        var entries = [];
+        owners.forEach(function (item) {
             var o = item.o;
             var r = stageRect(o);
+            if (!r || r.width < 4 || r.height < 4) return;
             var label = actionLabelOf(o);
             var entry = {
                 hash: hashOf(o),
@@ -1774,7 +1814,7 @@
                 }
             }
             entry.point = point;
-            return entry;
+            entries.push(entry);
         });
         // 祖先-后代去重：容器和它装的按钮不该各占一行，同名的父子只留一行
         var indexed = {}, descendants = {};
@@ -1807,7 +1847,23 @@
             if (Math.abs(a._y - b._y) > 12) return a._y - b._y;
             return a._x - b._x;
         });
-        out.omitted = Math.max(0, entries.length - limit);
+        // 奖励格子这类一模一样的条目会几十个地刷屏，把真正的按钮挤出表外。
+        // 被遮挡的条目本来就点不了，只作为信号保留少量；其余同款各留前三个。
+        var repeats = {}, collapsed = 0, occludedKept = 0;
+        entries = entries.filter(function (e) {
+            if (e.occluded) {
+                if (occludedKept++ < 5) return true;
+                collapsed++;
+                return false;
+            }
+            var key = e.role + "|" + e.label + "|" + e.size.join("x");
+            repeats[key] = (repeats[key] || 0) + 1;
+            if (repeats[key] <= 3) return true;
+            collapsed++;
+            return false;
+        });
+        out.omitted = Math.max(0, entries.length - limit) + collapsed;
+        if (collapsed) out.collapsed = collapsed;
         entries = entries.slice(0, limit);
         entries.forEach(function (entry, i) {
             entry.i = i + 1;
