@@ -270,7 +270,9 @@ class OcrLabelTest(unittest.TestCase):
         ]}
         filled = server.apply_ocr_labels(table, {"1": " 进入游戏 ", "2": "别动我", "9": "无关"})
         self.assertEqual(filled, 1)
-        self.assertEqual(table["actions"][0], {"hash": 1, "label": "进入游戏", "from": "ocr"})
+        # 美术字常被 OCR 认错，原结构化标签保留在 alt 里兜底
+        self.assertEqual(table["actions"][0],
+                         {"hash": 1, "label": "进入游戏", "from": "ocr", "alt": "btn_start"})
         self.assertEqual(table["actions"][1]["label"], "开始")
         self.assertEqual(table["actions"][2]["from"], "source")
 

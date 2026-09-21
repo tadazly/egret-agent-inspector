@@ -194,11 +194,16 @@ WEAK_LABEL_SOURCES = ("qaName", "id", "name", "source", "className")
 
 
 def apply_ocr_labels(table, texts):
-    """把 OCR 结果写回动作表：只替换图片字造成的弱标签，返回替换了几个。"""
+    """把 OCR 结果写回动作表：只替换图片字造成的弱标签，返回替换了几个。
+
+    美术字体经常被识别错（"进入游戏" → "迸八湔懑"），所以原来的结构化标签保留在 alt 里，
+    识别结果不可信时 agent 还能退回去用它。
+    """
     filled = 0
     for action in table.get("actions") or []:
         text = (texts.get(str(action.get("hash"))) or "").strip()
         if text and action.get("from") in WEAK_LABEL_SOURCES:
+            action["alt"] = action["label"]
             action["label"] = text[:32]
             action["from"] = "ocr"
             filled += 1

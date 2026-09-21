@@ -29,7 +29,8 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 ## 动作表怎么读
 
 - `label` 的 `from` 是 `text` / `childText` 时才是界面上的真实文案；`qaName` / `id` / `name` / `source` / `className` 是弱标签，说明文字烘在图片里。
-- 需要按按钮文字选目标时，给 `egret_observe` 传 `ocr: true`：工具会截一次图，对弱标签控件批量做本地 OCR（Windows / macOS，不上传图片），把 `label` 换成识别出的文字、`from` 标为 `ocr`。
+- 需要按按钮文字选目标时，给 `egret_observe` 传 `ocr: true`：工具会截一次图，对弱标签控件批量做本地 OCR（Windows / macOS，不上传图片），把 `label` 换成识别出的文字、`from` 标为 `ocr`，原来的结构化标签留在 `alt` 里。
+- OCR 对美术字体不可靠（实测「进入游戏」被识成「迸八湔懑」）。`label` 读不通时改看 `alt`，两个都定不下来就截图确认，不要照着乱码点。
 - `occluded: true` 的条目被 `blocker` 挡着，`egret_act` 会拒绝点它。先关掉遮挡物再点，不要 `force`。
 - `omitted` 大于 0 表示还有没列出的控件：缩小 `rootHash` 或提高 `limit`。
 - `scope` 为 `stage` 时表示顶层不是模态面板，整个舞台（含地图上的 NPC、入口）都在表里；为 `panel` 时只看当前模态面板。
