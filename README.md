@@ -38,7 +38,7 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | Skill | 用途 |
 | --- | --- |
 | `egret-install-extension` | 为默认或指定浏览器安装、更新扩展 |
-| `egret-game-operation` | 查找组件并执行点击、拖动、输入、等待和截图 |
+| `egret-game-operation` | 读动作表并执行点击、拖动、输入、等待和截图 |
 | `egret-e2e-test` | 编写、运行和报告 E2E 用例 |
 | `egret-bug-hunt` | 探索式操作游戏，发现报错、异常界面和无响应交互 |
 | `egret-session-recovery` | 浏览器闪退后恢复验收现场；重复闪退时采样运行态指标 |
@@ -49,15 +49,20 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 
 | 类别 | 工具 |
 | --- | --- |
+| 主循环 | `egret_observe`（带编号的动作表 + 语义指纹）、`egret_act`（按编号执行并返回执行后的新动作表） |
 | 连接 | `egret_extension_status`、`egret_install_extension`、`egret_reload_extension`、`egret_reopen_browser`、`egret_list_tabs`、`egret_navigate` |
-| 查询 | `egret_scene`（面板栈与控件状态）、`egret_locate`（自然语言语义定位与消歧）、`egret_status`、`egret_runtime_stats`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
+| 查询 | `egret_locate`（自然语言语义定位与消歧）、`egret_status`、`egret_runtime_stats`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
 | 操作 | `egret_tap`、`egret_advance`、`egret_drag`、`egret_dismiss_popups`、`egret_set_props`、`egret_wait_for`、`egret_evaluate`、`egret_screenshot` |
 | 排错 | `egret_get_errors`：页面未捕获异常、Promise 拒绝、资源加载失败和 console.error/warn；`egret_inspect_code`：控件背后的事件回调与源码片段 |
 | 记忆 | `egret_notes`：按游戏域名保存入口、定位条件、卡点解法、缺陷与耗时，跨会话复用 |
 | 测试 | `egret_run_steps`：批量执行步骤并断言，失败时附截图，并报告运行期间的页面错误 |
 | 项目专属 | `splan_call`：模块与 QA 能力；`splan_test_command`：仅明确授权且加载 `debug.js` 时执行测试命令 |
 
-查询类工具限制返回规模；`egret_locate` 只有在唯一高置信匹配时才返回可直接点击的目标，`ocr: true` 会在结构化结果歧义后用 Windows/macOS 本地 OCR 批量识别候选按钮；`egret_wait_for` 支持带明确目标的 `changed/anyOf`，`egret_screenshot` 默认压缩并可用 `rect` 只截局部。
+日常操作只用 `egret_observe` → `egret_act` 两个工具：看带编号的动作表，按编号执行，执行结果里直接带回新的动作表，不必每点一次再单独查询和等待。动作表用语义指纹判断界面是否还是决策时那一页，界面变了会返回 `stale: true` 和新表且不执行点击。引导挖洞、对白推进、加载过场和只能点遮罩关闭的弹窗都由 `mode` 指明唯一合法动作。
+
+图片字按钮在动作表里是弱标签，给 `egret_observe` 传 `ocr: true` 会在同一次调用里批量本地 OCR 补上真实文案（不上传图片）；结构化信息和 OCR 都定不下来时再截图做视觉确认——游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，这层兜底一直保留。
+
+查询类工具限制返回规模；`egret_locate` 只有在唯一高置信匹配时才返回可直接点击的目标；`egret_wait_for` 支持带明确目标的 `changed/anyOf`，`egret_screenshot` 默认压缩并可用 `rect` 只截局部。
 
 组件可按 `id`（代码/EXML 中绑定的属性名）、`qaName`、`text`、`className`、`name` 或图片 `source` 定位。
 `qaName` 为 `宿主短类名__部件名`（如 `SignPanel__btn_sign`）：组件自身写了 qaName 时直接使用，否则由绑定关系推导，因此正式构建中同样可用。

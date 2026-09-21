@@ -11,7 +11,7 @@ description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象�
 
 1. `egret_notes {"action":"search","q":"<模块或流程名>"}`：先看历史笔记里有没有入口、定位条件和已知坑。
 2. `splan_call {"action":"probe"}`：确认模块、QA 与 debug 能力。
-3. `egret_scene`：看清当前面板栈。被弹窗压住时 `egret_dismiss_popups {"until":{"qaName":"<主界面组件>"}}`。
+3. `egret_observe`：看清当前面板栈和可点目标，按编号用 `egret_act` 操作。被弹窗压住时 `egret_dismiss_popups {"until":{"qaName":"<主界面组件>"}}`。
 
 ## 调试直达
 
@@ -28,7 +28,7 @@ description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象�
 - 批量查询带 `fields`（如 `["hash","qaName","text","center"]`），默认输出很啰嗦，很容易把上下文撑满。
 - 点击用 `egret_tap`：入场动画期间加 `settleMs: 300`；中心点被挡住时工具会自动改点包围盒内未被遮挡的位置，仍报“目标被遮挡”说明真有东西压在上面——先 `egret_dismiss_popups`，不要用 `force`。
 - 每步之后用 `egret_wait_for` 等预期结果，不要用固定 sleep 代替。
-- `egret_scene` 返回 `transientOverlay` 时是地图标题或加载过场，按返回的 `waitMs` 短等复查，不点暗色区域；只有 `modal-backdrop-dismiss` 才表示遮罩可安全点击。
+- `egret_observe` 返回 `mode: "transient"` 时是地图标题或加载过场，短等复查，不点暗色区域；只有 `modal-backdrop-dismiss` 才表示遮罩可安全点击。
 - 界面没有预期变化时先 `egret_get_errors`，再决定重试还是报缺陷。
 - 主动结合截图理解实际画面、图片字、布局和半透明遮罩，结合显示列表判断组件状态、层级与命中；窗口未前台本身不表示截图陈旧。截图默认已压缩，需要细节时用 `rect` 只截目标区域。
 

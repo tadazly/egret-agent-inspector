@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.1.25";
+    var VERSION = "1.2.0";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -833,6 +833,8 @@
 
     function transientOverlayOf(panel) {
         if (!panel || findCloseControl(panel) || continueTargetOf(panel)) return null;
+        // 面板里有带文字的可点控件（对白选项、功能按钮）就不是过场：有东西可点，不该让调用方空等
+        if (dialogueHasDecision(panel)) return null;
         var tags = [], cur = panel;
         for (var depth = 0; cur && depth < 4; depth++, cur = cur.parent) {
             tags.push(className(cur), nameOf(cur), bindId(cur), qaNameOf(cur), sourceOf(cur));
@@ -847,7 +849,7 @@
             action: "wait",
             waitMs: 3000,
             panel: project(describe(panel, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center", "currentState"]),
-            actionHint: "这是没有安全点击目标的全屏暗化、地图标题或加载过场；先短等并重新调用 egret_scene，不要点遮罩。若 3 秒后同一 hash 仍存在，再截图和 hit_test 排查"
+            actionHint: "这是没有安全点击目标的全屏暗化、地图标题或加载过场；先短等再重新观察，不要点遮罩。若 3 秒后同一 hash 仍存在，再截图和 hit_test 排查"
         };
         if (backdrop && backdrop.evidence) result.backdrop = project(describe(backdrop.evidence, { center: true }),
             ["hash", "className", "id", "name", "qaName", "text", "center"]);
@@ -953,13 +955,72 @@
         });
     }
 
-    function guideTargetOf(panel) {
-        if (!panel || !/guideMask\.GuideMask/i.test(className(panel))) return null;
-        var frame = null;
+    // GuideMask 常挂在 guideMaskLayer 这类与顶层面板平级的图层下，顺着顶层面板找不到，要在舞台范围内找
+    function guideMaskIn(panel) {
+        function search(root) {
+            if (!root) return null;
+            if (/guideMask\.GuideMask/i.test(className(root))) return root;
+            var found = null;
+            walk(root, function (o) {
+                if (found) return false;
+                if (!o.visible || o.alpha === 0) return false;
+                if (/guideMask\.GuideMask/i.test(className(o))) found = o;
+            });
+            return found;
+        }
+        return search(panel) || search(getStage());
+    }
+
+    // 挖洞区域：优先用 imgKuang 边框；没有边框时由 shapN 遮罩碎片反推没被盖住的那一格
+    function guideHoleRect(panel) {
+        var stage = getStage();
+        if (!stage) return null;
+        var frame = null, bands = [];
         walk(panel, function (o) {
+            if (o === panel) return;
+            if (!o.visible || o.alpha === 0) return false;
             if (!frame && bindId(o) === "imgKuang") frame = o;
+            if (!/^shap\d+$/i.test(nameOf(o) || "")) return;
+            var r = stageRect(o);
+            if (r && r.width > 2 && r.height > 2) bands.push(r);
         });
-        var r = frame && stageRect(frame);
+        if (frame) {
+            var fr = stageRect(frame);
+            if (fr && fr.width >= 4 && fr.height >= 4) return fr;
+        }
+        if (bands.length < 3) return null;
+        var xs = [0, stage.stageWidth], ys = [0, stage.stageHeight];
+        bands.forEach(function (r) {
+            xs.push(Math.max(0, r.x), Math.min(stage.stageWidth, r.x + r.width));
+            ys.push(Math.max(0, r.y), Math.min(stage.stageHeight, r.y + r.height));
+        });
+        var uniq = function (a) { return a.filter(function (v, i) { return a.indexOf(v) === i; }).sort(function (x, y) { return x - y; }); };
+        xs = uniq(xs);
+        ys = uniq(ys);
+        if (xs.length > 10 || ys.length > 10) return null;
+        var hole = null;
+        for (var xi = 0; xi < xs.length - 1; xi++) {
+            for (var yi = 0; yi < ys.length - 1; yi++) {
+                if (xs[xi + 1] - xs[xi] < 8 || ys[yi + 1] - ys[yi] < 8) continue;
+                var cx = (xs[xi] + xs[xi + 1]) / 2, cy = (ys[yi] + ys[yi + 1]) / 2;
+                var covered = bands.some(function (r) {
+                    return cx >= r.x && cx <= r.x + r.width && cy >= r.y && cy <= r.y + r.height;
+                });
+                if (covered) continue;
+                var cell = { x: xs[xi], y: ys[yi], width: xs[xi + 1] - xs[xi], height: ys[yi + 1] - ys[yi] };
+                hole = hole ? { x: Math.min(hole.x, cell.x), y: Math.min(hole.y, cell.y),
+                    width: Math.max(hole.x + hole.width, cell.x + cell.width) - Math.min(hole.x, cell.x),
+                    height: Math.max(hole.y + hole.height, cell.y + cell.height) - Math.min(hole.y, cell.y) } : cell;
+            }
+        }
+        if (!hole || (hole.width >= stage.stageWidth * 0.9 && hole.height >= stage.stageHeight * 0.9)) return null;
+        return hole;
+    }
+
+    function guideTargetOf(topPanel) {
+        var panel = guideMaskIn(topPanel);
+        if (!panel) return null;
+        var r = guideHoleRect(panel);
         if (!r || r.width < 4 || r.height < 4) return null;
         var fractions = [0.5, 0.3, 0.7];
         for (var yi = 0; yi < fractions.length; yi++) {
@@ -1026,6 +1087,8 @@
             // Exclude known continuation labels; other interactive text or option-like
             // controls remain decisions so advance still stops safely at choices.
             if (/talk_txt|talk_name|dialogue.*text|txt.*talk|content.*text|op_tip/i.test(tag)) return;
+            // 没有规范命名的对白正文：整句话很长且横跨对话框，不是选项，它自己接管「继续」点击
+            if (text.length >= 12 && r.width >= pr.width * 0.4) return;
             if (!text && !/button|btn|option|choice|select|answer|reply|branch|item/i.test(tag)) return;
             found = true;
         });
@@ -1038,7 +1101,7 @@
         if (!panel) return null;
         var panelTag = className(panel) + " " + (nameOf(panel) || "") + " " + (bindId(panel) || "");
         var guide = /guideMask\.GuideMask/i.test(panelTag);
-        var dialogue = /dialogueIntegration|dialogueButtomMixed|dialogueBottomMixed|npcDialogue|plotDialogue/i.test(panelTag);
+        var dialogue = /dialogueIntegration|dialogue(?:Buttom|Bottom)Mixed|npcDialog|plotDialog/i.test(panelTag);
         if (!guide && !dialogue) return null;
         // 出现选项或功能按钮时必须交还给 agent 做语义定位，不能把整块对话面板当“继续”盲点。
         if (dialogue && dialogueHasDecision(panel)) return null;
@@ -1470,6 +1533,363 @@
         }
     }
 
+    // ---------------------------------------------------------------- 高速动作表（observe / act）
+    // 借鉴 browser-use/jev-ultrafast：一次快照产出带编号的动作表；执行时按编号复用同一批对象引用，
+    // 并用「语义指纹」而不是几何变化判断还是不是决策时看到的那一页，因此持续播放的动画不会让决策作废。
+
+    var lastTable = null;
+
+    function hashString(s) {
+        var h = 5381;
+        for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+        return (h >>> 0).toString(36);
+    }
+
+    function baseName(value) {
+        if (!value) return null;
+        var s = String(value);
+        var i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+        if (i >= 0) s = s.slice(i + 1);
+        s = s.replace(/\.(png|jpg|jpeg|webp|json)$/i, "").trim();
+        return s || null;
+    }
+
+    function tidy(value, max) {
+        if (value === undefined || value === null) return null;
+        var s = String(value).replace(/\s+/g, " ").trim();
+        return s ? s.slice(0, max || 32) : null;
+    }
+
+    // 动作表标签：自身文案 > 子树文案 > qaName 部件名 > id > name > 图片资源名 > 短类名。
+    // from 为 text/childText 时是人类可读文案；其余是弱标签，图片字要靠 OCR 补。
+    function actionLabelOf(o) {
+        var own = tidy(textOf(o));
+        if (own) return { label: own, from: "text" };
+        var texts = [], source = null, stack = [], scanned = 0;
+        for (var i = numChildren(o) - 1; i >= 0; i--) stack.push(childAt(o, i));
+        while (stack.length && scanned < 140 && texts.length < 3) {
+            var c = stack.pop();
+            scanned++;
+            if (!c || !c.visible || c.alpha === 0) continue;
+            var t = tidy(textOf(c));
+            if (t && texts.indexOf(t) < 0) texts.push(t);
+            if (!source) source = baseName(sourceOf(c));
+            for (var j = numChildren(c) - 1; j >= 0; j--) stack.push(childAt(c, j));
+        }
+        if (texts.length) return { label: texts.join(" ").slice(0, 32), from: "childText" };
+        var qa = qaNameOf(o);
+        if (qa) return { label: String(qa).split("__").pop().slice(0, 32), from: "qaName" };
+        var id = tidy(bindId(o));
+        if (id) return { label: id, from: "id" };
+        var nm = tidy(nameOf(o));
+        if (nm) return { label: nm, from: "name" };
+        var src = baseName(sourceOf(o)) || source;
+        if (src) return { label: src.slice(0, 32), from: "source" };
+        return { label: shortClass(o), from: "className" };
+    }
+
+    var FAST_ROLES = [
+        ["npc", /storyInteractObject|(^|[_-])npc(?:[_-]|$)/i],
+        ["input", /inputText|textInput|editText|textField/i],
+        ["close", /close|关闭|關閉|quit|dismiss|(?:^|[\s_-])btn_no(?:$|[\s_-])/i],
+        ["confirm", /confirm|btn_yes|btn_ok|确定|確定|确认|確認|知道了|好的/i],
+        ["back", /back|return|返回/i],
+        ["tab", /tab|toggle|switch|radio|check/i],
+        ["item", /item|cell|slot|card|grid|list/i]
+    ];
+
+    function actionRoleOf(o, label) {
+        var blob = className(o) + " " + (nameOf(o) || "") + " " + (bindId(o) || "") + " " +
+            (qaNameOf(o) || "") + " " + (label || "");
+        for (var i = 0; i < FAST_ROLES.length; i++) if (FAST_ROLES[i][1].test(blob)) return FAST_ROLES[i][0];
+        return "button";
+    }
+
+    // 面板里的可见文案：给 agent 当页面正文用（任务描述、对白、数量）
+    function panelTexts(root, budget) {
+        var texts = [], stack = [], scanned = 0, total = 0;
+        for (var i = numChildren(root) - 1; i >= 0; i--) stack.push(childAt(root, i));
+        while (stack.length && scanned < 400 && total < budget) {
+            var c = stack.pop();
+            scanned++;
+            if (!c || !c.visible || c.alpha === 0) continue;
+            var t = tidy(textOf(c), 60);
+            if (t && texts.indexOf(t) < 0) {
+                texts.push(t);
+                total += t.length;
+            }
+            for (var j = numChildren(c) - 1; j >= 0; j--) stack.push(childAt(c, j));
+        }
+        return texts;
+    }
+
+    // 轻量指纹：只看面板栈、顶层面板与其文案。等待界面稳定时每 60ms 采一次，不能太贵。
+    function quickSignature() {
+        if (!getStage()) return "nostage";
+        var si;
+        try {
+            si = sceneInfo();
+        } catch (e) {
+            return "nostage";
+        }
+        if (!si.top) return "empty#" + si.layers.length;
+        return hashString([si.stack.length, hashOf(si.top), className(si.top), numChildren(si.top),
+            si.top.currentState || "", panelTexts(si.top, 400).join("|")].join("#"));
+    }
+
+    function scrollersIn(root) {
+        var out = [];
+        walk(root, function (o) {
+            if (out.length >= 4) return false;
+            if (!o.visible || o.alpha === 0) return false;
+            var vp = o.viewport;
+            if (!vp) return;
+            var r = stageRect(o);
+            if (!r || r.width < 40 || r.height < 40) return;
+            var entry = { hash: hashOf(o), label: actionLabelOf(o).label,
+                size: [round(r.width), round(r.height)] };
+            try {
+                if (vp.scrollV > 1) entry.canUp = true;
+                if (vp.contentHeight - o.height > 1 && vp.scrollV < vp.contentHeight - o.height - 1) entry.canDown = true;
+                if (vp.scrollH > 1) entry.canLeft = true;
+                if (vp.contentWidth - o.width > 1 && vp.scrollH < vp.contentWidth - o.width - 1) entry.canRight = true;
+            } catch (e) {}
+            out.push(entry);
+        });
+        return out;
+    }
+
+    function panelBrief(o, stage) {
+        var out = { hash: hashOf(o), className: shortClass(o) };
+        var qa = qaNameOf(o) || bindId(o) || nameOf(o);
+        if (qa) out.name = tidy(qa);
+        if (o.currentState) out.state = o.currentState;
+        var r = stageRect(o);
+        if (r && r.width >= stage.stageWidth * 0.9 && r.height >= stage.stageHeight * 0.9) out.fullscreen = true;
+        return out;
+    }
+
+    // 一次快照产出带编号的动作表：语义动作宿主去重、标签、状态、已解遮挡的点击点和语义指纹。
+    function buildActionTable(p) {
+        var stage = requireStage();
+        var si = sceneInfo();
+        var limit = Math.min(Math.max(p.limit !== undefined ? +p.limit : 30, 1), 60);
+        var scoped = p.rootHash !== undefined && p.rootHash !== null;
+        // 顶层「面板」可能只是一块浮动提示；这种时候把整个舞台都收进动作表，
+        // 否则地图上的 NPC、入口这些真正的目标会被漏掉。占住大半个舞台的才当模态处理。
+        var topRect = si.top && stageRect(si.top);
+        var stageArea = stage.stageWidth * stage.stageHeight;
+        var modal = !!(topRect && topRect.width * topRect.height >= stageArea * 0.6);
+        var root = scoped ? byHash(p.rootHash) : (modal ? si.top : stage);
+        var out = {
+            stageSize: [stage.stageWidth, stage.stageHeight],
+            panel: si.top ? panelBrief(si.top, stage) : null,
+            stack: si.stack.map(function (o) { return panelBrief(o, stage); }),
+            mode: "normal",
+            scope: scoped ? "subtree" : modal ? "panel" : "stage",
+            actions: []
+        };
+        // 后台标签页里 rAF 会被节流，加载和动画会看起来卡住：明确告诉调用方，而不是让它一直等
+        if (document.hidden) out.warnings = ["页面在后台，浏览器会节流游戏动画与加载；请用户把浏览器窗口恢复到前台"];
+        if (!root) {
+            out.mode = "empty";
+            out.marker = "empty";
+            lastTable = out;
+            return out;
+        }
+        out.text = panelTexts(root, 600);
+
+        // 只有一个合法目标时就只给这一个：与 jev「只提供受支持的操作与目标」一致，避免瞎点遮罩碎片
+        // 顺序有讲究：对白/引导 > 加载过场 > 只能点遮罩关闭的弹窗。
+        // 否则战斗/地图的加载页会被当成「可以点遮罩关掉的弹窗」。
+        var recommendedTarget = scoped ? null : continueTargetOf(si.top);
+        var transientOverlay = null;
+        if (!scoped && !recommendedTarget) {
+            transientOverlay = transientOverlayOf(si.top);
+            if (!transientOverlay) recommendedTarget = backdropDismissTargetOf(si.top);
+        }
+        if (recommendedTarget) {
+            out.mode = recommendedTarget.reason;
+            out.recommendedTarget = recommendedTarget;
+            out.marker = hashString([out.mode, si.top && hashOf(si.top), out.text.join("|")].join("#"));
+            out.hint = recommendedTarget.reason === "guide-hole"
+                ? "引导挖洞：只能点 recommendedTarget，用 egret_act 的 {op:\"recommended\"}"
+                : /dialogue|guide/.test(recommendedTarget.reason)
+                    ? "连续对白/引导：用 egret_act 的 op=advance 一次推完，不要逐次点击"
+                    : "顶层弹窗没有关闭控件，用 egret_act 的 {op:\"recommended\"} 点遮罩关闭";
+            lastTable = out;
+            return out;
+        }
+        if (transientOverlay) {
+            out.mode = "transient";
+            out.transientOverlay = transientOverlay;
+            out.marker = hashString(["transient", si.top && hashOf(si.top), out.text.join("|")].join("#"));
+            out.hint = "地图标题/加载过场，没有安全点击目标：用 op=wait 短等后看返回的新动作表";
+            lastTable = out;
+            return out;
+        }
+
+        var seen = {}, owners = [], order = 0;
+        walk(root, function (o) {
+            if (o === root) return;
+            if (!o.visible || o.alpha === 0) return false;
+            if (owners.length >= limit * 3) return false;
+            var r = stageRect(o);
+            if (!r || r.width < 6 || r.height < 6) return;
+            if (r.x + r.width <= 0 || r.y + r.height <= 0 || r.x >= stage.stageWidth || r.y >= stage.stageHeight) return;
+            // semanticActionOwner 只在有真实点击监听或命名像控件时返回宿主，天然滤掉装饰节点
+            var owner = semanticActionOwner(o, root);
+            if (!owner || owner === root) return;
+            var key = String(hashOf(owner));
+            if (seen[key]) return;
+            seen[key] = true;
+            owners.push({ o: owner, order: order++ });
+        });
+
+        var probed = 0;
+        var entries = owners.map(function (item) {
+            var o = item.o;
+            var r = stageRect(o);
+            var label = actionLabelOf(o);
+            var entry = {
+                hash: hashOf(o),
+                role: actionRoleOf(o, label.label),
+                label: label.label,
+                from: label.from,
+                size: [round(r.width), round(r.height)],
+                _y: r.y, _x: r.x, _o: o
+            };
+            if (o.enabled === false) entry.off = true;
+            if (o.selected === true) entry.on = true;
+            if (o.currentState && o.currentState !== "up" && o.currentState !== "normal") entry.st = o.currentState;
+            if (p.rects) entry.screenRect = screenRect(r);
+            var point = { x: round(r.x + r.width / 2), y: round(r.y + r.height / 2) };
+            var hit = hitTest(point.x, point.y);
+            if (!reaches(o, hit)) {
+                var alt = probed++ < 24 ? probePoint(o, true) : null;
+                if (alt) point = alt.point;
+                else {
+                    entry.occluded = true;
+                    entry.blocker = hit ? shortClass(hit) + "#" + hashOf(hit) : null;
+                }
+            }
+            entry.point = point;
+            return entry;
+        });
+        // 祖先-后代去重：容器和它装的按钮不该各占一行，同名的父子只留一行
+        var indexed = {}, descendants = {};
+        entries.forEach(function (e) { indexed[e.hash] = e; });
+        entries.forEach(function (e) {
+            var cur = e._o.parent, guard = 0;
+            while (cur && guard++ < 12) {
+                var ancestor = indexed[hashOf(cur)];
+                if (ancestor) (descendants[ancestor.hash] = descendants[ancestor.hash] || []).push(e);
+                cur = cur.parent;
+            }
+        });
+        var dropped = {};
+        entries.forEach(function (e) {
+            var kids = descendants[e.hash] || [];
+            if (!kids.length) return;
+            var container = /group|container|list|scroller|view|layer|sprite/i.test(className(e._o)) ||
+                !interactionListenersOf(e._o).length;
+            if (kids.length >= 2 && container) {
+                dropped[e.hash] = true;
+                return;
+            }
+            kids.forEach(function (kid) { if (kid.label === e.label) dropped[kid.hash] = true; });
+        });
+        entries = entries.filter(function (e) { return !dropped[e.hash]; });
+
+        // 阅读顺序（先上后左），被遮挡的排到最后
+        entries.sort(function (a, b) {
+            if (!!a.occluded !== !!b.occluded) return a.occluded ? 1 : -1;
+            if (Math.abs(a._y - b._y) > 12) return a._y - b._y;
+            return a._x - b._x;
+        });
+        out.omitted = Math.max(0, entries.length - limit);
+        entries = entries.slice(0, limit);
+        entries.forEach(function (entry, i) {
+            entry.i = i + 1;
+            delete entry._x;
+            delete entry._y;
+            delete entry._o;
+        });
+        out.actions = entries;
+        // 整张表都被同一个对象挡住：可能是过场遮罩，也可能是「点任意处继续」的全屏接管层
+        if (entries.length >= 3 && !entries.some(function (e) { return !e.occluded; })) {
+            out.mode = "blocked";
+            out.blocker = entries[0].blocker;
+            var center = { x: stage.stageWidth / 2, y: stage.stageHeight / 2 };
+            var catcher = hitTest(center.x, center.y);
+            var catcherRect = catcher && stageRect(catcher);
+            // 全屏接管层的监听常挂在 stage 上（战斗入场演出的「点任意处跳过」），
+            // 所以只看它自己有没有监听会漏；能接收触摸的全屏层就当成可点
+            if (catcher && catcherRect && catcherRect.width >= stage.stageWidth * 0.9 &&
+                catcherRect.height >= stage.stageHeight * 0.9 && effectiveTouchable(catcher)) {
+                out.recommendedTarget = recommendationAt(catcher, center, "blocker-tap", catcher);
+                out.hint = "整个界面被一个全屏层接管（战斗入场演出、点任意处继续）：先短等，仍是这一层就用 egret_act 的 {op:\"recommended\"} 点它";
+            } else {
+                out.hint = "动作表里的目标全被同一个对象挡住（多半是过场遮罩）：短等后重新观察，一直不消失再截图排查";
+            }
+        }
+        var scrollers = scrollersIn(root);
+        if (scrollers.length) out.scrollers = scrollers;
+        if (p.rects) {
+            // 供 MCP server 做批量 OCR：截图是物理像素，这里给出换算所需的视口信息
+            var canvas = getCanvas();
+            var canvasRect = canvas && canvas.getBoundingClientRect ? canvas.getBoundingClientRect() : null;
+            out.devicePixelRatio = window.devicePixelRatio || 1;
+            out.viewportSize = { width: window.innerWidth, height: window.innerHeight };
+            out.captureSize = canvasRect ? {
+                width: Math.max(window.innerWidth, canvasRect.left + canvasRect.width),
+                height: Math.max(window.innerHeight, canvasRect.top + canvasRect.height)
+            } : { width: window.innerWidth, height: window.innerHeight };
+        }
+        // 指纹只看语义（面板、标签、状态、文案），不看坐标：循环播放的待机动画不该让决策作废
+        out.marker = hashString([out.panel && out.panel.hash, out.stageSize.join("x"), out.text.join("|"),
+            entries.map(function (e) {
+                return [e.hash, e.label, e.role, e.off ? 1 : 0, e.on ? 1 : 0, e.st || "", e.occluded ? 1 : 0].join(",");
+            }).join(";")].join("#"));
+        lastTable = out;
+        return out;
+    }
+
+    // 执行后等到「有用的状态」：先等指纹变化，再等它稳定；一直没变化就尽早返回，不空耗
+    async function settleAfter(before, p) {
+        var cap = Math.min(Math.max(p.timeoutMs !== undefined ? +p.timeoutMs : 3000, 0), 30000);
+        var stableMs = Math.min(Math.max(p.stableMs !== undefined ? +p.stableMs : 250, 0), 5000);
+        // 游戏点击常要等一次网络往返才有反应，比网页的两帧长得多；仍然没变化就尽早返回
+        var quietMs = Math.min(Math.max(p.quietMs !== undefined ? +p.quietMs : 1200, 60), Math.max(cap, 60));
+        var start = Date.now(), last = before, lastAt = Date.now(), changed = false;
+        while (Date.now() - start < cap) {
+            await sleep(60);
+            var sig = quickSignature();
+            if (sig !== before) changed = true;
+            if (sig !== last) {
+                last = sig;
+                lastAt = Date.now();
+            } else if (changed && Date.now() - lastAt >= stableMs) break;
+            else if (!changed && Date.now() - start >= quietMs) break;
+        }
+        return { changed: changed, waitedMs: Date.now() - start };
+    }
+
+    // 把动作表里的编号解析回真实对象：编号只有在指纹仍然成立时才可用
+    function resolveFastTarget(step, fresh) {
+        if (step.i !== undefined && step.i !== null) {
+            if (!fresh) throw new Error("动作表已过期，编号不再有效：按返回的新动作表重新决策");
+            var entry = (lastTable && lastTable.actions || []).filter(function (a) { return a.i === +step.i; })[0];
+            if (!entry) throw new Error("动作表里没有编号 " + step.i);
+            var o = byHash(entry.hash);
+            if (!o) throw new Error("编号 " + step.i + "（" + entry.label + "）对应的对象已不在显示列表里");
+            return { o: o, entry: entry };
+        }
+        var target = resolveTarget(step);
+        if (!target) throw new Error("步骤缺少目标：需要 i / hash / 查询条件之一");
+        return { o: target, entry: null };
+    }
+
     var handlers = {
         getErrors: function (p) {
             var since = p.sinceTs !== undefined && p.sinceTs !== null ? +p.sinceTs : 0;
@@ -1855,6 +2275,169 @@
             return out;
         },
 
+        observe: function (p) {
+            return buildActionTable(p);
+        },
+
+        act: async function (p) {
+            requireStage();
+            var raw = p.steps && p.steps.length ? p.steps : [p];
+            var steps = raw.slice(0, 10);
+            if (!steps.length) throw new Error("需要提供 steps：[{i:3}] 或 [{op:\"advance\"}] 等");
+            var method = p.method || (touchHandler() ? "touch" : "dom");
+            var tableArgs = { rootHash: p.rootHash, limit: p.limit };
+            var errorsBefore = errorBuffer().length;
+            // 编号只在「界面还是决策时那一页」时有效：对不上就直接把新动作表交回去重新决策
+            var fresh = !!lastTable;
+            if (p.marker) {
+                if (!lastTable || lastTable.marker !== p.marker) {
+                    var checked = buildActionTable(tableArgs);
+                    if (checked.marker !== p.marker) {
+                        checked.stale = true;
+                        checked.executed = [];
+                        checked.stopped = "stale";
+                        checked.hint = "界面已经不是做决策时那一页；按这张新动作表重新选择目标";
+                        return checked;
+                    }
+                }
+                fresh = true;
+            }
+            var started = Date.now();
+            var executed = [], stopped = "done";
+            for (var n = 0; n < steps.length; n++) {
+                var step = steps[n] || {};
+                var op = step.op || (step.text !== undefined ? "text" : "tap");
+                var before = quickSignature();
+                var record = { op: op };
+                try {
+                    if (op === "tap" || op === "text") {
+                        var resolved = resolveFastTarget(step, fresh);
+                        var o = resolved.o, entry = resolved.entry;
+                        record.target = entry ? { i: entry.i, label: entry.label, hash: entry.hash }
+                            : { hash: hashOf(o), label: actionLabelOf(o).label };
+                        if (op === "text") {
+                            o.text = String(step.text);
+                            if (step.dispatchChange !== false) {
+                                var eg = egretNs();
+                                o.dispatchEvent(new eg.Event(eg.Event.CHANGE, true));
+                            }
+                            record.text = String(step.text);
+                        } else {
+                            if (step.settleMs) await waitStable(o, +step.settleMs);
+                            var r = stageRect(o);
+                            if (!r) throw new Error("目标没有有效包围盒，可能已被移出舞台");
+                            var pt = step.offsetX !== undefined || step.offsetY !== undefined
+                                ? { x: round(r.x + (+step.offsetX || 0)), y: round(r.y + (+step.offsetY || 0)) }
+                                : { x: round(r.x + r.width / 2), y: round(r.y + r.height / 2) };
+                            // 执行前再解一次几何与遮挡：动作表里的坐标只是参考
+                            var hit = hitTest(pt.x, pt.y);
+                            if (!reaches(o, hit)) {
+                                var alt = probePoint(o, true);
+                                if (alt) pt = alt.point;
+                                else if (!step.force) {
+                                    throw new Error("目标被 " + (hit ? shortClass(hit) + "#" + hashOf(hit) : "未知对象") +
+                                        " 遮挡，未执行点击：先用 op=dismiss 关掉遮挡物再重试");
+                                }
+                            }
+                            await performGesture([pt], method, step.holdMs !== undefined ? +step.holdMs : 50, o);
+                            record.point = pt;
+                        }
+                    } else if (op === "recommended") {
+                        // 与 observe 用同一套判定，保证 agent 看到的 recommendedTarget 就是这里点的那个
+                        var rec = buildActionTable(tableArgs).recommendedTarget;
+                        if (!rec) throw new Error("当前没有 recommendedTarget：重新 observe 后按动作表选目标");
+                        await performGesture([rec.stagePoint], method, 50, null);
+                        record.target = { reason: rec.reason, stagePoint: rec.stagePoint,
+                            label: rec.target && (rec.target.text || rec.target.qaName || rec.target.id || rec.target.className) };
+                    } else if (op === "advance") {
+                        record.result = await handlers.advance({
+                            max: step.max !== undefined ? step.max : 6,
+                            waitMs: step.waitMs, paceMs: step.paceMs, stableMs: step.stableMs, method: method
+                        });
+                    } else if (op === "dismiss") {
+                        record.result = await handlers.dismissPopups({
+                            max: step.max !== undefined ? step.max : 2, until: step.until, method: method
+                        });
+                    } else if (op === "scroll") {
+                        var scroller = step.i !== undefined || hasCriteria(step)
+                            ? resolveFastTarget(step, fresh).o
+                            : byHash((lastTable && lastTable.scrollers && lastTable.scrollers[0] || {}).hash);
+                        if (!scroller) throw new Error("没有可滚动的目标：传 i/hash，或先 observe 看 scrollers");
+                        var sr = stageRect(scroller);
+                        if (!sr) throw new Error("滚动目标没有有效包围盒");
+                        var dy = step.dy !== undefined ? +step.dy : (step.dx !== undefined ? 0 : -Math.round(sr.height * 0.6));
+                        var dx = step.dx !== undefined ? +step.dx : 0;
+                        var from = { x: round(sr.x + sr.width / 2), y: round(sr.y + sr.height / 2) };
+                        var points = [];
+                        var stepsCount = 10;
+                        for (var si2 = 0; si2 <= stepsCount; si2++) {
+                            points.push({ x: round(from.x + dx * si2 / stepsCount), y: round(from.y + dy * si2 / stepsCount) });
+                        }
+                        await performGesture(points, method === "event" ? "touch" : method, 300, scroller);
+                        record.target = { hash: hashOf(scroller), label: actionLabelOf(scroller).label };
+                        record.delta = [dx, dy];
+                    } else if (op === "wait") {
+                        if (step.until && hasCriteria(step.until)) {
+                            record.result = await handlers.waitFor(Object.assign({ timeoutMs: step.timeoutMs || 8000 }, step.until));
+                            if (!record.result.matched) throw new Error("等待条件超时未满足");
+                        } else {
+                            await sleep(Math.min(Math.max(step.ms !== undefined ? +step.ms : 600, 0), 15000));
+                        }
+                    } else {
+                        throw new Error("未知的 op：" + op + "（支持 tap/text/recommended/advance/dismiss/scroll/wait）");
+                    }
+                    if (op !== "wait" || !step.until) {
+                        record.settle = await settleAfter(before, {
+                            timeoutMs: step.timeoutMs !== undefined ? step.timeoutMs : p.timeoutMs,
+                            stableMs: step.stableMs !== undefined ? step.stableMs : p.stableMs,
+                            quietMs: step.quietMs !== undefined ? step.quietMs : p.quietMs
+                        });
+                    }
+                    if (step.expect && hasCriteria(step.expect)) {
+                        var hitList = query(Object.assign({ visibleOnly: true }, step.expect));
+                        record.expectMatched = hitList.length > 0;
+                        if (!hitList.length) stopped = "expect-failed";
+                    }
+                } catch (e) {
+                    record.error = e && e.message ? e.message : String(e);
+                    // optional 步骤失败不影响结论：用于「先试着关个弹窗再点正事」这类链
+                    if (step.optional) record.skipped = true;
+                    else stopped = "error";
+                }
+                executed.push(record);
+                // 编号来自上一次快照；执行完第一步后界面已变，后续步骤必须用查询条件或 op 定位
+                fresh = false;
+                if (stopped !== "done") break;
+            }
+            // 加载过场里没有可点目标，直接在这一次调用里等它过去，省掉一整轮往返
+            var table = buildActionTable(tableArgs);
+            var loadingCap = Math.min(Math.max(p.loadingMs !== undefined ? +p.loadingMs : 6000, 0), 30000);
+            var loadingStart = Date.now();
+            while (Date.now() - loadingStart < loadingCap) {
+                if (table.mode !== "transient" && table.mode !== "empty" && table.mode !== "blocked") break;
+                // blocked 多半是等不走的全屏接管层，短等确认它不是加载条就交回去
+                if (table.mode === "blocked" && Date.now() - loadingStart >= 1500) break;
+                await sleep(300);
+                table = buildActionTable(tableArgs);
+            }
+            var loadingMs = Date.now() - loadingStart;
+            if (loadingMs > 300) table.waitedForLoadingMs = loadingMs;
+            table.executed = executed;
+            table.stopped = stopped;
+            table.elapsedMs = Date.now() - started;
+            if (stopped === "done" && executed.length && executed.every(function (r) {
+                return r.settle && r.settle.changed === false;
+            })) {
+                table.hint = "操作已执行但界面没有变化：确认目标是否正确，或用 op=wait 再等一次；仍无变化时用 egret_get_errors 排查";
+            }
+            var added = errorBuffer().slice(errorsBefore);
+            if (added.length) {
+                table.newErrors = added.length;
+                table.firstError = added[0] && added[0].message;
+            }
+            return table;
+        },
+
         advance: async function (p) {
             var max = Math.min(Math.max(p.max !== undefined ? +p.max : 1, 1), 12);
             var waitMs = Math.min(Math.max(p.waitMs !== undefined ? +p.waitMs : 1200, 100), 5000);
@@ -1868,13 +2451,13 @@
                 if (!target) {
                     var transientOverlay = transientOverlayOf(beforeScene.top);
                     var topTag = beforeScene.top && (className(beforeScene.top) + " " + (nameOf(beforeScene.top) || ""));
-                    var dialogue = /dialogueIntegration|dialogueButtomMixed|dialogueBottomMixed|npcDialogue|plotDialogue/i.test(topTag || "");
+                    var dialogue = /dialogueIntegration|dialogue(?:Buttom|Bottom)Mixed|npcDialog|plotDialog/i.test(topTag || "");
                     var decision = dialogue && dialogueHasDecision(beforeScene.top);
                     stopped = transientOverlay ? "transient-overlay" : decision ? "decision-required" : "no-continuation";
                     if (beforeScene.top) current = project(describe(beforeScene.top, { center: true }),
                         ["hash", "className", "id", "name", "qaName", "text", "center", "currentState"]);
                     hint = transientOverlay ? transientOverlay.actionHint : decision ? "当前对白需要语义选择，使用 egret_locate 定位选项" :
-                        "当前顶层界面不是可直接推进的对白或引导；调用 egret_scene 后定位下一目标";
+                        "当前顶层界面不是可直接推进的对白或引导；按返回的动作表定位下一目标";
                     break;
                 }
                 if (target.reason === "guide-hole") {

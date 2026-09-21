@@ -232,6 +232,18 @@ class FakeExtension:
             result = {"jsHeap": {"usedBytes": 10}, "egret": {"displayObjects": 2}}
         elif method == "getTree":
             result = {"nodeCount": 1, "truncated": False, "tree": NODES["btn_notice"]}
+        elif method in ("observe", "act"):
+            action = {"i": 1, "hash": 7, "role": "button", "label": "btn_notice", "from": "qaName",
+                      "size": [40, 40], "point": {"x": 10, "y": 10}}
+            if p.get("rects"):
+                action["screenRect"] = {"x": 0, "y": 0, "width": 40, "height": 40}
+            result = {"stageSize": [976, 480], "mode": "normal", "scope": "panel",
+                      "marker": "m1", "actions": [action], "text": ["hi"], "omitted": 0}
+            if p.get("rects"):
+                result.update(devicePixelRatio=1, viewportSize={"width": 100, "height": 100},
+                              captureSize={"width": 100, "height": 100})
+            if method == "act":
+                result.update(executed=[{"op": "tap"}], stopped="done", elapsedMs=12)
         elif method == "locate":
             result = {"description": p["description"], "matched": 1, "ambiguous": False,
                       "recommendedTarget": NODES["btn_notice"], "candidates": [NODES["btn_notice"]]}
@@ -242,6 +254,25 @@ class FakeExtension:
         else:
             return {"id": msg["id"], "error": "unsupported"}
         return {"id": msg["id"], "result": {"tabId": 1, "frameId": 0, "result": result}}
+
+
+class OcrLabelTest(unittest.TestCase):
+    def test_apply_ocr_labels_only_replaces_weak_labels(self):
+        sys.path.insert(0, str(SERVER.parent))
+        try:
+            import egret_agent_inspector_mcp as server
+        finally:
+            sys.path.pop(0)
+        table = {"actions": [
+            {"hash": 1, "label": "btn_start", "from": "qaName"},
+            {"hash": 2, "label": "开始", "from": "text"},
+            {"hash": 3, "label": "img_x", "from": "source"},
+        ]}
+        filled = server.apply_ocr_labels(table, {"1": " 进入游戏 ", "2": "别动我", "9": "无关"})
+        self.assertEqual(filled, 1)
+        self.assertEqual(table["actions"][0], {"hash": 1, "label": "进入游戏", "from": "ocr"})
+        self.assertEqual(table["actions"][1]["label"], "开始")
+        self.assertEqual(table["actions"][2]["from"], "source")
 
 
 class McpServerTest(unittest.IsolatedAsyncioTestCase):
@@ -287,12 +318,20 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         listed = (await self.rpc("tools/list"))["tools"]
         tools = {t["name"] for t in listed}
         for name in ("egret_find", "egret_tap", "egret_extension_status", "egret_install_extension",
-                     "egret_reload_extension", "egret_reopen_browser", "egret_run_steps", "egret_scene",
-                     "egret_advance", "egret_runtime_stats", "egret_dismiss_popups",
+                     "egret_reload_extension", "egret_reopen_browser", "egret_run_steps", "egret_observe",
+                     "egret_act", "egret_advance", "egret_runtime_stats", "egret_dismiss_popups",
                      "egret_inspect_code", "egret_locate", "egret_notes", "splan_call",
                      "splan_test_command"):
             self.assertIn(name, tools)
         self.assertNotIn("egret_interactables", tools)
+        # egret_observe 是 egret_scene 的超集，旧工具不再暴露，减少 agent 的选择面
+        self.assertNotIn("egret_scene", tools)
+        observe = next(tool for tool in listed if tool["name"] == "egret_observe")["inputSchema"]["properties"]
+        self.assertIn("ocr", observe)
+        self.assertIn("rootHash", observe)
+        act = next(tool for tool in listed if tool["name"] == "egret_act")["inputSchema"]["properties"]
+        self.assertIn("steps", act)
+        self.assertIn("marker", act)
         wait = next(tool for tool in listed if tool["name"] == "egret_wait_for")["inputSchema"]["properties"]
         self.assertIn("changed", wait["state"]["enum"])
         self.assertIn("anyOf", wait)
@@ -302,6 +341,39 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ocrLimit", locate)
         command = next(tool for tool in listed if tool["name"] == "splan_test_command")["inputSchema"]
         self.assertIn("authorized", command["required"])
+
+    async def test_observe_and_act_use_the_action_table(self):
+        ext = FakeExtension()
+        await ext.connect()
+        try:
+            await self.call("egret_extension_status", {"waitSeconds": 2})
+            _, table = await self.call("egret_observe", {})
+            self.assertEqual(table["marker"], "m1")
+            # 平时不向页面索取几何信息，返回里也不该出现 screenRect，省上下文
+            self.assertNotIn("screenRect", table["actions"][0])
+            self.assertNotIn("captureSize", table)
+            self.assertEqual([p.get("rects") for m, p in ext.page_params if m == "observe"], [None])
+
+            _, acted = await self.call("egret_act", {"marker": "m1", "steps": [{"i": 1}]})
+            self.assertEqual(acted["stopped"], "done")
+            sent = [p for m, p in ext.page_params if m == "act"][0]
+            self.assertEqual(sent["steps"], [{"i": 1}])
+            self.assertEqual(sent["marker"], "m1")
+
+            # ocr=true 才要 rects；OCR 后端不可用时也只降级成 ocr.available=false，不影响动作表
+            _, with_ocr = await self.call("egret_observe", {"ocr": True})
+            self.assertIn("ocr", with_ocr)
+            self.assertNotIn("screenRect", with_ocr["actions"][0])
+            self.assertEqual([p.get("rects") for m, p in ext.page_params if m == "observe"], [None, True])
+
+            _, report = await self.call("egret_run_steps", {"screenshotOnFailure": False, "steps": [
+                {"action": "scene"}, {"action": "observe"}, {"action": "act", "steps": [{"i": 1}]}]})
+            self.assertTrue(report["passed"], report)
+            recent = [m for m, _ in ext.page_params if m in ("observe", "act")][-3:]
+            self.assertEqual(recent, ["observe", "observe", "act"])
+        finally:
+            ext.task.cancel()
+            ext.writer.close()
 
     async def test_status_without_extension(self):
         res, data = await self.call("egret_extension_status", {"waitSeconds": 0.2})

@@ -1,5 +1,16 @@
 # 更新日志
 
+## 4.1.0
+
+- 新增高速操作主循环 `egret_observe` / `egret_act`：`egret_observe` 一次快照产出带编号的动作表（角色、标签、状态、已解遮挡的点击点）和语义指纹 `marker`；`egret_act` 按编号执行，内部等界面稳定并等过加载过场，直接返回执行后的新动作表。原本「定位 → 点击 → 等待 → 再看一眼」四次往返压缩成一次。
+- 动作表用语义指纹而不是几何变化判断页面是否还是决策时那一页：循环播放的待机动画不会让编号作废；界面确实变了则返回 `stale: true` 和新动作表且不执行任何点击。
+- `egret_act` 支持一次多步与 `op`：`tap` / `text` / `recommended` / `advance` / `dismiss` / `scroll` / `wait`，每步可带 `expect` 校验和 `optional`。
+- `egret_observe` 的 `ocr: true` 在同一次调用里对图片字按钮批量本地 OCR 并替换标签，不上传图片；结构化定位、OCR 与截图视觉分析三层兜底都保留。
+- 顶层只是浮动提示时动作表覆盖整个舞台，地图上的 NPC 与入口不再被漏掉；整表被同一对象挡住时返回 `mode: "blocked"`，可点的全屏接管层（战斗入场演出）直接给出 `recommendedTarget`。
+- 页面在后台被浏览器节流时动作表返回 `warnings`，避免 agent 误以为游戏卡死而空等。
+- 改进引导与对白识别：GuideMask 挂在同级图层下也能找到，没有 `imgKuang` 时由 `shapN` 遮罩碎片反推挖洞区域；`NPCDialogUI` 这类命名也识别为对白，未规范命名的对白正文不再被当成选项；有带文字可点控件的界面不再被误判成加载过场。
+- 移除 `egret_scene`：其输出是 `egret_observe` 的子集。`egret_run_steps` 里的 `scene` 步骤自动落到 `egret_observe`，并新增 `observe` / `act` 步骤。
+
 ## 4.0.3
 
 - 修复 Windows 上 Node MCP 启动器占用插件缓存目录，导致运行中的 Egret 插件无法卸载或更新。

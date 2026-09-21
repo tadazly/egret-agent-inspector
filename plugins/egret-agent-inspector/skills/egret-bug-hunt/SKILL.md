@@ -17,7 +17,7 @@ description: 自主操作浏览器中的 Egret 游戏，探索界面并发现缺
 
 未知交互每轮只做一件事；已确认的安全路线可短批量跑到检查点：
 
-1. 用 `egret_scene` 了解当前界面；按明确属性用 `egret_find`，按自然语言描述用一次 `egret_locate` 选择尚未访问的入口，再用 `egret_tap` 点击。定位仍有歧义时先消歧，禁止按场景顺序盲点；被遮挡时先处理遮挡。
+1. 用 `egret_observe` 拿动作表，直接按编号 `egret_act` 点尚未访问的入口，执行结果里就带新的动作表。目标不在表里时按明确属性用 `egret_find`、按自然语言描述用一次 `egret_locate`。定位仍有歧义时先消歧，禁止按场景顺序盲点；`occluded` 的条目先处理遮挡。
 2. 用 `egret_wait_for` 等待预期界面；带动画的面板加 `stableMs`。
 3. 用 `egret_find` / `egret_get_node` 检查界面内容，必要时 `egret_screenshot` 看整体。
 4. 在检查点或状态异常时读取新增错误，不要为每句对话重复拉取。

@@ -9,7 +9,7 @@ description: 恢复浏览器闪退、关闭或扩展断连后的 Egret 游戏验
 
 1. 从当前任务及 `egret_notes` 的 `checkpoint` / `route` 取原 URL、账号名、最近稳定界面和真实 UI 路线；不记录密码。
 2. 调用 `egret_extension_status`。浏览器已退出且扩展目录仍为 `managed` 时，用 `egret_reopen_browser` 打开原 URL，不要重装扩展；等待重连后再 `egret_list_tabs`、`egret_status`。
-3. 会话未保留时按原账号重新登录。用可见 UI 和已验证 `route` 回到最近检查点，不用调试接口直达；以当前 `egret_scene` 为准，避免重复不可逆操作。
+3. 会话未保留时按原账号重新登录。用可见 UI 和已验证 `route` 回到最近检查点，不用调试接口直达；以当前 `egret_observe` 为准，避免重复不可逆操作。
 4. 继续原验收目标。把恢复动作写成 `recovery`，稳定检查点写成 `checkpoint`；二者不算真实玩家入口证据。
 
 恢复一次失败不要结束任务；同一步骤再次导致浏览器闪退时，先保留现场信息，再转入下方排查。
