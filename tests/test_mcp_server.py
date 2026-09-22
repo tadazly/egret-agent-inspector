@@ -529,7 +529,7 @@ class ActionTableTest(unittest.TestCase):
         script = r'''const fs = require("fs");
 let source = fs.readFileSync(process.argv[1], "utf8");
 source = source.replace("\n    installErrorHooks();",
-    "\n    window.__pageAgentTest = { buildActionTable };\n    installErrorHooks();");
+    "\n    window.__pageAgentTest = { buildActionTable, findCloseControl };\n    installErrorHooks();");
 const vm = require("vm");
 const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480,
     visible: true, alpha: 1, touchEnabled: true, touchChildren: true, parent: null, children: [],
@@ -549,9 +549,15 @@ function item(cls, name, parent, bounds, opts) {
         parent, stage, visible: true, alpha: 1, touchEnabled: true, touchChildren: true, children: [],
         get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; },
         getTransformedBounds() { return bounds; } };
+    // 纯热区容器：没有子渲染对象，内容包围盒退化成 0，但 Egret 按 width/height 命中
+    if (opts.layout) {
+        o.width = opts.layout.width;
+        o.height = opts.layout.height;
+        o.localToGlobal = (x, y) => ({ x: opts.layout.x + (x || 0), y: opts.layout.y + (y || 0) });
+    }
     if (opts.listener) o.$EventDispatcher_props_ = { 1: { touchTap: [{ listener() {}, thisObject: o }] } };
     if (parent) parent.children.push(o);
-    painted.push({ o, bounds, solid: opts.solid !== false });
+    if (!opts.offstage) painted.push({ o, bounds: opts.layout || bounds, solid: opts.solid !== false });
     return o;
 }
 function inside(b, x, y) { return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height; }
@@ -575,6 +581,9 @@ const alert = item("ui.SimpleAlert", "simpleAlert", stage, { x: 150, y: 115, wid
     { listener: true });
 item("eui.Label", "msg", alert, { x: 300, y: 200, width: 200, height: 20 },
     { listener: true, text: "您的账号重复登录！" });
+// 返回键只有碰撞盒、箭头烘在背景图里：内容包围盒退化成 0x1，不回退到布局盒就整行丢掉
+item("eui.Group", "grp_backArea", alert, { x: 160, y: 120, width: 0, height: 1 },
+    { listener: true, layout: { x: 160, y: 120, width: 34, height: 25 } });
 const grp = item("eui.Group", "grp_btn", alert, { x: 350, y: 280, width: 100, height: 40 }, { listener: true });
 item("eui.Button", "confirm", grp, { x: 350, y: 280, width: 100, height: 40 }, { listener: true });
 // 弱标签也可能很长：名字长不代表是正文，这种容器仍然可点
@@ -588,6 +597,12 @@ item("eui.Image", "tab_red", menuRow, { x: 745, y: 402, width: 16, height: 16 },
 // 工具栏按钮：按钮本体套着一小块文字，留的必须是按钮本体而不是里面的 Label
 const toolBtn = item("eui.Group", "grpTool", stage, { x: 700, y: 20, width: 54, height: 59 }, { listener: true });
 item("eui.Label", "toolText", toolBtn, { x: 716, y: 44, width: 22, height: 11 }, { text: "福利" });
+
+// 只有返回键的全屏面板（共创投票就是这样）：不挂到舞台上，免得干扰动作表
+const backOnly = item("ui.FullPanel", "fullPanel", null, { x: 0, y: 0, width: 800, height: 480 },
+    { offstage: true });
+item("eui.Group", "grp_back", backOnly, { x: 10, y: 8, width: 0, height: 1 },
+    { listener: true, offstage: true, layout: { x: 10, y: 8, width: 34, height: 25 } });
 
 const t = window.__pageAgentTest;
 function summarize(table) {
@@ -603,7 +618,9 @@ process.stdout.write(JSON.stringify({
     small: summarize(t.buildActionTable({ limit: 10 })),
     big: summarize(t.buildActionTable({ limit: 30 })),
     detail: summarize(t.buildActionTable({ limit: 30, detail: true })),
-    withOccluded: summarize(t.buildActionTable({ limit: 30, occluded: true }))
+    withOccluded: summarize(t.buildActionTable({ limit: 30, occluded: true })),
+    closeStrict: (t.findCloseControl(backOnly, false) || {}).o ? "found" : null,
+    closeBack: ((t.findCloseControl(backOnly, true) || {}).o || {}).name || null
 }));
 '''
         result = subprocess.run([node, "-e", script, str(PAGE_AGENT)], capture_output=True, text=True,
@@ -655,6 +672,18 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["big"]["roles"][labels.index("福利")], "button")
         self.assertEqual(labels.count("福利"), 1)
 
+    def test_pure_hit_area_keeps_its_row(self):
+        data = self.run_probe()
+        # 空 Group 的内容包围盒是 0x1，退化时要回退到布局盒，否则玩家点得到、动作表里却没有
+        self.assertIn("grp_backArea", data["big"]["labels"])
+
+    def test_back_control_only_counts_when_asked(self):
+        data = self.run_probe()
+        # dismiss 保持严格：只有返回键的面板不当成弹窗去关，免得误点场景里的返回
+        self.assertIsNone(data["closeStrict"])
+        # op=close 明确要关掉当前面板，这时返回键才算数
+        self.assertEqual(data["closeBack"], "grp_back")
+
     def test_prose_is_text_not_button(self):
         data = self.run_probe()
         labels = data["big"]["labels"]
@@ -686,6 +715,49 @@ class RenderTableTest(unittest.TestCase):
         self.assertTrue(any("被遮挡 4 条未列出" in line for line in lines))
         # 同样内容的 JSON 要长得多
         self.assertLess(len(text), len(json.dumps(table, ensure_ascii=False)))
+
+    def test_reload_and_close_results_are_spelled_out(self):
+        server = load_server()
+        table = {"panel": {"name": "ui.ToolbarNew"}, "mode": "normal", "marker": "m2", "reloaded": True,
+                 "executed": [{"op": "close", "result": {"ok": True, "via": "back", "panel": "tenVote.TenVote"}},
+                              {"op": "dismiss", "result": {"closed": [
+                                  {"ok": True, "panel": "petBag.PetBag", "via": "close"},
+                                  {"ok": False, "panel": "ui.ToolbarNew", "note": "没有可识别的关闭控件"}]}}],
+                 "actions": [{"i": 1, "label": "福利", "role": "button"}]}
+        text = server.render_action_table(table)
+        self.assertIn("页面已重载", text)
+        self.assertIn("点 back 关掉了 tenVote.TenVote", text)
+        # dismiss 的结果原来把整串 dict 拼进去，几百字节全是噪音
+        self.assertIn("关掉 1 个弹窗", text)
+        self.assertNotIn("'ok': True", text)
+
+    def test_page_reload_is_detected_per_tab(self):
+        server = load_server()
+        mcp = server.McpServer.__new__(server.McpServer)
+        mcp.page_boots = {}
+        first = {"tabId": 7, "bootId": "aaa"}
+        mcp.note_page_boot({}, first)
+        self.assertNotIn("reloaded", first)
+        same = {"tabId": 7, "bootId": "aaa"}
+        mcp.note_page_boot({}, same)
+        self.assertNotIn("reloaded", same)
+        after_reload = {"tabId": 7, "bootId": "bbb"}
+        mcp.note_page_boot({}, after_reload)
+        self.assertTrue(after_reload["reloaded"])
+        # 另一个标签页第一次见到，不算重载
+        other = {"tabId": 9, "bootId": "ccc"}
+        mcp.note_page_boot({}, other)
+        self.assertNotIn("reloaded", other)
+
+    def test_close_failure_says_what_was_tried(self):
+        server = load_server()
+        table = {"mode": "normal", "marker": "m3",
+                 "executed": [{"op": "close", "result": {"ok": False, "stopped": "stuck",
+                                                         "note": "关闭/返回/遮罩都点过了，面板仍在最上层"}}],
+                 "actions": []}
+        text = server.render_action_table(table)
+        self.assertIn("没关掉（stuck）", text)
+        self.assertIn("面板仍在最上层", text)
 
     def test_mode_without_actions_points_at_the_only_legal_op(self):
         server = load_server()
