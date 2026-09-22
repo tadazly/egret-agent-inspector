@@ -585,6 +585,9 @@ item("eui.Image", "tab_bg", menuRow, { x: 600, y: 400, width: 160, height: 50 },
 item("eui.Label", "menuName", menuRow, { x: 610, y: 415, width: 90, height: 20 }, { text: "限时特惠" });
 // 红点角标：只是状态指示，不该占动作编号
 item("eui.Image", "tab_red", menuRow, { x: 745, y: 402, width: 16, height: 16 }, { listener: true });
+// 工具栏按钮：按钮本体套着一小块文字，留的必须是按钮本体而不是里面的 Label
+const toolBtn = item("eui.Group", "grpTool", stage, { x: 700, y: 20, width: 54, height: 59 }, { listener: true });
+item("eui.Label", "toolText", toolBtn, { x: 716, y: 44, width: 22, height: 11 }, { text: "福利" });
 
 const t = window.__pageAgentTest;
 function summarize(table) {
@@ -643,6 +646,14 @@ process.stdout.write(JSON.stringify({
         self.assertFalse(data["big"]["weaks"][labels.index("限时特惠")])
         # 红点角标不占编号
         self.assertNotIn("tab_red", labels)
+
+    def test_button_wrapping_a_small_label_survives(self):
+        data = self.run_probe()
+        labels = data["big"]["labels"]
+        # 「福利」这一行必须是 54x59 的按钮本体（role button），不是里面 22x11 的 Label
+        self.assertIn("福利", labels)
+        self.assertEqual(data["big"]["roles"][labels.index("福利")], "button")
+        self.assertEqual(labels.count("福利"), 1)
 
     def test_prose_is_text_not_button(self):
         data = self.run_probe()

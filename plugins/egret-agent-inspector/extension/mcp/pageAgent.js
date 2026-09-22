@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.4.4";
+    var VERSION = "1.4.5";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -1919,8 +1919,11 @@
             }
             kids.forEach(function (kid) {
                 if (dropped[kid.hash] || dropped[e.hash]) return;
-                // 文案相同而外面那层大出一截：外面只是个壳（弹窗面板带着正文当标签），留里面那个
-                if (kid.label === e.label && e._w * e._h > kid._w * kid._h * 4) {
+                // 文案相同而外面那层又大又空：那是弹窗面板把正文当了标签，留里面那个。
+                // 只看比例会把普通按钮也算进来（54x59 的按钮套着 22x11 的文字），
+                // 所以还要求外层本身占掉舞台的一大块——按钮不会有那么大。
+                if (kid.label === e.label && e._w * e._h > kid._w * kid._h * 4 &&
+                    e._w * e._h >= stage.stageWidth * stage.stageHeight * 0.15) {
                     dropped[e.hash] = true;
                     return;
                 }
