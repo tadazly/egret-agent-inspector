@@ -233,6 +233,8 @@ def render_action_table(table):
         lines.append(" | ".join(head))
     if table.get("stale"):
         lines.append("stale 界面已经不是做决策时那一页，未执行任何操作；按下面这张新表重选")
+    if table.get("reloaded"):
+        lines.append("页面已重载 重载前的 i 编号、marker、hash 全部失效；别再用记下来的 hash，按这张新表重新定位")
     for warning in table.get("warnings") or []:
         lines.append("警告 %s" % warning)
     for rec in table.get("executed") or []:
@@ -246,8 +248,18 @@ def render_action_table(table):
         result = rec.get("result") or {}
         if isinstance(result, dict) and result.get("advanced") is not None:
             line += " → 推进 %s 次（%s）" % (result.get("advanced"), result.get("stopped"))
-        if isinstance(result, dict) and result.get("closed") is not None:
-            line += " → 关掉 %s 个弹窗" % result.get("closed")
+        if isinstance(result, dict) and isinstance(result.get("closed"), list):
+            # 原来把整串 dict 直接拼进去，几百字节全是噪音；这里只留「关掉几个 + 卡在哪个」
+            closed = result["closed"]
+            line += " → 关掉 %d 个弹窗" % len([c for c in closed if c.get("ok")])
+            stuck = [c for c in closed if not c.get("ok")]
+            if stuck:
+                line += "，%s 没关掉（%s）" % (stuck[0].get("panel") or "", stuck[0].get("note") or "")
+        if rec.get("op") == "close" and isinstance(result, dict):
+            if result.get("ok"):
+                line += " → 点 %s 关掉了 %s" % (result.get("via"), result.get("panel") or "")
+            else:
+                line += " → 没关掉（%s）：%s" % (result.get("stopped"), result.get("note") or "")
         lines.append(line)
     if table.get("changed"):
         lines.append("变化 %s" % table["changed"])
@@ -341,7 +353,9 @@ INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游�
 - 用 i 编号时必须把上一次的 marker 传给 egret_act；界面已经变了会返回 stale 和新动作表且不执行，按新表重新决策即可。已确认的连续操作一次给多步 steps。
 - 动作表是紧凑文本，一行一个动作：编号 标签 role 状态。标签带 * 是图片字弱标签，整屏都是弱标签时会自动补一次本地 OCR。需要 hash、坐标或完整字段时传 format="json"。
 - 返回里的「变化」一行说明上一步把界面改成了什么样，不用自己 diff 两张表。
-- 对白与引导用 op=advance 一次推完；弹窗用 op=dismiss；加载过场（mode=transient）用 op=wait。
+- 对白与引导用 op=advance 一次推完；弹窗用 op=dismiss；关掉当前这个界面用 op=close（关闭键→返回键→遮罩依次试，并确认它真的没了）；加载过场（mode=transient）用 op=wait。
+- 要把一批同类目标挨个打开看一眼，一次 act 就给多组「打开 + op=close」步骤，不要一个来回只点一下。
+- 表上出现「页面已重载」时，之前记下的 hash 和编号全部作废，按新表重新定位。
 - 动作表和 OCR 都定不下来，或要看布局、颜色、半透明遮罩、战斗画面时用 egret_screenshot；游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，视觉兜底该用就用。
 - 目标不在动作表里（在别的子树、需要语义消歧）用 egret_locate；已知稳定标识用 egret_find。显示对象以 hash 标识，id 是组件在代码/EXML 中绑定的属性名；stageRect 是舞台坐标，screenRect 是页面视口 CSS 像素坐标。
 - 操作后界面没有预期变化时用 egret_get_errors 看页面报错；想知道某个控件背后是哪段代码用 egret_inspect_code。
@@ -536,8 +550,10 @@ TOOLS = {
     "egret_act": (
         "按动作表执行并直接返回执行后的新动作表：把点击、等待界面稳定、重新观察合并成一次调用，"
         "加载过场也会在同一次调用里等过去。steps 每项："
-        "{\"i\":3} 点动作表编号；{\"hash\"/\"qaName\"/\"id\"/\"text\":...} 直接定位；"
+        "{\"i\":3} 点动作表编号；{\"hash\"/\"qaName\"/\"id\"/\"name\"/\"text\":...} 直接定位（可加 match:\"exact\"）；"
         "{\"i\":3,\"text\":\"abc\"} 输入文本；{\"op\":\"advance\"} 推进对白/引导；{\"op\":\"dismiss\"} 关弹窗；"
+        "{\"op\":\"close\"} 关掉当前顶层面板：一次往返里依次试关闭键、返回键、遮罩，并确认面板真的消失，"
+        "回报是哪条路子生效；打开一个界面看完就关的遍历用它，比 dismiss 更适合全屏面板；"
         "{\"op\":\"recommended\"} 点 observe 给出的 recommendedTarget（引导挖洞、只能点遮罩关闭的弹窗）；"
         "{\"op\":\"scroll\",\"i\":3,\"dy\":-200} 滚动列表；{\"op\":\"wait\",\"ms\":800} 或 {\"op\":\"wait\",\"until\":{查询条件}} 等待。"
         "编号只有传了上一次的 marker 且界面没变时才有效：界面已变会原样返回 stale=true 和新动作表，不执行任何点击。"
@@ -959,6 +975,8 @@ class McpServer:
         self.scope = None
         # hash -> 识别出的文字（空串表示认过但没认出来），只在本进程内复用
         self.ocr_cache = {}
+        # tabId -> 页面代理的 bootId，用来发现页面重载
+        self.page_boots = {}
 
     async def send(self, msg):
         data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
@@ -1021,12 +1039,13 @@ class McpServer:
             if name == "egret_locate" and args.get("ocr") and res.get("ambiguous"):
                 res = await self.enrich_locate_with_ocr(args, res)
             if name in ("egret_observe", "egret_act"):
+                self.note_page_boot(args, res)
                 # 整屏都是图片字按钮时自动补一次本地 OCR：让模型专门花一轮决定「要不要 OCR」不划算
                 if args.get("ocr") or (args.get("ocr") is None and res.get("needOcr")):
                     res = await self.enrich_table_with_ocr(args, res, reuse=args.get("ocr") is None)
                 for action in res.get("actions") or []:
                     action.pop("screenRect", None)
-                for key in ("devicePixelRatio", "viewportSize", "captureSize", "needOcr"):
+                for key in ("devicePixelRatio", "viewportSize", "captureSize", "needOcr", "bootId"):
                     res.pop(key, None)
                 if args.get("format") == "json":
                     body = json.dumps(res, ensure_ascii=False)
@@ -1050,6 +1069,21 @@ class McpServer:
             return {"content": [{"type": "text", "text": json.dumps(res, ensure_ascii=False)}]}
         except Exception as e:  # noqa: BLE001
             return {"isError": True, "content": [{"type": "text", "text": str(e)}]}
+
+    def note_page_boot(self, args, table):
+        """页面重载后，上一轮的 i 编号和 hash 全部作废，但报错只会说「找不到对象」。
+
+        页面代理每次注入换一个 bootId，这里按标签页记住它：一变就在动作表上明说，
+        省得 agent 拿着旧 hash 反复试。
+        """
+        boot = table.get("bootId")
+        if not boot:
+            return
+        key = table.get("tabId", args.get("tabId"))
+        previous = self.page_boots.get(key)
+        self.page_boots[key] = boot
+        if previous and previous != boot:
+            table["reloaded"] = True
 
     async def enrich_table_with_ocr(self, args, table, reuse=False):
         """动作表里图片字按钮的标签是 qaName/资源名；一次截图批量 OCR 把真实文案补上。

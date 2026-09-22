@@ -69,6 +69,21 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 
 进入游戏后常有一串强制弹窗，逐个处理；每关一个都确认面板栈里原来那个已经不在了。批量清弹窗用 `{"steps": [{"op": "dismiss", "max": 3}]}`。
 
+## 关掉当前这个界面
+
+打开一个界面看完要关掉时用 `{"op": "close"}`，不要用 `dismiss`：
+
+- `close` 在**一次往返**里依次试关闭键 → 返回键 → 遮罩，每试一次都确认面板真的消失了，返回时明说是哪条路子生效的。
+- 全屏功能界面常常只有「返回」没有 ×，`dismiss` 故意不认返回键（免得误点场景里的返回），`close` 认。
+- `close` 连着三条路都没关掉会直接说「没关掉」并给出试过什么。这时别再重复试，截图看看它到底怎么关——有些界面的返回键是烘在背景图里的纯热区。
+
+要把一批同类目标挨个打开看一眼（遍历图标、遍历页签），**一次 `act` 就给多组「打开 + close」**，不要一个来回只点一下：
+
+```json
+{"steps": [{"name": "toolBarExManager_icon_9", "match": "exact"}, {"op": "close"},
+           {"name": "toolBarExManager_icon_10", "match": "exact"}, {"op": "close"}]}
+```
+
 ## 目标不在动作表里
 
 - 自然语言描述的目标先用一次 `egret_locate`：它会聚合 `id/name/qaName/text/source`、子树标签和真实监听评分，`ambiguous: false` 才能直接用 `recommendedTarget`。可能是图片字时传 `ocr: true`。

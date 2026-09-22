@@ -1,7 +1,8 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.4.5";
+    var VERSION = "1.4.6";
+    var BOOT_ID = Math.random().toString(36).slice(2, 10);
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -334,13 +335,33 @@
         return { x: round(ox * stage.stageWidth / rect.width), y: round(oy * stage.stageHeight / rect.height) };
     }
 
+    // 纯热区容器（有 width/height、没有任何子渲染对象的 Group）的内容包围盒会退化成 0，
+    // 但 Egret 命中测试认的是 width/height，玩家点得到。这种情况改用布局盒，否则整行会被丢掉。
+    function layoutRect(o) {
+        try {
+            if (!o || !o.localToGlobal || !(o.width >= 2) || !(o.height >= 2)) return null;
+            var a = o.localToGlobal(0, 0);
+            var b = o.localToGlobal(o.width, o.height);
+            var x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+            var w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+            if (!(w >= 2) || !(h >= 2)) return null;
+            return { x: round(x), y: round(y), width: round(w), height: round(h) };
+        } catch (e) {
+            return null;
+        }
+    }
+
     function stageRect(o) {
         var stage = getStage();
         try {
             var r = o.getTransformedBounds(stage);
+            if (r.width < 2 || r.height < 2) {
+                var box = layoutRect(o);
+                if (box) return box;
+            }
             return { x: round(r.x), y: round(r.y), width: round(r.width), height: round(r.height) };
         } catch (e) {
-            return null;
+            return layoutRect(o);
         }
     }
 
@@ -691,9 +712,13 @@
 
     var CLOSE_RE = /close|关闭|關閉|quit|cancel|dismiss|guanbi|(?:^|[\s_-])btn_no(?:$|[\s_-])/i;
     var CLOSE_TEXTS = ["关闭", "取消", "确定", "确认", "知道了", "我知道了", "好的", "×", "X", "x"];
+    // 全屏面板常常只有「返回」没有 ×。back 要避开 background / backdrop / bg 这类背景命名。
+    var BACK_RE = /(?:^|[\s_-])(?:back|return)(?:$|[\s_-])|返回|回退|返 回/i;
+    var BACK_TEXTS = ["返回", "返 回", "back", "Back", "BACK"];
 
-    // 弹窗里的关闭控件：命名五花八门，按关键字 + 体积 + 靠右上角的程度打分
-    function findCloseControl(panel) {
+    // 弹窗里的关闭控件：命名五花八门，按关键字 + 体积 + 靠右上角的程度打分。
+    // allowBack 只给 op=close 这种明确要关掉当前面板的场景用，dismiss 保持严格，免得误点场景里的返回。
+    function findCloseControl(panel, allowBack) {
         var pr = stageRect(panel);
         if (!pr) return null;
         var best = null;
@@ -707,7 +732,9 @@
             var t = textOf(o);
             var score = 0;
             if (CLOSE_RE.test(tag)) score += 10;
+            else if (allowBack && BACK_RE.test(tag)) score += 7;
             if (t && CLOSE_TEXTS.indexOf(String(t).trim()) >= 0) score += 8;
+            else if (allowBack && t && BACK_TEXTS.indexOf(String(t).trim()) >= 0) score += 6;
             if (!score) return;
             if (effectiveTouchable(o)) score += 2;
             // 同分时取更靠右上、体积更小的，通常就是那个 X
@@ -1715,6 +1742,8 @@
         var modal = !!(topRect && topRect.width * topRect.height >= stageArea * 0.6);
         var root = scoped ? byHash(p.rootHash) : (modal ? si.top : stage);
         var out = {
+            // 每次注入换一个：页面一重载，server 就能看出上一轮的 i 编号和 hash 全部作废
+            bootId: BOOT_ID,
             stageSize: [stage.stageWidth, stage.stageHeight],
             panel: si.top ? panelBrief(si.top, stage) : null,
             stack: si.stack.map(function (o) { return panelBrief(o, stage); }),
@@ -2577,6 +2606,9 @@
                         record.result = await handlers.dismissPopups({
                             max: step.max !== undefined ? step.max : 2, until: step.until, method: method
                         });
+                    } else if (op === "close") {
+                        record.result = await handlers.closeTop({ method: method });
+                        if (!record.result.ok && !step.optional) stopped = "close-failed";
                     } else if (op === "scroll") {
                         var scroller = step.i !== undefined || hasCriteria(step)
                             ? resolveFastTarget(step, fresh).o
@@ -2603,7 +2635,7 @@
                             await sleep(Math.min(Math.max(step.ms !== undefined ? +step.ms : 600, 0), 15000));
                         }
                     } else {
-                        throw new Error("未知的 op：" + op + "（支持 tap/text/recommended/advance/dismiss/scroll/wait）");
+                        throw new Error("未知的 op：" + op + "（支持 tap/text/close/recommended/advance/dismiss/scroll/wait）");
                     }
                     if (op !== "wait" || !step.until) {
                         record.settle = await settleAfter(before, {
@@ -2816,6 +2848,65 @@
                 remaining: rest.top ? project(describe(rest.top, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "center"]) : null,
                 stackDepth: rest.stack.length
             };
+        },
+
+        // 关掉当前顶层面板：close → back → 遮罩，依次试，每试一次都确认面板真的消失了。
+        // 一次往返解决「打开后关不掉」，并回报到底哪条路子有效，省得 agent 一次一次试。
+        closeTop: async function (p) {
+            var method = p.method || (touchHandler() ? "touch" : "dom");
+            var panel = sceneInfo().top;
+            if (!panel) return { ok: false, stopped: "empty", note: "当前没有顶层面板可关" };
+            var hash = hashOf(panel);
+            var name = className(panel) + (nameOf(panel) ? "#" + nameOf(panel) : "");
+            var tried = [];
+
+            async function vanished() {
+                for (var w = 0; w < 10; w++) {
+                    await sleep(120);
+                    var now = sceneInfo().top;
+                    if (!now || hashOf(now) !== hash) return true;
+                }
+                return false;
+            }
+
+            async function attempt(via, o, point) {
+                if (!point) return false;
+                var entry = { via: via, point: { x: round(point.x), y: round(point.y) } };
+                if (o) entry.control = bindId(o) || qaNameOf(o) || nameOf(o) || sourceOf(o) || className(o);
+                await performGesture([point], method, 50, o || null);
+                entry.ok = await vanished();
+                tried.push(entry);
+                return entry.ok;
+            }
+
+            function centerOf(r) {
+                return r ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null;
+            }
+
+            var strict = findCloseControl(panel, false);
+            if (strict) {
+                var sp = probePoint(strict.o, false);
+                if (await attempt("close", strict.o, sp ? sp.point : centerOf(strict.rect))) {
+                    return { ok: true, via: "close", panel: name, tried: tried };
+                }
+            }
+            var back = findCloseControl(panel, true);
+            if (back && (!strict || back.o !== strict.o)) {
+                var bp = probePoint(back.o, false);
+                if (await attempt("back", back.o, bp ? bp.point : centerOf(back.rect))) {
+                    return { ok: true, via: "back", panel: name, tried: tried };
+                }
+            }
+            var mp = maskPointOutside(panel);
+            if (mp && await attempt("mask", null, { x: mp.x, y: mp.y })) {
+                return { ok: true, via: "mask", panel: name, tried: tried };
+            }
+            if (!tried.length) {
+                return { ok: false, stopped: "no-control", panel: name, tried: tried,
+                    note: "面板里找不到关闭/返回控件，内容区外也没有可点遮罩：截图看看它是怎么关的" };
+            }
+            return { ok: false, stopped: "stuck", panel: name, tried: tried,
+                note: "关闭/返回/遮罩都点过了，面板仍在最上层" };
         },
 
         runtimeStats: function () {
