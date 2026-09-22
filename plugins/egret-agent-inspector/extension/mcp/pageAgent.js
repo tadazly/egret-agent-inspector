@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.4.6";
+    var VERSION = "1.4.7";
     var BOOT_ID = Math.random().toString(36).slice(2, 10);
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
@@ -2883,23 +2883,36 @@
                 return r ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null;
             }
 
-            var strict = findCloseControl(panel, false);
-            if (strict) {
-                var sp = probePoint(strict.o, false);
-                if (await attempt("close", strict.o, sp ? sp.point : centerOf(strict.rect))) {
-                    return { ok: true, via: "close", panel: name, tried: tried };
+            // 连着关几层时，下面那层可能还在铺开，这一瞬间找不到任何控件。
+            // 只在一个都没找到时等一下重来，找到过控件就不重试，免得重复点。
+            for (var round = 0; round < 2; round++) {
+                if (round) {
+                    await sleep(250);
+                    var settled = sceneInfo().top;
+                    if (!settled || hashOf(settled) !== hash) {
+                        return { ok: true, via: "gone", panel: name, tried: tried };
+                    }
+                    panel = settled;
                 }
-            }
-            var back = findCloseControl(panel, true);
-            if (back && (!strict || back.o !== strict.o)) {
-                var bp = probePoint(back.o, false);
-                if (await attempt("back", back.o, bp ? bp.point : centerOf(back.rect))) {
-                    return { ok: true, via: "back", panel: name, tried: tried };
+                var strict = findCloseControl(panel, false);
+                if (strict) {
+                    var sp = probePoint(strict.o, false);
+                    if (await attempt("close", strict.o, sp ? sp.point : centerOf(strict.rect))) {
+                        return { ok: true, via: "close", panel: name, tried: tried };
+                    }
                 }
-            }
-            var mp = maskPointOutside(panel);
-            if (mp && await attempt("mask", null, { x: mp.x, y: mp.y })) {
-                return { ok: true, via: "mask", panel: name, tried: tried };
+                var back = findCloseControl(panel, true);
+                if (back && (!strict || back.o !== strict.o)) {
+                    var bp = probePoint(back.o, false);
+                    if (await attempt("back", back.o, bp ? bp.point : centerOf(back.rect))) {
+                        return { ok: true, via: "back", panel: name, tried: tried };
+                    }
+                }
+                var mp = maskPointOutside(panel);
+                if (mp && await attempt("mask", null, { x: mp.x, y: mp.y })) {
+                    return { ok: true, via: "mask", panel: name, tried: tried };
+                }
+                if (tried.length) break;
             }
             if (!tried.length) {
                 return { ok: false, stopped: "no-control", panel: name, tried: tried,
