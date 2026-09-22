@@ -1,6 +1,6 @@
 // Egret Agent Inspector MCP 桥接：运行在扩展 service worker 中，作为 WebSocket 客户端连接本机 MCP server，
 // 把 MCP 工具请求转发到目标标签页（在页面 MAIN world 中执行 mcp/pageAgent.js）。
-const AGENT_VERSION = "1.4.0";
+const AGENT_VERSION = "1.4.4";
 const AGENT_FILE = "mcp/pageAgent.js";
 const BASE_PORT = 17800;
 // Codex 会为并行任务分别启动 MCP 进程；预留足够端口，避免多个任务同时使用插件时耗尽 bridge。

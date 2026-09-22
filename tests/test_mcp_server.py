@@ -579,10 +579,18 @@ const grp = item("eui.Group", "grp_btn", alert, { x: 350, y: 280, width: 100, he
 item("eui.Button", "confirm", grp, { x: 350, y: 280, width: 100, height: 40 }, { listener: true });
 // 弱标签也可能很长：名字长不代表是正文，这种容器仍然可点
 item("eui.Group", "grp_serverSelectLong", stage, { x: 20, y: 400, width: 160, height: 40 }, { listener: true });
+// 列表项的名字放在同级 Label 里，压在背景图上：动作表该用这段文字当标签
+const menuRow = item("eui.Group", "menuRow", stage, { x: 600, y: 400, width: 160, height: 50 }, {});
+item("eui.Image", "tab_bg", menuRow, { x: 600, y: 400, width: 160, height: 50 }, { listener: true });
+item("eui.Label", "menuName", menuRow, { x: 610, y: 415, width: 90, height: 20 }, { text: "限时特惠" });
+// 红点角标：只是状态指示，不该占动作编号
+item("eui.Image", "tab_red", menuRow, { x: 745, y: 402, width: 16, height: 16 }, { listener: true });
 
 const t = window.__pageAgentTest;
 function summarize(table) {
     return { labels: (table.actions || []).map(a => a.label), roles: (table.actions || []).map(a => a.role),
+        alts: (table.actions || []).map(a => a.alt || null),
+        weaks: (table.actions || []).map(a => !!a.weak),
         count: (table.actions || []).length,
         occludedHidden: table.occludedHidden || 0, omitted: table.omitted, text: table.text,
         mode: table.mode, scope: table.scope, panel: table.panel && (table.panel.name || table.panel.className),
@@ -624,6 +632,17 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(sorted(data["big"]["keys"]), ["i", "label", "role", "weak"])
         self.assertIn("hash", data["detail"]["keys"])
         self.assertIn("point", data["detail"]["keys"])
+
+    def test_weak_row_borrows_the_text_sitting_on_it(self):
+        data = self.run_probe()
+        labels = data["big"]["labels"]
+        # 名字在同级 Label 里时，行不该只显示 tab_bg 这种组件名
+        self.assertIn("限时特惠", labels)
+        self.assertEqual(data["big"]["alts"][labels.index("限时特惠")], "tab_bg")
+        # 借来的文案算真文案，不打弱标签星号
+        self.assertFalse(data["big"]["weaks"][labels.index("限时特惠")])
+        # 红点角标不占编号
+        self.assertNotIn("tab_red", labels)
 
     def test_prose_is_text_not_button(self):
         data = self.run_probe()

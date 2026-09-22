@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.4.0";
+    var VERSION = "1.4.4";
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -1605,6 +1605,15 @@
     ];
 
     var TEXT_CLASS = /label|textfield|bitmaptext|richtext/i;
+    // 红点、角标只是状态指示，从来不是点击目标，但名字里带 red/point/tab 会被当成控件收进来
+    var INDICATOR_TAG = /redpoint|red_point|reddot|tab_red|img_red|_red$|(^|[_\-])point$/i;
+    // 同一块地方有多行时留谁：界面真文案最有用，其次是角色明确的关闭/确定/返回
+    var ROLE_RANK = { confirm: 3, close: 3, back: 3, input: 3, npc: 2, tab: 1, button: 1, item: 0, text: 0 };
+
+    function rowScore(e) {
+        return (e.from === "text" || e.from === "childText" ? 4 : 0) + (ROLE_RANK[e.role] || 0);
+    }
+
     var BUTTON_TAG = /button|btn|tab|close|confirm|item|cell/i;
 
     function actionRoleOf(o, label, from) {
@@ -1620,18 +1629,27 @@
     }
 
     // 面板里的可见文案：给 agent 当页面正文用（任务描述、对白、数量）
-    function panelTexts(root, budget) {
-        var texts = [], stack = [], scanned = 0, total = 0;
+    function panelTexts(root, budget, sink) {
+        var texts = [], stack = [], scanned = 0, total = 0, seen = {};
         // 从最上层的子节点开始：弹窗正文是最后加入的子节点，从底层扫会被背景和地图吃光预算
         for (var i = 0; i < numChildren(root); i++) stack.push(childAt(root, i));
-        while (stack.length && scanned < 400 && total < budget) {
+        // 输出的文案有字数预算，但给动作表配标签的候选要一直收到扫描上限为止
+        while (stack.length && scanned < 400 && (total < budget || sink)) {
             var c = stack.pop();
             scanned++;
             if (!c || !c.visible || c.alpha === 0) continue;
             var t = tidy(textOf(c), 60);
-            if (t && texts.indexOf(t) < 0) {
-                texts.push(t);
-                total += t.length;
+            if (t && !seen["#" + t]) {
+                seen["#" + t] = 1;
+                if (total < budget) {
+                    texts.push(t);
+                    total += t.length;
+                }
+                // sink 里带上矩形：给动作表把「压在控件上的那段文字」当标签用
+                if (sink) {
+                    var tr = stageRect(c);
+                    if (tr) sink.push({ text: t, rect: tr });
+                }
             }
             for (var j = 0; j < numChildren(c); j++) stack.push(childAt(c, j));
         }
@@ -1713,7 +1731,8 @@
             lastTable = out;
             return out;
         }
-        out.text = panelTexts(root, 600);
+        var textNodes = [];
+        out.text = panelTexts(root, 600, textNodes);
 
         // 只有一个合法目标时就只给这一个：与 jev「只提供受支持的操作与目标」一致，避免瞎点遮罩碎片
         // 顺序有讲究：对白/引导 > 加载过场 > 只能点遮罩关闭的弹窗。
@@ -1806,7 +1825,7 @@
         }
 
         var probed = 0;
-        var entries = [], offstage = 0, textOnly = [];
+        var entries = [], offstage = 0, indicators = 0, textOnly = [];
         owners.forEach(function (item) {
             var o = item.o;
             var r = stageRect(o);
@@ -1834,6 +1853,12 @@
                     entry.blocker = hit ? shortClass(hit) + "#" + hashOf(hit) : null;
                 }
             }
+            // 红点角标：小块的指示图直接丢掉，不占编号
+            if (r.width < 32 && r.height < 32 &&
+                INDICATOR_TAG.test(nameOf(o) || bindId(o) || qaNameOf(o) || shortClass(o) || "")) {
+                indicators++;
+                return;
+            }
             // 点在舞台外的条目点不到（地图容器伸出舞台的边缘格子），只会让 agent 白点一轮
             if (point.x < 0 || point.y < 0 || point.x > stage.stageWidth || point.y > stage.stageHeight) {
                 offstage++;
@@ -1850,6 +1875,27 @@
         if (textOnly.length) {
             textOnly.forEach(function (t) { if (out.text.indexOf(t) < 0) out.text.push(t); });
         }
+        // 弱标签的行如果正压着一段界面文字，就用那段文字当标签：列表项和左侧菜单常把名字放在
+        // 同级的 Label 里，行本身只剩 tab_bg / itemIcon 这种组件名，模型只能去截图或 OCR。
+        entries.forEach(function (e) {
+            if (e.from === "text" || e.from === "childText") return;
+            var area = e._w * e._h, best = null, bestArea = 0;
+            for (var ti = 0; ti < textNodes.length; ti++) {
+                var tr = textNodes[ti].rect, trArea = tr.width * tr.height;
+                if (trArea > area * 1.02 || trArea < area * 0.03) continue;
+                if (tr.x < e._x - 1 || tr.y < e._y - 1 ||
+                    tr.x + tr.width > e._x + e._w + 1 || tr.y + tr.height > e._y + e._h + 1) continue;
+                if (trArea > bestArea) {
+                    best = textNodes[ti];
+                    bestArea = trArea;
+                }
+            }
+            if (best) {
+                e.alt = e.label;
+                e.label = tidy(best.text, 32);
+                e.from = "nearText";
+            }
+        });
         // 祖先-后代去重：容器和它装的按钮不该各占一行，同名的父子只留一行
         var indexed = {}, descendants = {};
         entries.forEach(function (e) { indexed[e.hash] = e; });
@@ -1872,16 +1918,19 @@
                 return;
             }
             kids.forEach(function (kid) {
-                // 文案相同时留小的那个：外面那层大出一截就只是壳（弹窗面板带着正文当标签），
-                // 普通按钮和它的文字标签大小接近，留的仍然是按钮本身
-                if (kid.label === e.label) {
-                    if (e._w * e._h > kid._w * kid._h * 4) dropped[e.hash] = true;
-                    else dropped[kid.hash] = true;
+                if (dropped[kid.hash] || dropped[e.hash]) return;
+                // 文案相同而外面那层大出一截：外面只是个壳（弹窗面板带着正文当标签），留里面那个
+                if (kid.label === e.label && e._w * e._h > kid._w * kid._h * 4) {
+                    dropped[e.hash] = true;
+                    return;
                 }
-                // 包一层的容器和它唯一的按钮占同一块矩形（grp_btn / confirm），只留里面那个：
-                // 里层的 label 和 role 更具体，两行一模一样只会让模型二选一浪费一轮
-                else if (Math.abs(kid._x - e._x) <= 2 && Math.abs(kid._y - e._y) <= 2 &&
-                    Math.abs(kid._w - e._w) <= 2 && Math.abs(kid._h - e._h) <= 2) dropped[e.hash] = true;
+                // 页签常被拆成「容器 + click_state + 背景图」好几行，占着差不多同一块地方：
+                // 这种只留一行，留标签信息量大的那个，一样就留外面那层（更大的点击目标）
+                if (kid._w * kid._h >= e._w * e._h * 0.5) {
+                    dropped[rowScore(kid) > rowScore(e) ? e.hash : kid.hash] = true;
+                    return;
+                }
+                if (kid.label === e.label) dropped[kid.hash] = true;
             });
         });
         entries = entries.filter(function (e) { return !dropped[e.hash]; });
@@ -1911,7 +1960,7 @@
             occludedHidden = entries.length - kept.length;
             entries = kept;
         }
-        out.omitted = Math.max(0, entries.length - limit) + collapsed + offstage;
+        out.omitted = Math.max(0, entries.length - limit) + collapsed + offstage + indicators;
         if (collapsed) out.collapsed = collapsed;
         if (occludedHidden) out.occludedHidden = occludedHidden;
         entries = entries.slice(0, limit);
@@ -1926,7 +1975,8 @@
             if (e.on) row.on = true;
             if (e.st) row.st = e.st;
             if (e.occluded) row.occluded = true;
-            if (e.from !== "text" && e.from !== "childText") row.weak = true;
+            if (e.from !== "text" && e.from !== "childText" && e.from !== "nearText") row.weak = true;
+            if (e.alt) row.alt = e.alt;
             // rects 是 server 做 OCR 时要的：它也得拿到 hash 和 from 才能把识别结果写回来
             if (detail || p.rects) {
                 row.hash = e.hash;
@@ -1944,10 +1994,10 @@
         var strongLabels = 0, weakLabels = 0;
         entries.forEach(function (e) {
             if (e.occluded || e.role === "text") return;
-            if (e.from === "text" || e.from === "childText") strongLabels++;
+            if (e.from === "text" || e.from === "childText" || e.from === "nearText") strongLabels++;
             else weakLabels++;
         });
-        if (weakLabels >= 2 && !strongLabels) out.needOcr = true;
+        if (weakLabels >= 3 && weakLabels >= strongLabels * 3) out.needOcr = true;
         // 已经作为动作列出来的文案不必在 text 里再抄一遍（标签有截断，按前缀比）
         out.text = out.text.filter(function (t) {
             return !entries.some(function (e) { return t.indexOf(e.label) === 0 || e.label.indexOf(t) === 0; });

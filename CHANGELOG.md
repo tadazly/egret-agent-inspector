@@ -8,6 +8,9 @@
 - `egret_act` 返回多一行「变化」，直接说明这一步把界面改成了什么样（打开/关闭了哪些面板、顶层是谁），不用自己 diff 前后两张动作表。
 - 整屏都是图片字按钮时自动补一次本地 OCR，不再需要模型先花一轮决定要不要 OCR；OCR 补过的标签保留原值在 `alt`。识别结果按显示对象 hash 在进程内复用，同一屏再看只花十几毫秒，不再每次都截图重认。
 - 收窄默认工具面：新增 `EGRET_MCP_PROFILE`，默认 `core` 隐藏完全能被 `egret_act` / `egret_observe` 顶掉的 `egret_tap`、`egret_advance`、`egret_dismiss_popups`、`egret_wait_for`、`egret_get_tree`、`egret_get_node`、`egret_hit_test`、`egret_status`、`egret_set_props`；`minimal` 只留主循环和连接类工具，`full` 恢复全部。被隐藏的工具仍可被 `egret_run_steps` 内部调用。
+- 弱标签的行如果正压着一段界面文字，就用那段文字当标签（原组件名留在 `alt`）：列表项和左侧菜单的名字常放在同级 Label 里，此前整列只能显示 `tab_bg`、`img_tip`，模型必须额外截图或 OCR 才知道哪一行是哪个页签。
+- 红点、角标这类小指示图不再占动作编号；同一个页签被拆成「容器 + click_state + 背景图」的多行合并成一行，留标签信息量大的那个。
+- 自动 OCR 的触发条件从「一个真文案都没有」放宽到「弱标签压倒性多数」，混着一两行日期文案的图片字界面也会补 OCR。
 - 点击后界面没有变化时的空等从 1200ms 降到 600ms，加载过场轮询从 300ms 降到 150ms。
 
 ## 5.0.0
