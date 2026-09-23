@@ -798,7 +798,7 @@ class SceneAndTurnTest(unittest.TestCase):
         script = r'''const fs = require("fs");
 let source = fs.readFileSync(process.argv[1], "utf8");
 source = source.replace("\n    installErrorHooks();",
-    "\n    window.__pageAgentTest = { buildActionTable, waitForTurn, waitForUnlock, rowDiff, describeRowDiff, handlers };\n    installErrorHooks();");
+    "\n    window.__pageAgentTest = { buildActionTable, waitForTurn, waitForUnlock, rowDiff, describeRowDiff, handlers, actionRoleOf, knownLockable };\n    installErrorHooks();");
 const vm = require("vm");
 const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480,
     visible: true, alpha: 1, touchEnabled: true, touchChildren: true, parent: null, children: [],
@@ -1044,6 +1044,36 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         quietMs: 50, timeoutMs: 200, turnMs: 0 });
     out.neverError = never.executed[1] && never.executed[1].error || null;
     out.neverMs = Date.now() - startedAt;
+
+    // 提示框的问句里带「确定」不是确定键；按钮字「确定」、实例名 confirm 才是
+    const q = item("eui.Label", "tip", hud, { x: 300, y: 100, width: 200, height: 20 }, { text: "确定要返回基地吗？" });
+    out.questionRole = t.actionRoleOf(q, "确定要返回基地吗？", "text");
+    out.okRole = t.actionRoleOf(q, "确定", "text");
+    remove(q);
+
+    // 转场时整层界面锁一下又解开：不能因此让之后每次点击都多等宽限期；局部的一组（技能栏）锁上又解开才算回合锁
+    const layer = item("eui.Group", "sceneLayer", stage, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
+    const inLayer = item("eui.Group", "panelBox", layer, { x: 600, y: 100, width: 150, height: 150 }, { solid: false });
+    const plainBtn = item("eui.Button", "btn_plain", inLayer, { x: 610, y: 110, width: 60, height: 40 }, { listener: true });
+    layer.touchChildren = false;
+    t.buildActionTable({ limit: 60, peek: true });
+    layer.touchChildren = true;
+    t.buildActionTable({ limit: 60, peek: true });
+    out.plainGrace = t.knownLockable(plainBtn);
+    const turnBar = item("ui.MoveBar", "moveBar", inLayer, { x: 600, y: 180, width: 150, height: 60 }, { solid: false });
+    const move = item("eui.Button", "btn_move", turnBar, { x: 610, y: 190, width: 60, height: 40 }, { listener: true });
+    turnBar.touchChildren = false;
+    t.buildActionTable({ limit: 60, peek: true });
+    turnBar.touchChildren = true;
+    t.buildActionTable({ limit: 60, peek: true });
+    out.turnGrace = t.knownLockable(move);
+    remove(layer);
+
+    // 委托：工具栏按 e.target 分发，外层 ps_grp 自己没监听、名字不像控件，里面显示的是 petBtn
+    const toolbar = item("ui.Toolbar", null, hud, { x: 60, y: 330, width: 740, height: 140 }, { solid: false, listener: true });
+    const psGrp = item("eui.Group", "ps_grp", toolbar, { x: 720, y: 350, width: 54, height: 54 }, { solid: false });
+    item("eui.Image", "battle_petBtn", psGrp, { x: 720, y: 350, width: 54, height: 54 });
+    out.shellRows = t.buildActionTable({ limit: 60 }).actions.map(a => a.label).filter(l => /ps_grp|petBtn/.test(l));
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
@@ -1129,6 +1159,19 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         # 按编号点它，act 替它按住滑出上沿，游戏认了
         self.assertEqual(data["actDrag"], "up")
         self.assertEqual(data["pickedByAct"], ["card0"])
+
+    def test_question_text_is_not_a_confirm_button(self):
+        data = self.run_probe()
+        self.assertNotEqual(data["questionRole"], "confirm")
+        self.assertEqual(data["okRole"], "confirm")
+
+    def test_whole_screen_lock_does_not_slow_every_tap(self):
+        data = self.run_probe()
+        self.assertFalse(data["plainGrace"])
+        self.assertTrue(data["turnGrace"])
+
+    def test_delegation_shell_shows_the_button_inside(self):
+        self.assertEqual(self.run_probe()["shellRows"], ["battle_petBtn"])
 
     def test_later_step_waits_for_its_target_to_show_up(self):
         data = self.run_probe()
