@@ -261,6 +261,39 @@ def short_label(label, width=12):
     return label if len(label) <= width else label[:width] + "…"
 
 
+GUIDE_STOPS = {
+    "decision": "轮到你做决定",
+    "battle-turn": "战斗轮到你出招（这一回合没有引导）",
+    "finished": "新手引导已全部走完",
+    "budget": "这次调用快到时限，接着再发 {\"op\":\"guide\"}",
+    "stuck": "同一处点了 3 次没反应",
+    "lost": "掉线了",
+    "no-guide": "当前没有可跟的引导",
+}
+
+
+def render_guide_run(result):
+    """op=guide 的一行结果：点了几下、走过哪几段新手、最后几下点的什么、停在哪。
+
+    逐个列出几十下点击没用：agent 要的是走到哪了、为什么停；阶段名留着给它写汇报。
+    """
+    steps = result.get("steps") or 0
+    trail = [t for t in result.get("trail") or [] if t]
+    text = " → 跟着引导点了 %s 下" % steps if steps else " → 没有可跟的引导"
+    newbie = result.get("newbie") or {}
+    stages = result.get("stages") or []
+    if newbie and newbie.get("to") != newbie.get("from"):
+        text += "，新手第 %s→%s 段" % (newbie.get("from", 0) + 1, min(newbie.get("to", 0) + 1, newbie.get("total") or 0))
+    if stages:
+        text += "（%s）" % " → ".join(stages)
+    if trail:
+        text += "，最后几下：%s" % "、".join(trail[-3:])
+    why = GUIDE_STOPS.get(result.get("stopped"), result.get("stopped"))
+    if result.get("why"):
+        why += "：%s" % result["why"]
+    return text + "；停下：%s" % why
+
+
 def render_action_table(table):
     """动作表渲染成一行一条的紧凑文本。
 
@@ -297,10 +330,32 @@ def render_action_table(table):
         lines.append("掉线 %s：别点提示框，直接 egret_navigate %s 重开页面，再从登录页进游戏" % (
             what, json.dumps({"url": session.get("url")}, ensure_ascii=False)))
     turn = table.get("battleTurn") or {}
+    newbie = table.get("newbie") or {}
+    guiding = bool(newbie) and not newbie.get("done")
+    # 引导在等你选（起名、选颜色、选精灵）：选完在同一次调用里接着跟，不用再看一轮表
+    waiting = guiding and newbie.get("want") and not table.get("recommendedTarget") and not turn.get("canOP")
+    if newbie.get("done"):
+        # 验收里 agent 看主线任务栏还挂着「去商店买胶囊」，以为新手没走完，又绕了十几次调用
+        line = "新手 已走完（%s/%s 段），没有新手引导了" % (newbie.get("total"), newbie.get("total"))
+        if table.get("scope") != "stage":
+            # 走完以后成长计划、礼包弹窗一个接一个，逐个 close 每个都要多一轮
+            line += "；剩下的普通界面和礼包弹窗一次关到主城：" \
+                    "[{\"op\":\"close\"},{\"op\":\"close\",\"optional\":true},{\"op\":\"close\",\"optional\":true}]"
+        lines.append(line)
+    elif guiding:
+        line = "新手 第 %s/%s 段「%s」" % (min(newbie.get("step", 0) + 1, newbie.get("total") or 0),
+                                       newbie.get("total"), newbie.get("name") or "")
+        if waiting:
+            line += "，引导在等你：%s" % newbie["want"]
+        lines.append(line)
     if turn.get("canOP"):
         # 新手战斗停了倒计时，轮到你时不出招就一直僵着；对面倒下后界面上还是那只 0 血的精灵
         lines.append("回合 只能换精灵：点换宠栏里的卡片" if turn.get("next") == 3 else
                      "回合 轮到你出招：点技能（对面显示 0 血也要出招，出现结算页才算打完）")
+        if guiding and turn.get("next") != 3:
+            lines.append("接着 这一场一次打完并接着跟引导：[{\"i\":<技能编号>,\"repeat\":15},{\"op\":\"guide\"}]")
+    elif waiting:
+        lines.append("接着 做完这一步在同一次 act 里接着跟引导：[{\"i\":<编号>},{\"op\":\"guide\"}]")
     for rec in table.get("executed") or []:
         target = rec.get("target") or {}
         label = target.get("label") or target.get("reason") or rec.get("text") or ""
@@ -316,6 +371,8 @@ def render_action_table(table):
         elif rec.get("expectMatched") is False:
             line += " → expect 未满足"
         result = rec.get("result") or {}
+        if rec.get("op") == "guide" and isinstance(result, dict) and result.get("stopped"):
+            line += render_guide_run(result)
         if isinstance(result, dict) and result.get("advanced") is not None:
             line += " → 推进 %s 次（%s）" % (result.get("advanced"), result.get("stopped"))
         if isinstance(result, dict) and isinstance(result.get("closed"), list):
@@ -423,11 +480,19 @@ def render_action_table(table):
             text = " ".join(str(target.get("text") or "").split())
             name = text if 0 < len(text) <= 12 else str(target.get("qaName") or "").split("__")[-1] or \
                 target.get("id") or target.get("name") or str(target.get("className") or "").split(".")[-1]
-        if reason == "guide-drag":
+        if guiding:
+            # 新手引导一步接一步：验收里 agent 每一处都单独发一次 recommended，走完新手要 140 次调用
+            lines.append("推荐 {\"op\":\"guide\"}（新手引导：一路跟着点，到要你做决定才停）")
+        elif reason == "guide-drag":
             lines.append("推荐 {\"op\":\"recommended\"}（guide-drag，按住把 %s 拖到 %s）" % (
                 short_label(rec.get("label") or "起点"), short_label(rec.get("dropLabel") or "引导终点")))
         else:
             lines.append("推荐 {\"op\":\"%s\"}（%s%s）" % (op, reason, "，点 %s" % name if name else ""))
+    elif guiding and not waiting and not turn.get("canOP") and not any(
+            r.get("op") == "guide" and (r.get("result") or {}).get("stopped") in ("decision", "stuck")
+            for r in table.get("executed") or []):
+        # 引导还在自己走（换界面、等回包、下一处遮罩还没挂）：接着跟，别自己在底下的面板上找按钮
+        lines.append("推荐 {\"op\":\"guide\"}（新手引导还在走，接着跟）")
     if table.get("transientOverlay"):
         lines.append("过场 %s：用 {\"op\":\"wait\",\"ms\":800} 短等" % table["transientOverlay"].get("reason"))
     for sc in table.get("scrollers") or []:
@@ -489,7 +554,7 @@ INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游�
 - 用 i 编号时必须把上一次的 marker 传给 egret_act；界面已经变了会返回 stale 和新动作表且不执行，按新表重新决策即可。已确认的连续操作一次给多步 steps。
 - 动作表是紧凑文本，一行一个动作：编号 标签 role 状态。标签带 * 是图片字弱标签，整屏都是弱标签时会自动补一次本地 OCR。需要 hash、坐标或完整字段时传 format="json"。
 - 返回里的「变化」一行说明上一步把界面改成了什么样，不用自己 diff 两张表。
-- 对白与引导用 op=advance 一次推完；弹窗用 op=dismiss；关掉当前这个界面用 op=close（关闭键→返回键→遮罩依次试，并确认它真的没了）；加载过场（mode=transient）用 op=wait。
+- 对白用 op=advance 一次推完；一步接一步的引导（新手流程）用 op=guide，一路跟到要你做决定才停；弹窗用 op=dismiss；关掉当前这个界面用 op=close（关闭键→返回键→遮罩依次试，并确认它真的没了）；加载过场（mode=transient）用 op=wait。
 - 要把一批同类目标挨个打开看一眼，一次 act 就给多组「打开 + op=close」步骤，不要一个来回只点一下。
 - 表上出现「页面已重载」时，之前记下的 hash 和编号全部作废，按新表重新定位。
 - 动作表标「按住上滑」这类的控件要拖出去松手才生效（例如把卡片拖上场），照常按编号点，act 会自动按住滑出去。
@@ -707,6 +772,9 @@ TOOLS = {
         "{\"op\":\"close\"} 关掉当前顶层面板：一次往返里依次试关闭键、返回键、遮罩，并确认面板真的消失，"
         "回报是哪条路子生效；打开一个界面看完就关的遍历用它，比 dismiss 更适合全屏面板；"
         "{\"op\":\"recommended\"} 点 observe 给出的 recommendedTarget（引导挖洞、只能点遮罩关闭的弹窗）；"
+        "{\"op\":\"guide\"} 一路跟着引导点（挖洞目标、拖动引导、只能点继续的对白，Splan 新手里还有引导途中弹的奖励框和结算页），"
+        "到要你做决定（起名、选择、没有引导的战斗回合、多个回答的对白）、引导走完或快到时限才停，返回里写明点了几下、停在哪；"
+        "要你选的那一步可以和它连着发：[{\"i\":3},{\"op\":\"guide\"}]；"
         "{\"op\":\"scroll\",\"i\":3,\"dy\":-200} 滚动列表，{\"op\":\"scroll\",\"hash\":<Scroller>,\"toIndex\":132} 直接滚到第 132 条（先用 $items 读数据找到下标）；{\"op\":\"wait\",\"ms\":800} 或 {\"op\":\"wait\",\"until\":{查询条件}} 等待。"
         "编号只有传了上一次的 marker 且界面没变时才有效：界面已变会原样返回 stale=true 和新动作表，不执行任何点击。"
         "每步可加 expect（查询条件）校验结果，失败即停止并返回当前动作表；加 optional 则该步失败不影响结论。"
@@ -1204,6 +1272,8 @@ class McpServer:
         self.routes = {}
         # tabId -> 路线行摆出来之后 agent 照没照走，用来在自由探索时收起它
         self.route_gates = {}
+        # 看见过新手进行中的标签页：只对它们报「新手已走完」
+        self.newbie_seen = set()
 
     async def send(self, msg):
         data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
@@ -1272,6 +1342,7 @@ class McpServer:
                 res = await self.enrich_locate_with_ocr(args, res)
             if name in ("egret_observe", "egret_act"):
                 self.note_page_boot(args, res)
+                self.note_newbie(args, res)
                 if name == "egret_act":
                     self.note_route(args, res)
                 # 整屏都是图片字按钮时自动补一次本地 OCR：让模型专门花一轮决定「要不要 OCR」不划算
@@ -1325,6 +1396,17 @@ class McpServer:
         if previous and previous != boot:
             table["reloaded"] = True
 
+    def note_newbie(self, args, table):
+        """「新手已走完」只对这次亲眼看着新手走的标签页说：老号每张表都挂一行只是噪音。"""
+        newbie = table.get("newbie")
+        if not newbie:
+            return
+        key = table.get("tabId", args.get("tabId"))
+        if not newbie.get("done"):
+            self.newbie_seen.add(key)
+        elif key not in self.newbie_seen:
+            table.pop("newbie", None)
+
     def note_route(self, args, table):
         """同一段路线第二次出现时，把上次紧接着的几步拼成一次就能发完的 steps。
 
@@ -1342,8 +1424,10 @@ class McpServer:
             replay, key, loose = route_step(step, rec)
             target = rec.get("target") or {}
             # agent 自己垫的干等、什么都没推进的 advance：act 本来就会等，照发只是把空转也复制一遍（战斗里曾经每回合都推荐「wait → advance → wait」）
+            # 跟引导一次走多远看当时的引导，不是能照抄的路线
             filler = (rec.get("op") == "wait" and not (isinstance(step, dict) and step.get("until"))) or \
-                (rec.get("op") == "advance" and (rec.get("result") or {}).get("advanced") == 0)
+                (rec.get("op") == "advance" and (rec.get("result") or {}).get("advanced") == 0) or \
+                rec.get("op") == "guide"
             log.append({
                 "from": rec.get("from"),
                 "to": recs[k + 1].get("from") if k + 1 < len(recs) else table.get("topKey"),

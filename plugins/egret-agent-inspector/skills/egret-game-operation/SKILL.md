@@ -50,7 +50,7 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 
 | mode | 含义 | 该做什么 |
 | --- | --- | --- |
-| `guide-hole` | 新手引导挖洞，只有洞里能点 | `{"op": "recommended"}`，此时没有动作表 |
+| `guide-hole` | 新手引导挖洞，只有洞里能点 | 一步接一步的引导用 `{"op": "guide"}` 一路跟到要你做决定；单独一处用 `{"op": "recommended"}` |
 | `guide-continue` / `dialogue-continue` | 点任意处继续的引导或 NPC 对白 | `{"op": "advance"}` 一次推完，不要逐次点 |
 | `modal-backdrop-dismiss` | 没识别到关闭控件，推测遮罩可点；动作表照常给出 | 先用表里的关闭/确定按钮，都没有才 `{"op": "recommended"}` |
 | `transient` | 地图标题、章节标题、加载过场，没有安全点击目标 | `{"op": "wait", "ms": 800}`，不要点黑色区域 |

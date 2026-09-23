@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.27";
+    var VERSION = "1.7.43";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -747,8 +747,9 @@
         return { stage: stage, layers: layers, stack: stack.length ? stack : siblings, top: top };
     }
 
-    var CLOSE_RE = /close|关闭|關閉|quit|cancel|dismiss|guanbi|(?:^|[\s_-])btn_no(?:$|[\s_-])/i;
-    var CLOSE_TEXTS = ["关闭", "取消", "确定", "确认", "知道了", "我知道了", "好的", "×", "X", "x"];
+    // later / 稍后再说：新手走完连着弹的限时礼包只有「稍后再说」和「前往」，没有 ×
+    var CLOSE_RE = /close|关闭|關閉|quit|cancel|dismiss|guanbi|(?:^|[\s_-])(?:btn_no|later)(?:$|[\s_-])/i;
+    var CLOSE_TEXTS = ["关闭", "取消", "确定", "确认", "知道了", "我知道了", "好的", "稍后再说", "以后再说", "下次再说", "×", "X", "x"];
     // 全屏面板常常只有「返回」没有 ×。back 要避开 background / backdrop / bg 这类背景命名。
     var BACK_RE = /(?:^|[\s_-])(?:back|return)(?:$|[\s_-])|返回|回退|返 回/i;
     var BACK_TEXTS = ["返回", "返 回", "back", "Back", "BACK"];
@@ -1418,8 +1419,9 @@
         var start = Date.now();
         while (Date.now() - start < capMs) {
             var g = splanGuide(), nono = splanNoNo(), stage = getStage();
+            // 引导点完接着是 NPC 对白也算落定：不用再干等 1.5 秒看遮罩来不来
             var pending = (g && !g.ready) || (nono && !nono.typed && !nono.pass) ||
-                (!g && !nono && splanGuiding() && ((stage && stage.touchChildren === false) ||
+                (!g && !nono && !splanNpcDialog() && splanGuiding() && ((stage && stage.touchChildren === false) ||
                     (afterGuideTap && Date.now() - start < 1500)));
             if (!pending) break;
             await sleep(100);
@@ -1480,6 +1482,55 @@
         };
     }
 
+    // NPC 对白（MFC.npcDialog）：字一次整段出来，没有打字过程；只有一个回答（或没有回答）时点任意处就走，
+    // 回答不止一个才是选择。验收里它常被认成顶层「Group」，agent 截图、dismiss、close 试了五六次
+    function splanNpcDialog() {
+        var d = window.MFC && window.MFC.npcDialog;
+        if (!d || !d.callbacks) return null;
+        var ui = d.ui && d.ui.stage ? d.ui : d.uiStory && d.uiStory.stage ? d.uiStory : null;
+        if (!ui || !ui.visible) return null;
+        var answers = [];
+        try {
+            answers = (ui.anwserList && ui.anwserList.source || []).map(function (a) {
+                return String(a).replace(/<[^>]+>/g, "").replace(/##.*$/, "").trim();
+            });
+        } catch (e) {}
+        var text = "";
+        try { text = String(ui.txtContent && ui.txtContent.text || ""); } catch (e) {}
+        return { panel: ui, list: ui.list_answer || null, text: text, answers: answers,
+            single: answers.length <= 1, ready: ui.alpha >= 0.95 };
+    }
+
+    // 2026 版新手进度：mongo 里的 curStep 是第一段没走完的，allGuideList 是全部段数；当前这一步在等什么写在 statItem 里。
+    // 只读字段：GuideManager.getInstance() 首次调用会建实例，这里直接读 s_instance
+    function splanNewbie() {
+        if (!window.MFC) return null;
+        try {
+            var seer = window.formalVilToy && formalVilToy.Same && formalVilToy.Same.NewSeer;
+            if (!seer || !seer.IsNew2026 || !seer.IsNew2026()) return null;
+            var info = window.mongoAttr.getCommonAttrNewbieGuidance();
+            var gm = window.guideManager && guideManager.GuideManager && guideManager.GuideManager.s_instance;
+            var total = gm && gm.allGuideList ? gm.allGuideList.length : 0;
+            if (!info || !total) return null;
+            var out = { step: Math.min(+info.curStep || 0, total), total: total, guiding: splanGuiding() };
+            var cur = gm.currGuide && !gm.currGuide.completed ? gm.currGuide : null;
+            if (cur && out.step < total) {
+                out.name = cur.guideDes;
+                var st = cur.currStep;
+                if (st) {
+                    out.stepType = String(egret.getQualifiedClassName(st) || "").replace(/Step$/, "");
+                    // 只有等玩家操作的步骤才报「在等你」：Button 的 statItem（「点击背包」）遮罩马上就挂，播放视频不用你做什么
+                    if (st.statItem && /^(CloseListener|Listener|Event)$/.test(out.stepType)) out.want = st.statItem;
+                    if (st.eventType) out.event = st.eventType;
+                }
+            }
+            out.done = out.step >= total && !out.guiding;
+            return out;
+        } catch (e) {
+            return null;
+        }
+    }
+
     function splanContinueTargetOf() {
         if (!window.MFC) return null;
         var stage = getStage();
@@ -1496,6 +1547,15 @@
         var dragGuide = splanDragGuide();
         if (dragGuide) return dragGuide;
         var g = splanGuide();
+        var npc = splanNpcDialog();
+        if (npc && npc.single && npc.ready && !(g && g.target)) {
+            var nr = stageRect(npc.panel);
+            var np = nr ? { x: nr.x + nr.width / 2, y: nr.y + nr.height / 2 } : center;
+            var npcRec = recommendationAt(npc.panel, np, "dialogue-continue", npc.panel);
+            npcRec.splan = "npc";
+            if (npc.answers[0]) npcRec.label = npc.answers[0];
+            return npcRec;
+        }
         if (g && g.target) {
             var r = stageRect(g.target);
             if (!r || r.width < 2 || r.height < 2) return null;
@@ -1590,6 +1650,8 @@
     // 图片字按钮在源码里的固定叫法，不用 OCR 猜
     var SPLAN_QA_LABELS = { NewLogin__btn_start: "进入游戏", NewLogin__btn_account: "切换账号",
         SimpleAlert__cancel: "取消",
+        // 新手起名：名字已随机填好，表上原来只有 sureI、randomNameI，还推荐点遮罩关掉
+        SetNick2026__sureI: "确定", SetNick2026__randomNameI: "随机名字",
         // 启航手册的返回键名字不成词（Back 后面紧跟 iCan），通用规则认不出是返回
         OnboardingManualVer2__imgBackiCan: "返回" };
     // 按控件 id + 所在组件认：宿主类名在运行时不一定和源码一致（ToolBar 里的 autoOn 表上显示的 qaName 宿主不是 ToolBar）。
@@ -1597,7 +1659,9 @@
     var SPLAN_ID_LABELS = [
         { id: /^autoOn$/, name: /^battle_autoBtn$/, host: /toolbar|battle/i, label: "自动战斗（别点）" },
         { id: /^btnClose$/, host: /pvestar/i, label: "收起三星条件" },
-        { id: /^btnOpen$/, host: /pvestar/i, label: "展开三星条件" }
+        { id: /^btnOpen$/, host: /pvestar/i, label: "展开三星条件" },
+        // 新手选颜色的确定键叫 btnOK，认不成确定键，表上反而推荐点遮罩关掉
+        { id: /^btnOK$/, host: /createRole/i, label: "确定" }
     ];
 
     function splanFixedLabel(o) {
@@ -1619,6 +1683,105 @@
 
     function continueTargetOf(panel) {
         return splanContinueTargetOf() || guideTargetOf(panel) || passiveContinueTargetOf(panel);
+    }
+
+    // 新手引导里由游戏自己推进的步骤（开面板、延时、换场景、等服务器回包）：界面能点也别急着判「轮到你了」，
+    // 下一处遮罩马上就挂（背包打开有特效，引导延时 200ms 才取按钮）
+    var GUIDE_GAME_STEPS = /^(PanelOpened|PanelShow|Panel|ClosePanel|Delay|DelayCopy|MoveScene|MoveScreen|SwitchMap|CheckMap|SetVar|SetStep|SetPveType|SetPveSelectGalaxy|CmdListen|HideAllPanel|HideMask|SkipModel|MainPetLevelCheck|PetLevelCheck|PetConditionCheck|PetEnter|StatLog|ClearCacheReward|Eval|FightBtn|Listener|Event)$/;
+
+    function guideTargetName(t) {
+        t = t || {};
+        var text = String(t.text || "").replace(/\s+/g, " ").trim();
+        if (text && text.length <= 12) return text;
+        return String(t.qaName || "").split("__").pop() || t.id || t.name || String(t.className || "").split(".").pop() || "引导目标";
+    }
+
+    // 下一步该点什么：只认引导明确指定的目标和「点任意处继续」，其余一律交回 agent
+    function guideNextAction(si) {
+        var stage = getStage(), top = si.top;
+        var center = { x: round(stage.stageWidth / 2), y: round(stage.stageHeight / 2) };
+        function tapOf(rec, guide) {
+            return { kind: "tap", guide: guide, point: rec.stagePoint, label: "点 " + guideTargetName(rec.target),
+                key: "g" + (rec.target && rec.target.hash) + "@" + rec.stagePoint.x + "," + rec.stagePoint.y };
+        }
+        if (window.MFC) {
+            if (splanFightIntro()) return { kind: "tap", point: center, label: "战斗说明", key: "intro" };
+            var nono = splanNoNo();
+            if (nono && !nono.pass) return { kind: "nono", point: center, label: "NoNo 对白", key: "nono" + nono.step + ":" + hashOf(nono.dialog) };
+            var drag = splanDragGuide();
+            if (drag) {
+                return { kind: "drag", point: drag.stagePoint, to: drag.dropPoint, grab: drag.target && drag.target.hash,
+                    label: "拖 " + tidy(drag.label || "技能", 10) + " → " + tidy(drag.dropLabel || "格子", 10), key: "drag" };
+            }
+            var g = splanGuide(), npc = splanNpcDialog();
+            if (g && !g.ready) return { wait: true };
+            if (g && g.target) {
+                var rec = splanContinueTargetOf();
+                if (rec && rec.reason === "guide-hole") return tapOf(rec, true);
+                // 目标中心不在洞里（只露出一角）：通用挖洞判定找能点的那一格
+                var hole = guideTargetOf(top);
+                return hole ? tapOf(hole, true) : { wait: true };
+            }
+            if (npc) {
+                if (!npc.single) return { decision: "对白有 " + npc.answers.length + " 个回答：" + npc.answers.map(function (a) { return tidy(a, 14); }).join(" / ") };
+                if (!npc.ready) return { wait: true };
+                var nr = stageRect(npc.panel);
+                return { kind: "tap", point: nr ? { x: round(nr.x + nr.width / 2), y: round(nr.y + nr.height / 2) } : center,
+                    label: npc.answers[0] ? "回答「" + tidy(npc.answers[0], 16) + "」" : "NPC 对白",
+                    key: "npc" + hashOf(npc.panel) + ":" + npc.text.slice(0, 24) };
+            }
+            if (g) {
+                // 有遮罩但没挂 _guideTapTarget（按名字高亮一块区域）：按挖洞位置点
+                var holeOnly = guideTargetOf(top);
+                return holeOnly ? tapOf(holeOnly, true) : { wait: true };
+            }
+        }
+        var generic = guideTargetOf(top);
+        if (generic) return tapOf(generic, true);
+        var passive = passiveContinueTargetOf(top);
+        if (passive) return { kind: "tap", point: passive.stagePoint, label: passive.reason === "dialogue-continue" ? "对白" : "继续",
+            key: "p" + continuationSignature(top, passive) };
+        return null;
+    }
+
+    function guideProgressKey() {
+        var si = sceneInfo();
+        if (!window.MFC) return [si.top ? hashOf(si.top) : "-", si.stack.length, quickSignature()].join("|");
+        var g = splanGuide(), nono = splanNoNo(), npc = splanNpcDialog();
+        return [si.top ? hashOf(si.top) : "-", si.stack.length, g ? (g.target ? hashOf(g.target) : "m") : "-",
+            nono ? nono.step + ":" + hashOf(nono.dialog) : "-", npc ? hashOf(npc.panel) + ":" + npc.text.slice(0, 24) : "-",
+            splanFightIntro() ? "i" : "-"].join("|");
+    }
+
+    async function waitGuideChange(before, cap) {
+        for (var start = Date.now(); Date.now() - start < cap;) {
+            await sleep(80);
+            if (guideProgressKey() !== before) return true;
+        }
+        return false;
+    }
+
+    // 引导途中弹出、只能点遮罩关掉的奖励框 / 结算页：返回它的名字，别的一律 null
+    // 奖励框（NewRewardPop）有时整个挂在图层上、顶层只是它的一个 Group，不算模态面板，不能拿 isModalPanel 卡
+    // 二次确认框：表上同时有确定键和取消键
+    function guideConfirmOf() {
+        var rows = (buildActionTable({ peek: true, detail: true }).actions || []).filter(function (a) { return !a.occluded; });
+        var ok = rows.filter(function (a) { return a.role === "confirm"; })[0];
+        var cancel = rows.some(function (a) { return /cancel|取消/i.test(a.label + " " + (a.alt || "")); });
+        return ok && cancel && ok.point ? { label: ok.label, point: ok.point } : null;
+    }
+
+    // wantClose：引导正等你关掉某个面板（CloseListener）。捕捉成功页整屏只有一个点击层，点任意处就关
+    function guideClosable(top, wantClose) {
+        if (!top || isSplanBattlePanel(top)) return null;
+        var t = buildActionTable({ peek: true, detail: true });
+        if (t.mode === "modal-backdrop-dismiss") return { label: stackEntryLabel(top) };
+        var stage = getStage(), rows = (t.actions || []).filter(function (a) { return !a.occluded; });
+        if (wantClose && rows.length === 1 && rows[0].size && rows[0].point &&
+            rows[0].size[0] * rows[0].size[1] >= stage.stageWidth * stage.stageHeight * 0.8) {
+            return { label: stackEntryLabel(top), point: rows[0].point };
+        }
+        return null;
     }
 
     function continuationSignature(panel, recommendation) {
@@ -2219,7 +2382,7 @@
     async function waitForUnlock(o, lock, cap, seenEntries) {
         var top = sceneInfo().top;
         var baseline = seenEntries ? outsideKeys(seenEntries, lock) : actionableOutside(lock);
-        return watchLock(o, lock, cap, baseline, top && hashOf(top));
+        return watchLock(o, lock, cap, baseline, top && hashOf(top), isSplanBattlePanel(top));
     }
 
     function knownLockable(o) {
@@ -2231,24 +2394,32 @@
         return false;
     }
 
+    // 顶层换没换：Splan 战斗演出时顶层在 BattlePanel 和它的 BattlePanel__group_ui、__bgPortrait 之间来回切，
+    // 那不是换了界面。新手第一关里 repeat 因此出一招就停、报「界面换了」
+    function topMoved(topHash, battle) {
+        var now = sceneInfo().top;
+        if (!now) return true;
+        if (hashOf(now) === topHash) return false;
+        return !(battle && isSplanBattlePanel(now));
+    }
+
     async function waitForTurn(o, cap, graceMs) {
         var lock = lockedAncestor(o);
-        var top = sceneInfo().top, topHash = top && hashOf(top);
+        var top = sceneInfo().top, topHash = top && hashOf(top), battle = isSplanBattlePanel(top);
         for (var g0 = Date.now(); !lock && graceMs > 0 && Date.now() - g0 < graceMs && o.stage;) {
             await sleep(100);
             lock = lockedAncestor(o);
             // 最后一击直接结算：锁还没来，界面先换了
-            var then = sceneInfo().top;
-            if (!then || hashOf(then) !== topHash) return { waitedMs: Date.now() - g0, reason: "panel" };
+            if (topMoved(topHash, battle)) return { waitedMs: Date.now() - g0, reason: "panel" };
         }
         if (!lock) return null;
         lockableSeen[hashOf(lock)] = true;
         noteLock(lock, false);
         // 锁住的那一块之外、此刻就能点的东西；之后多出来的（比如精灵倒下后的换宠栏）说明游戏在等你做别的决定
-        return watchLock(o, lock, cap, actionableOutside(lock), topHash);
+        return watchLock(o, lock, cap, actionableOutside(lock), topHash, battle);
     }
 
-    async function watchLock(o, lock, cap, baseline, topHash) {
+    async function watchLock(o, lock, cap, baseline, topHash, battle) {
         var start = Date.now(), polls = 0, reason = "timeout", added = null;
         // 出招名、伤害数字这类横幅一闪就没；等你做决定的东西（换宠栏）会一直摆着。持续 1s 都在才算；
         // 平时隔 400ms 看一次，冒出候选后每 200ms 盯一次，换宠倒计时只有十来秒，发现得越早越好
@@ -2263,8 +2434,7 @@
                 noteLock(lock, true);
                 break;
             }
-            var now = sceneInfo().top;
-            if (!now || hashOf(now) !== topHash) { reason = "panel"; break; }
+            if (topMoved(topHash, battle)) { reason = "panel"; break; }
             if (pending || polls % 2 === 0) {
                 var info = {}, seen = {}, sigs = {}, at = Date.now();
                 added = rowDiff(baseline, actionableOutside(lock, info)).added.filter(function (h) {
@@ -2398,7 +2568,7 @@
     var FAST_ROLES = [
         ["npc", /storyInteractObject|(^|[_-])npc(?:[_-]|$)/i],
         ["input", function (blob, ids, o) { return inputLike(o); }],
-        ["close", captionRole(/close|关闭|關閉|quit|dismiss|(?:^|[\s_-])btn_no(?:$|[\s_-])/i)],
+        ["close", captionRole(/close|关闭|關閉|quit|dismiss|稍后再说|以后再说|下次再说|(?:^|[\s_-])(?:btn_no|later)(?:$|[\s_-])/i)],
         ["confirm", captionRole(/confirm|btn_yes|btn_ok|确定|確定|确认|確認|知道了|好的/i)],
         // 只认实例名 / qaName / 文案，且要成词：类名里的 Return（SeerReturn2Component 是「老兵回归」）
         // 和 background 这类前缀都不算返回键
@@ -2954,6 +3124,8 @@
         if (session) out.session = session;
         var battleTurn = splanBattleTurn(si.stack);
         if (battleTurn) out.battleTurn = battleTurn;
+        var newbie = splanNewbie();
+        if (newbie) out.newbie = newbie;
         if (!root) {
             out.mode = "empty";
             out.marker = "empty";
@@ -2969,7 +3141,8 @@
         var transientOverlay = null;
         if (!scoped && !recommendedTarget) {
             transientOverlay = transientOverlayOf(si.top);
-            if (!transientOverlay) recommendedTarget = backdropDismissTargetOf(si.top);
+            // 新手引导正等你在这个界面上做一件事（「点击确定颜色」）：点遮罩关不掉它，别推荐
+            if (!transientOverlay && !(newbie && newbie.want)) recommendedTarget = backdropDismissTargetOf(si.top);
         }
         if (recommendedTarget) {
             out.mode = recommendedTarget.reason;
@@ -2979,14 +3152,18 @@
             // 否则遮罩点不动时 agent 手里什么都没有，只能空转。
             if (recommendedTarget.reason !== "modal-backdrop-dismiss") {
                 out.marker = hashString([out.mode, si.top && hashOf(si.top), out.text.join("|")].join("#"));
-                out.hint = recommendedTarget.reason === "guide-hole"
+                out.hint = newbie && !newbie.done
+                    ? "新手引导：用 egret_act 的 {op:\"guide\"} 一路跟着点，到要你做决定才停"
+                    : recommendedTarget.reason === "guide-hole"
                     ? "引导挖洞：只能点 recommendedTarget，用 egret_act 的 {op:\"recommended\"}"
                     : recommendedTarget.reason === "guide-drag"
                     ? "拖动引导（手势动画）：不是关不掉的遮罩，用 egret_act 的 {op:\"recommended\"}，工具会按住拖过去"
                     : "连续对白/引导：用 egret_act 的 op=advance 一次推完，不要逐次点击";
                 return rememberEmpty(p, out);
             }
-            out.hint = "没有识别到关闭控件：表里有关闭/确定按钮就点它，否则用 egret_act 的 {op:\"close\"}（点遮罩并确认关掉）";
+            out.hint = newbie && !newbie.done
+                ? "新手引导途中弹出的奖励框 / 结算页：{op:\"guide\"} 会关掉它并接着跟引导"
+                : "没有识别到关闭控件：表里有关闭/确定按钮就点它，否则用 egret_act 的 {op:\"close\"}（点遮罩并确认关掉）";
         }
         if (transientOverlay) {
             out.mode = "transient";
@@ -3991,6 +4168,8 @@
                             max: step.max !== undefined ? step.max : 6,
                             waitMs: step.waitMs, paceMs: step.paceMs, stableMs: step.stableMs, method: method
                         });
+                    } else if (op === "guide") {
+                        record.result = await handlers.guideRun({ method: method, deadline: deadline - 1500 });
                     } else if (op === "dismiss") {
                         record.result = await handlers.dismissPopups({
                             max: step.max !== undefined ? step.max : 2, until: step.until, method: method
@@ -4030,9 +4209,12 @@
                             await sleep(Math.min(Math.max(step.ms !== undefined ? +step.ms : 600, 0), 15000));
                         }
                     } else {
-                        throw new Error("未知的 op：" + op + "（支持 tap/text/swipe/drag/close/recommended/advance/dismiss/scroll/wait）");
+                        throw new Error("未知的 op：" + op + "（支持 tap/text/swipe/drag/close/recommended/advance/guide/dismiss/scroll/wait）");
                     }
-                    if (op !== "wait" || !step.until) {
+                    if (op === "guide") {
+                        // 跟引导时每一步都已经等过界面变化，不再额外等
+                        record.settle = { changed: record.result.steps > 0, waitedMs: 0 };
+                    } else if (op !== "wait" || !step.until) {
                         record.settle = await settleAfter(before, {
                             timeoutMs: step.timeoutMs !== undefined ? step.timeoutMs : p.timeoutMs,
                             stableMs: step.stableMs !== undefined ? step.stableMs : p.stableMs,
@@ -4046,7 +4228,7 @@
                             turnCap = Math.max(Math.min(turnCap, 60000, deadline - Date.now()), 500);
                             var grace = knownLockable(tapTarget) || +step.repeat > 1 ? 1500 : 0;
                             var topAtTap = sceneInfo().top, topAtTapHash = topAtTap && hashOf(topAtTap);
-                            turnTops[executed.length] = topAtTapHash;
+                            turnTops[executed.length] = { hash: topAtTapHash, battle: isSplanBattlePanel(topAtTap) };
                             var turn = await waitForTurn(tapTarget, turnCap, grace);
                             if (turn) record.turn = turn;
                             // 连出同一招：回合倒计时只有几秒，模型每回合决策一次根本赶不上。
@@ -4075,8 +4257,8 @@
                             // 最后一击直接结算：锁跟着技能栏一起没了，看上去像「解锁了」。
                             // 顶层换了就照实说界面换了，别让 agent 以为还能接着出招
                             if (record.turn && (record.turn.reason === "unlocked" || record.turn.reason === "blocked")) {
-                                var topNow = sceneInfo().top;
-                                if (!tapTarget.stage || !topNow || hashOf(topNow) !== topAtTapHash) record.turn.reason = "panel";
+                                var moved = topMoved(topAtTapHash, isSplanBattlePanel(topAtTap));
+                                if (!tapTarget.stage || moved) record.turn.reason = "panel";
                             }
                         }
                     }
@@ -4125,8 +4307,7 @@
             executed.forEach(function (rec, k) {
                 if (!rec.turn || turnTops[k] === undefined) return;
                 if (rec.turn.reason !== "unlocked" && rec.turn.reason !== "blocked") return;
-                var topEnd = sceneInfo().top;
-                if (!topEnd || hashOf(topEnd) !== turnTops[k]) rec.turn.reason = "panel";
+                if (topMoved(turnTops[k].hash, turnTops[k].battle)) rec.turn.reason = "panel";
             });
             table.executed = executed;
             table.stopped = stopped;
@@ -4249,6 +4430,147 @@
             return result;
         },
 
+        // 跟着引导一路点下去：挖洞目标、拖动引导、NoNo / NPC 对白、战斗说明层，Splan 新手里还有引导途中弹出的奖励框和结算页，
+        // 直到引导要你自己做决定（起名、选颜色、选精灵、没有引导的战斗回合、多个回答的对白）、新手走完或时限到。
+        // 验收里 agent 每一处引导都单独发一次 recommended，走完新手要 140 次调用、10 分钟。
+        // 点的都是引导指定的目标，不替 agent 做选择
+        guideRun: async function (p) {
+            var method = p.method || (touchHandler() ? "touch" : "dom");
+            var deadline = +p.deadline || Date.now() + Math.max(+p.budgetMs || 40000, 5000);
+            var splan = !!window.MFC;
+            var startNewbie = splanNewbie();
+            var done = [], stopped = null, idleSince = null, lastKey = null, sameCount = 0, why = null, checkedTop = null, checkedAt = 0, lastDragAt = 0, stages = [];
+            var stage = requireStage();
+            while (!stopped) {
+                if (Date.now() > deadline - 3500) {
+                    stopped = "budget";
+                    break;
+                }
+                await splanSettle(Math.max(0, Math.min(2500, deadline - Date.now() - 3500)), false);
+                if (splanSession()) {
+                    stopped = "lost";
+                    break;
+                }
+                var si = sceneInfo(), top = si.top;
+                // 走过哪几段新手：agent 写汇报要按阶段说
+                var seg = splanNewbie();
+                if (seg && seg.name && stages[stages.length - 1] !== seg.name) stages.push(seg.name);
+                var next = guideNextAction(si);
+                if (next && next.decision) {
+                    stopped = "decision";
+                    why = next.decision;
+                    break;
+                }
+                if (!next || next.wait) {
+                    // 引导还在走（换界面、等服务器、面板入场特效、下一步延时挂遮罩），下一处目标还没挂出来就等一等；
+                    // 界面能点又迟迟没有引导，就是轮到你做决定了
+                    var nb = splanNewbie();
+                    if (idleSince === null) idleSince = Date.now();
+                    var idle = Date.now() - idleSince;
+                    var turn = splanBattleTurn(si.stack);
+                    var locked = stage.touchChildren === false || (next && next.wait);
+                    // 等玩家的步骤：Listener / Event 带 statItem（「点击确定颜色」）、等战斗打完、等你关某个面板
+                    var userStep = nb && nb.stepType && (nb.stepType === "CloseListener" ||
+                        /^(Listener|Event)$/.test(nb.stepType) && (nb.want || nb.event === "fight_calc_end"));
+                    var gameStep = nb && nb.stepType && GUIDE_GAME_STEPS.test(nb.stepType) && !userStep;
+                    // 其余步骤（Button、TalkAndClick、NONO…）马上会挂出遮罩或对白：抓宠战斗里出完招，
+                    // 新回合先解锁技能栏、隔 200ms 才挂「点击背包」，这时不能判成轮到你出招
+                    var guideUi = nb && nb.guiding && nb.stepType && !userStep && !gameStep;
+                    // 战斗演出中（出了招、还没轮到你）：等这一回合播完，轮到你出招或出结算再说
+                    // 等你关奖励框、等战斗结算（没写 statItem 的等玩家步骤）：结算页、奖励框还在入场动画里，多等一会儿再看能不能关
+                    var cap = turn && !turn.canOP && isSplanBattlePanel(top) ? 15000 :
+                        locked || gameStep || guideUi ? 8000 : turn && turn.canOP ? 1200 :
+                        userStep && !nb.want ? 4000 : splan && nb && nb.guiding ? 1500 : 600;
+                    if (idle < cap && Date.now() < deadline - 3500) {
+                        // 引导让你拖的那一下（把技能拖进技能栏）会弹「确认 / 取消」二次确认：确认它是拖动的收尾，不是新决定
+                        if (lastDragAt && Date.now() - lastDragAt < 6000 && idle >= 300) {
+                            var ask = guideConfirmOf();
+                            if (ask) {
+                                lastDragAt = 0;
+                                var beforeAsk = guideProgressKey();
+                                await performGesture([ask.point], method, 50, null);
+                                done.push("确认 " + ask.label);
+                                idleSince = null;
+                                await waitGuideChange(beforeAsk, 1500);
+                                continue;
+                            }
+                        }
+                        // 引导途中弹出的奖励框、结算页只能点遮罩关：它就是引导在等的「关掉奖励」
+                        var topHash = top ? hashOf(top) : null;
+                        if (splan && nb && !nb.done && idle >= 300 && !(turn && turn.canOP) && (topHash !== checkedTop || Date.now() - checkedAt > 500)) {
+                            checkedTop = topHash;
+                            checkedAt = Date.now();
+                            var closable = guideClosable(top, nb.stepType === "CloseListener" && !nb.want);
+                            if (closable) {
+                                var before = guideProgressKey(), closed;
+                                if (closable.point) {
+                                    await performGesture([closable.point], method, 50, null);
+                                    closed = await waitGuideChange(before, 2000);
+                                } else {
+                                    closed = (await handlers.closeTop({ method: method })).ok;
+                                    if (closed) await waitGuideChange(before, 1500);
+                                }
+                                if (closed) {
+                                    done.push("关 " + closable.label);
+                                    idleSince = null;
+                                    continue;
+                                }
+                            }
+                        }
+                        await sleep(120);
+                        continue;
+                    }
+                    var nbNow = splanNewbie();
+                    if (idle < cap) stopped = "budget";
+                    else if (turn && turn.canOP) stopped = "battle-turn";
+                    else if (nbNow && nbNow.done && !guideMaskIn(top)) stopped = "finished";
+                    else if (splan && !(nbNow && nbNow.guiding) && !splanGuide() && !(startNewbie && !startNewbie.done)) stopped = "no-guide";
+                    else stopped = "decision";
+                    break;
+                }
+                idleSince = null;
+                checkedTop = null;
+                if (next.key === lastKey) {
+                    // 同一个目标点了三次还是它：点不动，交回去看表
+                    if (++sameCount >= 3) {
+                        stopped = "stuck";
+                        why = next.label;
+                        break;
+                    }
+                } else sameCount = 0;
+                lastKey = next.key;
+                var beforeKey = guideProgressKey();
+                if (next.kind === "nono") {
+                    // NoNo 对白没打完字时点了不算数
+                    for (var typeStart = Date.now(); Date.now() - typeStart < 4000;) {
+                        var nn = splanNoNo();
+                        if (!nn || nn.typed || nn.pass) break;
+                        await sleep(80);
+                    }
+                    await sleep(60);
+                    await performGesture([next.point], method, 50, null);
+                } else if (next.kind === "drag") {
+                    var grabbed = null;
+                    try { grabbed = next.grab && byHash(next.grab); } catch (e) {}
+                    await performGesture(dragToPath(next.point, next.to, 700, grabbed ? scrollAxisOf(grabbed) : null), method, 0, grabbed);
+                    lastDragAt = Date.now();
+                } else {
+                    await performGesture([next.point], method, 50, null);
+                }
+                if (done.length && done[done.length - 1].label === next.label) done[done.length - 1].n++;
+                else done.push({ label: next.label, n: 1 });
+                await waitGuideChange(beforeKey, next.kind === "drag" ? 2500 : 2000);
+            }
+            var endNewbie = splanNewbie();
+            var out = { steps: done.reduce(function (sum, d) { return sum + (typeof d === "string" ? 1 : d.n); }, 0),
+                trail: done.map(function (d) { return typeof d === "string" ? d : d.n > 1 ? d.label + "×" + d.n : d.label; }),
+                stopped: stopped };
+            if (why) out.why = why;
+            if (stages.length) out.stages = stages;
+            if (startNewbie && endNewbie) out.newbie = { from: startNewbie.step, to: endNewbie.step, total: endNewbie.total };
+            return out;
+        },
+
         locate: function (p) {
             if (!p.description || !String(p.description).trim()) throw new Error("需要提供 description 描述要找的按钮、NPC 或入口");
             return locateSemantic(p);
@@ -4326,6 +4648,10 @@
             var hash = hashOf(panel);
             var name = className(panel) + (nameOf(panel) ? "#" + nameOf(panel) : "");
             var tried = [];
+            // 已经回到主场景（Splan 主城顶层就是 RootLayer）：再「关」只会点到 HUD 上带 close 字样的东西
+            if (/(^|\.)RootLayer$/.test(className(panel))) {
+                return { ok: false, stopped: "hub", panel: name, note: "已经在主场景，没有要关的界面" };
+            }
             // Splan 战斗里没有「关掉」这回事：返回键是暂停，暂停框里的退出直接判负。
             // 验收里 agent 把左边的三星条件当成结算，对着战斗界面 close
             if (isSplanBattlePanel(panel)) {

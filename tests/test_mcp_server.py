@@ -1342,6 +1342,43 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     const nextGuide = await t.handlers.act({ steps: [{ op: "recommended" }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
     out.nextGuide = { mode: nextGuide.mode,
         target: !!(nextGuide.recommendedTarget && nextGuide.recommendedTarget.target.hash === nextBtn.hashCode) };
+    // op=guide：一路跟着引导点（挖洞 A → 挖洞 B → 只有一个回答的 NPC 对白），引导没了就停
+    const stepA = item("eui.Button", "btn_stepA", splanRoot, { x: 100, y: 100, width: 80, height: 40 });
+    const stepB = item("eui.Button", "btn_stepB", splanRoot, { x: 300, y: 100, width: 80, height: 40 });
+    listenOn(stepA);
+    listenOn(stepB);
+    const guideTaps = [];
+    window.GuideMaskManager._instance._guideTapTarget = stepA;
+    stepA.addEventListener("touchTap", function () { guideTaps.push("A"); window.GuideMaskManager._instance._guideTapTarget = stepB; }, null);
+    stepB.addEventListener("touchTap", function () {
+        guideTaps.push("B");
+        guidePanel.visible = false;
+        setTimeout(() => {
+            const npcUi = item("nPCDialog.NPCDialogUI", null, splanRoot, { x: 0, y: 300, width: 800, height: 180 });
+            listenOn(npcUi);
+            npcUi.anwserList = { source: ["好的，博士！"] };
+            npcUi.txtContent = { text: "去商店看看" };
+            window.MFC.npcDialog = { callbacks: [function () {}], ui: npcUi };
+            npcUi.addEventListener("touchTap", function () {
+                guideTaps.push("npc");
+                remove(npcUi);
+                window.MFC.npcDialog = null;
+                window.frame.GuideController.guideState = 0;
+            }, null);
+        }, 150);
+    }, null);
+    const guideRun = await t.handlers.act({ steps: [{ op: "guide" }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.guideRun = { taps: guideTaps, result: guideRun.executed[0].result };
+    // 回答不止一个是选择：停下交给 agent，不替它选
+    const choiceUi = item("nPCDialog.NPCDialogUI", null, splanRoot, { x: 0, y: 300, width: 800, height: 180 });
+    choiceUi.anwserList = { source: ["去", "不去"] };
+    choiceUi.txtContent = { text: "要去吗" };
+    window.MFC.npcDialog = { callbacks: [function () {}, function () {}], ui: choiceUi };
+    out.guideChoice = (await t.handlers.act({ steps: [{ op: "guide" }], quietMs: 50, timeoutMs: 200, turnMs: 0 })).executed[0].result;
+    remove(choiceUi);
+    window.MFC.npcDialog = null;
+    remove(stepA);
+    remove(stepB);
     delete window.frame;
     remove(nextBtn);
     delete window.GuideMaskManager;
@@ -1570,6 +1607,17 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertEqual(data["guideWait"], {"waited": True, "skillTaps": 2})
         self.assertEqual(data["nextGuide"], {"mode": "guide-hole", "target": True})
 
+    def test_guide_op_follows_the_guide_until_a_decision(self):
+        data = self.run_probe()
+        self.assertEqual(data["guideRun"]["taps"], ["A", "B", "npc"])
+        run = data["guideRun"]["result"]
+        self.assertEqual(run["steps"], 3)
+        self.assertEqual(run["trail"], ["点 btn_stepA", "点 btn_stepB", "回答「好的，博士！」"])
+        self.assertEqual(run["stopped"], "no-guide")
+        choice = data["guideChoice"]
+        self.assertEqual((choice["steps"], choice["stopped"]), (0, "decision"))
+        self.assertIn("2 个回答", choice["why"])
+
     def test_splan_drag_guide_is_dragged_along_the_hand_path(self):
         data = self.run_probe()
         self.assertEqual(data["dragMode"], "guide-drag")
@@ -1749,6 +1797,43 @@ class RenderTableTest(unittest.TestCase):
         other = {"tabId": 9, "bootId": "ccc"}
         mcp.note_page_boot({}, other)
         self.assertNotIn("reloaded", other)
+
+    def test_newbie_progress_and_guide_run_are_spelled_out(self):
+        server = load_server()
+        # 引导挖洞：新手途中推荐 op=guide，不再一处一个 recommended
+        hole = server.render_action_table({"marker": "g1", "mode": "guide-hole", "actions": [],
+            "recommendedTarget": {"reason": "guide-hole", "target": {"qaName": "Pet__btn_petBag"}},
+            "newbie": {"step": 6, "total": 24, "name": "阵容设置", "guiding": True}})
+        self.assertIn("新手 第 7/24 段「阵容设置」", hole)
+        self.assertIn('推荐 {"op":"guide"}', hole)
+        self.assertNotIn('{"op":"recommended"}', hole)
+        # 引导在等你选：写出它在等什么，并给出「选完接着跟」的写法
+        pick = server.render_action_table({"marker": "g2", "actions": [{"i": 1, "label": "确定", "role": "confirm"}],
+            "newbie": {"step": 3, "total": 24, "name": "设置颜色", "guiding": True, "want": "点击确定颜色"}})
+        self.assertIn("引导在等你：点击确定颜色", pick)
+        self.assertIn('[{"i":<编号>},{"op":"guide"}]', pick)
+        # 战斗轮到你：一场一次打完再接着跟
+        fight = server.render_action_table({"marker": "g3", "actions": [], "battleTurn": {"canOP": True, "next": 1},
+            "newbie": {"step": 12, "total": 24, "name": "克罗斯星第一关", "guiding": True, "want": "x"}})
+        self.assertIn('"repeat":15},{"op":"guide"}', fight)
+        self.assertNotIn("引导在等你", fight)
+        run = server.render_action_table({"marker": "g4", "actions": [], "executed": [{"op": "guide", "result": {
+            "steps": 26, "stopped": "battle-turn", "trail": ["点 fh_rect", "点 Group", "战斗说明", "点 skill0"],
+            "stages": ["孵化主宠", "基础战斗"], "newbie": {"from": 5, "to": 8, "total": 24}}}]})
+        self.assertIn("执行 guide → 跟着引导点了 26 下，新手第 6→9 段（孵化主宠 → 基础战斗），最后几下：点 Group、战斗说明、点 skill0；"
+                      "停下：战斗轮到你出招", run)
+        # 「新手已走完」只对看着新手走过来的标签页说
+        mcp = server.McpServer.__new__(server.McpServer)
+        mcp.newbie_seen = set()
+        old_account = {"tabId": 3, "newbie": {"step": 24, "total": 24, "done": True}}
+        mcp.note_newbie({}, old_account)
+        self.assertNotIn("newbie", old_account)
+        mcp.note_newbie({}, {"tabId": 4, "newbie": {"step": 20, "total": 24, "guiding": True}})
+        finished = {"tabId": 4, "marker": "g5", "actions": [], "scope": "panel", "newbie": {"step": 24, "total": 24, "done": True}}
+        mcp.note_newbie({}, finished)
+        text = server.render_action_table(finished)
+        self.assertIn("新手 已走完（24/24 段）", text)
+        self.assertIn('[{"op":"close"},{"op":"close","optional":true}', text)
 
     def test_turn_wait_and_repeat_are_spelled_out(self):
         server = load_server()
