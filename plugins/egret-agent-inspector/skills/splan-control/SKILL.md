@@ -1,6 +1,6 @@
 ---
 name: splan-control
-description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象时适用，如赛尔号）：按 qaName 操作真实 UI、处理弹窗，并在定向调试时使用模块与项目接口；含赛尔号进 PVE 战斗、战斗出招与换精灵、换技能等固定操作。用于打开界面、走游戏流程、打战斗或排查点击无响应。
+description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象时适用）：按 qaName 操作真实 UI、处理弹窗，并在定向调试时使用模块与项目接口；含进 PVE 战斗、战斗出招与换精灵、换技能等固定操作。用于打开界面、走游戏流程、打战斗或排查点击无响应。
 ---
 
 # Splan 游戏操作
@@ -13,7 +13,7 @@ description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象�
 2. `splan_call {"action":"probe"}`：确认模块、QA 与 debug 能力。
 3. `egret_observe`：看清当前面板栈和可点目标，按编号用 `egret_act` 操作。被弹窗压住时 `egret_act {"steps":[{"op":"dismiss","until":{"qaName":"<主界面组件>"}}]}`。
 
-## 赛尔号固定操作
+## Splan 固定操作
 
 下面是实测过的规则，照做即可，不用每次摸索。
 
