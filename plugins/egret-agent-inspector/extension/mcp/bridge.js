@@ -294,7 +294,18 @@ async function handleRequest(method, params) {
         }
         case "navigate": {
             let tab;
-            if (params.newTab) {
+            if (params.newWindow) {
+                // 多个 agent 并行：同一窗口里不在前台的标签页被当成后台，游戏停止渲染。
+                // 新窗口铺在当前窗口右半边，两边都露着，都算前台
+                const base = await chrome.windows.getLastFocused().catch(() => null);
+                const opts = { url: params.url, focused: true, type: "normal" };
+                if (base && base.width && base.height) {
+                    Object.assign(opts, { left: base.left + Math.round(base.width / 2), top: base.top,
+                        width: Math.round(base.width / 2), height: base.height });
+                }
+                const win = await chrome.windows.create(opts);
+                tab = win.tabs[0];
+            } else if (params.newTab) {
                 tab = await chrome.tabs.create({ url: params.url, active: true });
             } else {
                 const target = params.tabId !== undefined && params.tabId !== null ? await chrome.tabs.get(+params.tabId) :
