@@ -1196,6 +1196,19 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     out.projectSplan = t.buildActionTable({}).project || null;
     delete window.MFC;
     out.stageReads = Array.from(new Set(stageReads)).slice(0, 12);
+
+    // 窗口被挡住时游戏不刷新：observe、act 直接拒绝，别交回一张只剩图层的表
+    document.hidden = true;
+    let hiddenTaps = 0;
+    const hiddenBtn = item("eui.Button", "hiddenBtn", hud, { x: 700, y: 300, width: 60, height: 40 }, { text: "去吧" });
+    listenOn(hiddenBtn);
+    hiddenBtn.addEventListener("touchTap", function () { hiddenTaps++; }, null);
+    out.hiddenErrors = [];
+    for (const call of [() => t.handlers.observe({}), () => t.handlers.act({ steps: [{ hash: hiddenBtn.hashCode }], quietMs: 50, timeoutMs: 200 })]) {
+        try { await call(); out.hiddenErrors.push(null); } catch (e) { out.hiddenErrors.push(String(e.message).slice(0, 5)); }
+    }
+    out.hiddenTaps = hiddenTaps;
+    document.hidden = false;
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
@@ -1309,6 +1322,11 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
 
     def test_never_reads_visible_or_alpha_of_the_stage(self):
         self.assertEqual(self.run_probe()["stageReads"], [])
+
+    def test_background_page_is_refused_instead_of_acted_on(self):
+        data = self.run_probe()
+        self.assertEqual(data["hiddenErrors"], ["页面在后台", "页面在后台"])
+        self.assertEqual(data["hiddenTaps"], 0)
 
     def test_only_pages_with_mfc_are_marked_splan(self):
         data = self.run_probe()

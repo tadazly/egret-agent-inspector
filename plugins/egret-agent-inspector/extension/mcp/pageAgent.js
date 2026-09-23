@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.18";
+    var VERSION = "1.7.19";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -2592,6 +2592,15 @@
         return out;
     }
 
+    // 窗口被挡住或最小化时 Egret 的渲染循环停了：面板打开了却没排版、没有尺寸，动作表只剩图层，
+    // 点击也不会有下文。验收里 agent 对着这样的表折腾了 51 次调用，警告一行它根本不看，干脆拒绝
+    function requireForeground() {
+        if (document.hidden) {
+            throw new Error("页面在后台（浏览器窗口被挡住或最小化），游戏不刷新界面，动作表和点击结果都不可信。" +
+                "先停下，请用户把浏览器窗口切到前台，再重新 egret_observe");
+        }
+    }
+
     // 一次快照产出带编号的动作表：语义动作宿主去重、标签、状态、已解遮挡的点击点和语义指纹。
     function buildActionTable(p) {
         var stage = requireStage();
@@ -3429,11 +3438,13 @@
         },
 
         observe: function (p) {
+            requireForeground();
             return buildActionTable(p);
         },
 
         act: async function (p) {
             requireStage();
+            requireForeground();
             var raw = p.steps && p.steps.length ? p.steps : [p];
             var steps = raw.slice(0, 10);
             if (!steps.length) throw new Error("需要提供 steps：[{i:3}] 或 [{op:\"advance\"}] 等");
