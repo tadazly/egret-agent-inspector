@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.3";
+    var VERSION = "1.7.4";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1015,6 +1015,91 @@
             });
         });
         return out;
+    }
+
+    // 按下才生效一半的控件：自己只挂 touchBegin，按下时才临时挂 touchEnd / touchReleaseOutside / touchMove，
+    // 成不成看在哪松手。战斗里的换宠卡就是这样：拖出卡片上沿才换上场，原地点一下什么都不发生。
+    // 从松手回调里认得出方向（globalToLocal 之后 y < 0 = 拖出上沿）就返回方向，认不出返回 "any"；不是这类控件返回 null
+    var dragCache = typeof WeakMap === "function" ? new WeakMap() : null;
+    var DRAG_DIRS = [
+        ["up", /\.y\s*<\s*(?:0(?![.\d])|-)/],
+        ["down", /\.y\s*>\s*[\w$.]*height/i],
+        ["left", /\.x\s*<\s*(?:0(?![.\d])|-)/],
+        ["right", /\.x\s*>\s*[\w$.]*width/i]
+    ];
+
+    function dragGestureOf(o) {
+        var types = {}, begins = [];
+        eventMaps(o).forEach(function (map) {
+            Object.keys(map).forEach(function (type) {
+                var bins = map[type];
+                if (!bins) return;
+                (bins.length !== undefined ? Array.prototype.slice.call(bins) : [bins]).forEach(function (bin) {
+                    if (!bin || typeof bin.listener !== "function") return;
+                    types[type] = true;
+                    if (type === "touchBegin") begins.push(bin);
+                });
+            });
+        });
+        // 同时挂着 touchTap / touchEnd 的是普通按钮，点一下就行；滚动容器这类引擎组件另有「可滚」处理
+        if (!begins.length || types.touchTap || types.touchEnd || types.click || types.mouseUp) return null;
+        for (var i = 0; i < begins.length; i++) {
+            var bin = begins[i];
+            if (/^(egret|eui|fairygui)\./.test(className(bin.thisObject) || "")) continue;
+            if (dragCache && dragCache.has(bin.listener)) {
+                var cached = dragCache.get(bin.listener);
+                if (cached) return cached;
+                continue;
+            }
+            var found = null;
+            try {
+                var src = String(bin.listener);
+                var later = /TOUCH_(?:END|RELEASE_OUTSIDE|MOVE)\b|["']touch(?:End|ReleaseOutside|Move)["']/;
+                if (later.test(src)) {
+                    // 按下时挂上的松手回调多半是 this.xxx 方法，方向判断写在那里面
+                    var body = src, re = /addEventListener\(\s*[^,]*,\s*(?:this|_this|self|that)\.([\w$]+)/g, m;
+                    while ((m = re.exec(src))) {
+                        var fn = bin.thisObject && bin.thisObject[m[1]];
+                        if (typeof fn === "function") body += "\n" + String(fn);
+                    }
+                    var dirs = DRAG_DIRS.filter(function (d) { return d[1].test(body); });
+                    found = dirs.length === 1 ? dirs[0][0] : "any";
+                }
+            } catch (e) {}
+            if (dragCache) dragCache.set(bin.listener, found);
+            if (found) return found;
+        }
+        return null;
+    }
+
+    // 动作表那一行常是卡片里的头像、文字，监听挂在上面几层的卡片本身：往上找第一个挂着触摸监听的，
+    // 松手位置也按它的边界算
+    function dragTargetOf(o) {
+        for (var cur = o, depth = 0; cur && depth < 4 && cur !== getStage(); depth++, cur = cur.parent) {
+            if (!interactionListenersOf(cur).length) continue;
+            var dir = dragGestureOf(cur);
+            return dir ? { dir: dir, owner: cur } : null;
+        }
+        return null;
+    }
+
+    var DRAG_WORDS = { up: "上滑", down: "下滑", left: "左滑", right: "右滑", any: "拖出去" };
+
+    // 从 pt 按住，拖出 owner 的边界再松手：多给 40px，免得正好落在边上
+    function dragPath(pt, owner, dir) {
+        var r = stageRect(owner) || { x: pt.x, y: pt.y, width: 0, height: 0 };
+        var stage = getStage();
+        var end = dir === "down" ? { x: pt.x, y: r.y + r.height + 40 }
+            : dir === "left" ? { x: r.x - 40, y: pt.y }
+            : dir === "right" ? { x: r.x + r.width + 40, y: pt.y }
+            : { x: pt.x, y: r.y - 40 };
+        end.x = round(Math.max(1, Math.min(stage.stageWidth - 1, end.x)));
+        end.y = round(Math.max(1, Math.min(stage.stageHeight - 1, end.y)));
+        var pts = [];
+        for (var i = 0; i <= 6; i++) {
+            pts.push({ x: round(pt.x + (end.x - pt.x) * i / 6), y: round(pt.y + (end.y - pt.y) * i / 6) });
+        }
+        return pts;
     }
 
     function watchSnapshot(o, props) {
@@ -2558,6 +2643,8 @@
             };
             if (o.enabled === false) entry.off = true;
             if (o.selected === true) entry.on = true;
+            var drag = dragTargetOf(o);
+            if (drag) entry.drag = drag.dir;
             if (o.currentState && o.currentState !== "up" && o.currentState !== "normal") entry.st = o.currentState;
             if (p.rects) entry.screenRect = screenRect(r);
             var point = { x: round(r.x + r.width / 2), y: round(r.y + r.height / 2) };
@@ -2691,6 +2778,7 @@
             if (e.on) row.on = true;
             if (e.st) row.st = e.st;
             if (e.occluded) row.occluded = true;
+            if (e.drag) row.drag = e.drag;
             if (e.from !== "text" && e.from !== "childText" && e.from !== "nearText") row.weak = true;
             if (e.alt) row.alt = e.alt;
             // rects 是 server 做 OCR 时要的：它也得拿到 hash 和 from 才能把识别结果写回来
@@ -3290,7 +3378,7 @@
                         throw new Error("第 " + (n + 1) + " 步用了编号 i：编号只对第一步有效，第一步执行后界面变了、编号会重排。" +
                             "后面的步骤改用查询条件（{\"text\":\"表里显示的标签\"}、{\"qaName\":…}），或看完新表再发下一次 act");
                     }
-                    if (op === "tap" || op === "text") {
+                    if (op === "tap" || op === "text" || op === "swipe") {
                         // 填字时 text 是要填的内容，不能拿它当查询条件去找目标
                         var resolved = resolveFastTarget(op === "text" ? Object.assign({}, step, { text: undefined }) : step, fresh);
                         var o = resolved.o, entry = resolved.entry;
@@ -3358,7 +3446,18 @@
                             }
                             tapTarget = o;
                             tapWasLocked = lockedAncestor(o);
-                            await performGesture([pt], method, step.holdMs !== undefined ? +step.holdMs : 50, o);
+                            // 拖出去才生效的控件（换宠卡）原地点一下什么都不发生：认得出方向就直接替它按住滑出去，
+                            // 不让 agent 为「点了没反应」再花一轮，回合倒计时也等不起
+                            var drag = dragTargetOf(o);
+                            var dir = op === "swipe" ? step.dir || (drag && drag.dir) || "up"
+                                : drag && drag.dir !== "any" ? drag.dir : null;
+                            if (dir) {
+                                await performGesture(dragPath(pt, drag ? drag.owner : o, dir), method,
+                                    step.holdMs !== undefined ? +step.holdMs : 300, o);
+                                record.drag = dir;
+                            } else {
+                                await performGesture([pt], method, step.holdMs !== undefined ? +step.holdMs : 50, o);
+                            }
                             record.point = pt;
                         }
                     } else if (op === "recommended") {
@@ -3412,7 +3511,7 @@
                             await sleep(Math.min(Math.max(step.ms !== undefined ? +step.ms : 600, 0), 15000));
                         }
                     } else {
-                        throw new Error("未知的 op：" + op + "（支持 tap/text/close/recommended/advance/dismiss/scroll/wait）");
+                        throw new Error("未知的 op：" + op + "（支持 tap/text/swipe/close/recommended/advance/dismiss/scroll/wait）");
                     }
                     if (op !== "wait" || !step.until) {
                         record.settle = await settleAfter(before, {
@@ -3507,7 +3606,7 @@
             table.changed = delta || (rowsChanged ? "面板栈没变；" + describeRowDiff(diff)
                 : settled ? "面板栈没变，界面内容有变化" : "界面没有变化");
             // 只有点击类操作才谈得上「点了没反应」；纯等待不该劝 agent 去怀疑目标
-            var clicked = executed.filter(function (r) { return r.op === "tap" || r.op === "text" || r.op === "recommended"; });
+            var clicked = executed.filter(function (r) { return r.op === "tap" || r.op === "text" || r.op === "swipe" || r.op === "recommended"; });
             if (stopped === "done" && clicked.length && !delta && !rowsChanged && !settled) {
                 table.hint = "操作已执行但界面没有变化：确认目标是否正确，或用 op=wait 再等一次；仍无变化时用 egret_get_errors 排查";
             }

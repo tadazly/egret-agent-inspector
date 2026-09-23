@@ -948,6 +948,67 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         quietMs: 50, timeoutMs: 200 });
     out.inputText = input.text;
     out.inputOp = typedInput.executed[0].op;
+
+    // 卡片栏：卡片只挂 touchBegin，按下时才挂松手回调，拖出卡片上沿（或在卡片外松手）才算选中，原地点一下不算
+    function listenOn(o) {
+        o.$EventDispatcher_props_ = { 1: {} };
+        o.addEventListener = function (type, fn, self) { (this.$EventDispatcher_props_[1][type] = this.$EventDispatcher_props_[1][type] || []).push({ listener: fn, thisObject: self }); };
+        o.removeEventListener = function (type, fn) { const m = this.$EventDispatcher_props_[1]; m[type] = (m[type] || []).filter(b => b.listener !== fn); if (!m[type].length) delete m[type]; };
+    }
+    function fire(target, type, x, y) {
+        for (let cur = target; cur && cur !== stage; cur = cur.parent) {
+            const bins = ((cur.$EventDispatcher_props_ || {})[1] || {})[type];
+            (bins || []).slice().forEach(b => b.listener.call(b.thisObject, { type, target, currentTarget: cur, stageX: x, stageY: y }));
+        }
+    }
+    let down = null;
+    Object.assign(stage.$touchHandler, {
+        onTouchBegin(x, y) { down = this.findTarget(x, y); fire(down, "touchBegin", x, y); },
+        onTouchMove() {},
+        onTouchEnd(x, y) {
+            const up = this.findTarget(x, y);
+            fire(up, "touchEnd", x, y);
+            fire(down, up === down ? "touchTap" : "touchReleaseOutside", x, y);
+        }
+    });
+    const TE = { TOUCH_BEGIN: "touchBegin", TOUCH_END: "touchEnd", TOUCH_RELEASE_OUTSIDE: "touchReleaseOutside" };
+    const cardBar = { __class: "ui.CardBar", picked: [],
+        touchBeginHandler(e) {
+            const card = e.currentTarget;
+            card.addEventListener(TE.TOUCH_END, this.touchEndHandler, this);
+            card.addEventListener(TE.TOUCH_RELEASE_OUTSIDE, this.touchOutsideHandler, this);
+        },
+        touchEndHandler(e) {
+            const card = e.currentTarget;
+            card.removeEventListener(TE.TOUCH_END, this.touchEndHandler, this);
+            card.removeEventListener(TE.TOUCH_RELEASE_OUTSIDE, this.touchOutsideHandler, this);
+            const pnt = card.globalToLocal(e.stageX, e.stageY);
+            if (pnt.y < 0) this.picked.push(card.name);
+        },
+        touchOutsideHandler(e) {
+            const card = e.currentTarget;
+            card.removeEventListener(TE.TOUCH_END, this.touchEndHandler, this);
+            card.removeEventListener(TE.TOUCH_RELEASE_OUTSIDE, this.touchOutsideHandler, this);
+            this.picked.push(card.name);
+        } };
+    [["card0", 20, "等级:88"], ["card1", 100, "等级:77"]].forEach(([name, x, level]) => {
+        const card = item("ui.CardBarItem", name, hud, { x, y: 300, width: 70, height: 70 }, { solid: false });
+        listenOn(card);
+        card.globalToLocal = (sx, sy) => ({ x: sx - x, y: sy - 300 });
+        card.addEventListener(TE.TOUCH_BEGIN, cardBar.touchBeginHandler, cardBar);
+        item("eui.Image", "headIcon", card, { x, y: 300, width: 70, height: 70 });
+        item("eui.Label", "labelLevel", card, { x: x + 5, y: 350, width: 60, height: 16 }, { text: level });
+    });
+    // 原地点一下：游戏不认
+    stage.$touchHandler.onTouchBegin(55, 335);
+    stage.$touchHandler.onTouchEnd(55, 335);
+    out.pickedByTap = cardBar.picked.slice();
+    const cardTable = t.buildActionTable({ limit: 60 });
+    out.dragRows = cardTable.actions.filter(a => a.drag).map(a => ({ label: a.label, drag: a.drag }));
+    const card0 = cardTable.actions.find(a => a.drag && a.label.indexOf("88") >= 0);
+    const swiped = await t.handlers.act({ marker: cardTable.marker, steps: [{ i: card0.i }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.pickedByAct = cardBar.picked.slice();
+    out.actDrag = swiped.executed[0].drag || null;
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
@@ -1020,6 +1081,17 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertGreaterEqual(data["bannerTurn"]["waitedMs"], 2500)
         # 几乎透明的对象玩家看不见，不进表
         self.assertFalse(data["ghostListed"])
+
+    def test_card_that_only_works_when_dragged_out_is_swiped(self):
+        data = self.run_probe()
+        # 夹具本身：原地点一下游戏不认
+        self.assertEqual(data["pickedByTap"], [])
+        # 动作表标出「要按住上滑」，普通控件不标
+        self.assertEqual(sorted(r["drag"] for r in data["dragRows"]), ["up", "up"])
+        self.assertTrue(all("等级" in r["label"] for r in data["dragRows"]))
+        # 按编号点它，act 替它按住滑出上沿，游戏认了
+        self.assertEqual(data["actDrag"], "up")
+        self.assertEqual(data["pickedByAct"], ["card0"])
 
     def test_tap_on_a_locked_group_waits_for_unlock(self):
         unlock = self.run_probe()["unlock"]
@@ -1233,6 +1305,18 @@ class RenderTableTest(unittest.TestCase):
         self.assertIsNone(go("close", mail, main))
         self.assertIsNone(go("btn_mail", main, mail))
         self.assertEqual(go("btn_read", mail, mail), ["close", "btn_mail"])
+
+    def test_drag_only_controls_are_flagged_and_reported(self):
+        server = load_server()
+        text = server.render_action_table({"marker": "m9", "executed": [
+            {"op": "tap", "target": {"label": "等级:88"}, "drag": "up"}], "actions": [
+            {"i": 1, "label": "等级:88", "role": "item", "drag": "up"},
+            {"i": 2, "label": "卡片", "role": "item", "drag": "any"},
+            {"i": 3, "label": "技能", "role": "button"}]})
+        self.assertIn("执行 tap 等级:88（按住上滑）", text)
+        self.assertIn("1 等级:88 item 按住上滑", text)
+        self.assertIn("2 卡片 item 按住拖出去", text)
+        self.assertIn("3 技能 button\n", text + "\n")
 
     def test_close_failure_says_what_was_tried(self):
         server = load_server()
