@@ -840,6 +840,11 @@ item("eui.Image", "mapBg", mapLayer, { x: 0, y: 0, width: 800, height: 480 });
 item("eui.Group", "pve_rect", mapLayer, { x: 100, y: 100, width: 80, height: 60 }, { listener: true });
 const capBox = item("eui.Group", "capBox", mapLayer, { x: 105, y: 165, width: 70, height: 18 }, { solid: false });
 item("eui.Label", "capText", capBox, { x: 105, y: 165, width: 70, height: 18 }, { text: "星际探索" });
+// 邮箱热区在上，名字在下；跟随精灵（只有类名的匿名对象）正好走到名字上面，不能把名字抢走
+item("eui.Group", "downTarget", mapLayer, { x: 500, y: 150, width: 77, height: 60 }, { listener: true });
+const mailBox = item("eui.Group", "mailCap", mapLayer, { x: 505, y: 212, width: 70, height: 18 }, { solid: false });
+item("eui.Label", "mailText", mailBox, { x: 505, y: 212, width: 70, height: 18 }, { text: "星际邮箱" });
+item("game.Pet", null, mapLayer, { x: 495, y: 195, width: 90, height: 60 }, { listener: true });
 // 技能栏：一个技能是一个列表项，名字、次数各是一块，要合成一行
 const uiLayer = item("eui.Group", "uiLayer", stage, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
 // 全屏 HUD：按面积是「全屏面板」，但中间透明，点下去落在地图上
@@ -852,6 +857,9 @@ item("eui.Image", "bg", skill, { x: 300, y: 380, width: 149, height: 90 }, { lis
 item("eui.Label", "skillName", skill, { x: 340, y: 385, width: 60, height: 20 }, { listener: true, text: "撞击" });
 item("eui.Label", "skillCount", skill, { x: 320, y: 420, width: 100, height: 20 }, { listener: true, text: "次数: 35/35" });
 const label = item("eui.Label", "tipLabel", hud, { x: 20, y: 20, width: 100, height: 20 }, { text: "提示文字" });
+// 两个「返回」：grp_back_landscape 才是返回，btn_return 是「经验返还」
+item("eui.Group", "grp_back_landscape", hud, { x: 10, y: 100, width: 40, height: 40 }, { listener: true });
+item("eui.Group", "btn_return", hud, { x: 60, y: 100, width: 40, height: 40 }, { listener: true });
 // 队伍栏：五只精灵的标签一模一样，少于七个不折叠
 for (let k = 0; k < 5; k++) {
     item("ui.TeamSlot", "slot" + k, hud, { x: 250 + k * 80, y: 190, width: 70, height: 70 }, { listener: true, text: "等级:100" });
@@ -937,6 +945,17 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["label"], "撞击 次数: 35/35")
         self.assertNotIn("次数: 35/35", [r["label"] for r in rows])
+
+    def test_wandering_sprite_does_not_steal_a_building_name(self):
+        rows = self.run_probe()["table"]["rows"]
+        mail = [r for r in rows if r["label"] == "星际邮箱"]
+        self.assertEqual(len(mail), 1)
+        self.assertEqual(mail[0]["alt"], "downTarget")
+
+    def test_return_is_not_back_when_a_real_back_exists(self):
+        rows = {r["label"]: r["role"] for r in self.run_probe()["table"]["rows"]}
+        self.assertEqual(rows["grp_back_landscape"], "back")
+        self.assertEqual(rows["btn_return"], "button")
 
     def test_small_group_of_same_label_is_not_collapsed(self):
         rows = self.run_probe()["table"]["rows"]
@@ -1100,6 +1119,43 @@ class RenderTableTest(unittest.TestCase):
         args, table = tap({"qaName": "PetBag__btn_up", "match": "exact"}, "升级", bag, bag)
         mcp.note_route(args, table)
         self.assertNotIn("route", table)
+
+    def test_route_drops_detours_failures_and_the_per_round_pick(self):
+        server = load_server()
+        mcp = server.McpServer.__new__(server.McpServer)
+        mcp.routes = {}
+        bag, prop, exp, alert, supply = "PetBag:bag", "PetProperty:prop", "ExpDevice:exp", "SimpleAlert:alert", "Supply:s"
+
+        def step(sel, label, frm, role="button", op="tap"):
+            rec = {"op": op, "from": frm}
+            if sel is not None:
+                rec["target"] = {"label": label, "sel": sel, "role": role}
+            return ({"i": 1} if sel is not None else {"op": op}), rec
+
+        def act(to, *pairs):
+            args = {"steps": [p[0] for p in pairs]}
+            table = {"tabId": 1, "topKey": to, "executed": [p[1] for p in pairs]}
+            mcp.note_route(args, table)
+            return table
+
+        up = {"qaName": "PetPropertyNor__grp_evolUpgrade", "match": "exact"}
+        act(prop, step({"name": "petBag_PetBagCell_petId_130", "match": "exact"}, "朵拉格", bag, "item"))
+        act(exp, step(up, "升级", prop))
+        act(exp, step({"qaName": "ExpDevice__imgFastLevelUp", "match": "exact"}, "快速升级", exp))
+        act(alert, step({"text": "至100级", "match": "exact"}, "至100级", exp, "tab"))
+        act(exp, step({"qaName": "SimpleAlert__confirm", "match": "exact"}, "confirm", alert, "confirm"))
+        # 误点「经验返还」，再点遮罩关掉：弯路
+        act(supply, step({"qaName": "ExpDevice__btn_return", "match": "exact"}, "btn_return", exp))
+        act(exp, step(None, None, supply, op="recommended"))
+        act(prop, step({"name": "grp_back_landscape", "match": "exact"}, "返回", exp, "back"))
+        act(bag, step({"name": "grp_back_landscape", "match": "exact"}, "返回", prop, "back"))
+        act(prop, step({"name": "petBag_PetBagCell_petId_520", "match": "exact"}, "古林斯特", bag, "item"))
+        # 第二只：点升级成功，后面一步写错了编号失败
+        failed = ({"i": 26}, {"op": "tap", "from": exp, "error": "第 2 步用了编号 i"})
+        table = act(exp, step(up, "升级", prop), failed)
+        self.assertEqual(table["route"]["labels"], ["快速升级", "至100级", "confirm", "返回", "返回"])
+        self.assertNotIn("btn_return", json.dumps(table["route"]["steps"]))
+        self.assertNotIn("petId", json.dumps(table["route"]["steps"]))
 
     def test_close_failure_says_what_was_tried(self):
         server = load_server()

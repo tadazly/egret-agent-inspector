@@ -218,7 +218,8 @@ ROUTE_LOCATORS = ("i", "hash", "qaName", "id", "name", "className", "text", "sou
 def route_step(step, rec):
     """执行过的一步 → (下次照发的步骤, 比对键, 不看第几个的比对键)；失败或拿不到稳定选择器时步骤为 None。
 
-    第三个键用来认「同一类操作的另一轮」：选第 1 只和选第 4 只精灵只差 index。
+    第三个键用来认「同一类操作的另一轮」：选第 1 只和选第 4 只精灵只差 index 或名字里的编号
+    （petBag_PetBagCell_petId_130 和 _520）。
     """
     op = rec.get("op")
     if rec.get("error") or rec.get("skipped") or not isinstance(step, dict):
@@ -234,7 +235,8 @@ def route_step(step, rec):
         if not sel:
             return None, None, None
         key = op + json.dumps(sel, ensure_ascii=False, sort_keys=True)
-        loose = op + json.dumps({k: v for k, v in sel.items() if k != "index"}, ensure_ascii=False, sort_keys=True)
+        loose = op + json.dumps({k: re.sub(r"\d+", "#", v) if isinstance(v, str) else v
+                                 for k, v in sel.items() if k != "index"}, ensure_ascii=False, sort_keys=True)
         return dict(sel, **params), key, loose
     if any(k in step for k in ("i", "hash")):
         return None, None, None
@@ -621,7 +623,7 @@ TOOLS = {
         "mode=modal-backdrop-dismiss 先用表里的 close/confirm，都没有才用 {\"op\":\"recommended\"}。"
         "被遮挡的目标点不了，默认只报数量不列行；需要 hash/坐标做二次定位时传 format=\"json\"。",
         obj({"rootHash": {"type": "integer", "description": "限定在某个面板/容器子树内，默认当前顶层面板"},
-             "limit": {"type": "integer", "description": "动作表最多多少行，默认 30，硬上限 60；调小只少显示几行，不影响扫描范围"},
+             "limit": {"type": "integer", "description": "动作表最多多少行，默认 30（整个舞台进表时 60），硬上限 60；调小只少显示几行，不影响扫描范围"},
              "ocr": {"type": "boolean", "description": "强制或禁止本地 OCR 补标签；默认按需自动"},
              "ocrLimit": {"type": "integer", "description": "最多 OCR 多少个弱标签控件，默认 12，硬上限 20"},
              "occluded": {"type": "boolean", "description": "把被遮挡的条目也列出来，默认 false"},
@@ -647,7 +649,7 @@ TOOLS = {
                        "description": "1-10 个步骤，按顺序执行，失败即停止"},
              "marker": {"type": "string", "description": "上一次 observe/act 返回的 marker；用 i 编号时必须传"},
              "rootHash": {"type": "integer", "description": "动作表限定子树，与 egret_observe 一致"},
-             "limit": {"type": "integer", "description": "返回动作表最多多少行，默认 30"},
+             "limit": {"type": "integer", "description": "返回动作表最多多少行，默认 30（整个舞台进表时 60）"},
              "method": {"type": "string", "enum": ["touch", "dom", "dom-touch"]},
              "stableMs": {"type": "integer", "description": "界面稳定多久算落定，默认 250"},
              "timeoutMs": {"type": "integer", "description": "每步等待界面变化的上限，默认 3000"},
@@ -1178,38 +1180,58 @@ class McpServer:
         """同一段路线第二次出现时，把上次紧接着的几步拼成一次就能发完的 steps。
 
         升级第二只精灵、打第二关时，路线和第一次一模一样，模型却仍要每一步看表、想一轮。
-        这里按标签页记下每一步「从哪个面板出发、点了什么（稳定选择器）」，
-        当前这一步在同一个面板上出现过，就把上次它后面的几步原样摆出来。
+        这里按标签页记下每一步「从哪个面板出发、落到哪个面板、点了什么（稳定选择器）」，
+        当前这一步在同一个面板上出现过，就把上次它后面的几步摆出来。摆之前去掉三类不能照发的：
+        失败的步骤、每轮都不一样的步骤（选哪只精灵）、点开又原路关掉的弯路（误点「经验返还」再关掉）。
         """
         tab = table.get("tabId", args.get("tabId"))
         log = self.routes.setdefault(tab, [])
         start = len(log)
         sent = args.get("steps") or [args]
-        for step, rec in zip(sent, table.get("executed") or []):
+        recs = (table.get("executed") or [])[:len(sent)]
+        for k, (step, rec) in enumerate(zip(sent, recs)):
             replay, key, loose = route_step(step, rec)
             target = rec.get("target") or {}
-            log.append({"from": rec.get("from"), "key": key, "loose": loose, "step": replay,
-                        "label": short_label(target.get("label")) or rec.get("op")})
+            log.append({
+                "from": rec.get("from"),
+                "to": recs[k + 1].get("from") if k + 1 < len(recs) else table.get("topKey"),
+                "key": key, "loose": loose, "step": replay,
+                "failed": bool(rec.get("error") or rec.get("skipped")),
+                "closing": rec.get("op") in ("close", "dismiss", "recommended") or target.get("role") in ("close", "back"),
+                "label": short_label(target.get("label")) or rec.get("op")})
         del log[:-300]
         start = min(start, len(log))
-        if len(log) == start or not log[-1]["key"]:
+        done = [e for e in log[start:] if e["key"] and not e["failed"]]
+        if not done:
             return
-        last = log[-1]
+        last = done[-1]
         for j in range(start - 1, -1, -1):
-            if log[j]["key"] == last["key"] and log[j]["from"] == last["from"]:
+            if log[j]["loose"] == last["loose"] and log[j]["from"] == last["from"] and not log[j]["failed"]:
                 break
         else:
             return
-        # 上次紧挨在它前面的那一步（选第几只精灵）标出一轮的起点：接到它再次出现就是下一轮了，
-        # 那一步每轮都不一样，不能照发
-        head = log[j - 1] if j > 0 else None
+        # 同一个面板上的同一类操作出现过不同的具体目标：这一步每轮都不一样，只能由 agent 自己挑
+        variants = {}
+        for e in log:
+            if e["key"] and not e["failed"]:
+                variants.setdefault((e["from"], e["loose"]), set()).add(e["key"])
         follow = []
-        for e in log[j + 1:j + 9]:
-            if not e["step"] or (e["key"] == last["key"] and e["from"] == last["from"]):
+        for e in log[j + 1:j + 25]:
+            if e["failed"]:
+                continue
+            if not e["step"] or (e["loose"] == last["loose"] and e["from"] == last["from"]):
                 break
-            if head and head["loose"] and e["loose"] == head["loose"] and e["from"] == head["from"]:
+            if len(variants.get((e["from"], e["loose"]), ())) > 1:
                 break
+            if e["closing"]:
+                # 从某个面板点出去、又关回到那个面板：中间这段是弯路，整段不要
+                back = [k for k, f in enumerate(follow) if f["from"] == e["to"] and f["to"] != e["to"]]
+                if back:
+                    del follow[back[-1]:]
+                    continue
             follow.append(e)
+            if len(follow) >= 8:
+                break
         # 上次接下来那一步是在现在这个面板上做的，才算走在同一条路上
         if len(follow) >= 2 and follow[0]["from"] == table.get("topKey"):
             table["route"] = {"labels": [e["label"] for e in follow], "steps": [e["step"] for e in follow]}
@@ -1352,7 +1374,9 @@ class McpServer:
                 elif page_method == "find":
                     args["limit"] = min(max(int(args.get("limit", 20)), 1), 50)
                 elif page_method in ("observe", "act"):
-                    args["limit"] = min(max(int(args.get("limit", 30)), 1), 60)
+                    # 没指定时交给页面：面板 30 行，整个舞台进表（主城 HUD + 地图）时给到 60 行
+                    if args.get("limit") is not None:
+                        args["limit"] = min(max(int(args["limit"]), 1), 60)
                     args.pop("screenshot", None)
                     args.pop("ocr", None)
                     args.pop("ocrLimit", None)
