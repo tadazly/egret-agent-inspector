@@ -353,7 +353,8 @@ def render_action_table(table):
             if result.get("ok") and result.get("via") == "gone":
                 line += " → %s 自己退场了" % (result.get("panel") or "")
             elif result.get("ok"):
-                line += " → 点 %s 关掉了 %s" % (result.get("via"), result.get("panel") or "")
+                via = {"outer": "外层模块的关闭/返回键", "shell": "下层外壳的返回键"}.get(result.get("via"), result.get("via"))
+                line += " → 点 %s 关掉了 %s" % (via, result.get("panel") or "")
             else:
                 line += " → 没关掉（%s）：%s" % (result.get("stopped"), result.get("note") or "")
             if result.get("passed"):
@@ -554,8 +555,8 @@ TOOLS = {
     "egret_navigate": (
         "在浏览器中打开 URL（默认复用最近使用的标签页），并等待页面加载完成。",
         obj({"url": {"type": "string"}, "newTab": {"type": "boolean", "description": "在新标签页中打开"},
-             "newWindow": {"type": "boolean", "description": "在新窗口中打开（铺在当前窗口右半边）：多个 agent 并行各占一个窗口，"
-                           "同一窗口里不在前台的标签页游戏会停止渲染"},
+             "newWindow": {"type": "boolean", "description": "在新窗口中打开，新窗口铺右半边、原窗口收到左半边；给了 tabId 就把那个标签页挪进新窗口。"
+                           "多个 agent 并行各占一个窗口：同一窗口里不在前台的标签页游戏会停止渲染"},
              "timeoutMs": {"type": "integer", "description": "等待加载完成的超时，默认 30000"}}, ["url"]),
         "navigate", None),
     "egret_status": (

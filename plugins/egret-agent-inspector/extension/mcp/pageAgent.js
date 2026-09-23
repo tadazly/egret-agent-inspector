@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.24";
+    var VERSION = "1.7.27";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -760,7 +760,8 @@
         if (!r || r.width < 10 || r.height < 10) return null;
         if (r.width * r.height > pr.width * pr.height * 0.35) return null;
         var tag = [bindId(o), qaNameOf(o), nameOf(o), sourceOf(o)].filter(Boolean).join(" ");
-        var t = textOf(o);
+        // Splan 的固定叫法也算：启航手册的返回键 imgBackiCan 只能靠它认
+        var t = textOf(o) || splanFixedLabel(o);
         var score = 0;
         if (CLOSE_RE.test(tag)) score += 10;
         // 明确叫 back 的压过只叫 return 的：后者可能是「返还」
@@ -1539,6 +1540,34 @@
         }
     }
 
+    // 面板所在模块的最外层：往上走到图层（uiLayer、topLayer…）为止。
+    // 只在 Splan 用：别的项目图层未必这样命名，一路往上会找到 HUD 上的按钮
+    function moduleRootOf(panel) {
+        var outer = panel;
+        if (!window.MFC) return outer;
+        for (var c = panel && panel.parent; c && !isStageObject(c); c = c.parent) {
+            if (/Layer$/i.test(nameOf(c) || "") || /(^|\.)RootLayer$/.test(className(c))) break;
+            outer = c;
+        }
+        return outer;
+    }
+
+    // 同一图层里紧挨在下面的模块露出来的关闭 / 返回键（只看三层，且要点得到）
+    function shellCloseOf(panel) {
+        if (!window.MFC) return null;
+        var root = moduleRootOf(panel), layer = root && root.parent;
+        if (!layer || !layer.getChildIndex) return null;
+        for (var i = layer.getChildIndex(root) - 1, seen = 0; i >= 0 && seen < 3; i--) {
+            var sib = childAt(layer, i);
+            if (!sib || !sib.visible || sib.alpha === 0) continue;
+            seen++;
+            var ctl = findCloseControl(sib, false) || findCloseControl(sib, true);
+            var pp = ctl && probePoint(ctl.o, false);
+            if (pp) return { o: ctl.o, point: pp.point };
+        }
+        return null;
+    }
+
     // 战斗面板：模块容器的类名是 ApplicationViewAdvanced，名字才叫 BattlePanel
     function isSplanBattlePanel(panel) {
         if (!window.MFC || !panel) return false;
@@ -1560,7 +1589,9 @@
 
     // 图片字按钮在源码里的固定叫法，不用 OCR 猜
     var SPLAN_QA_LABELS = { NewLogin__btn_start: "进入游戏", NewLogin__btn_account: "切换账号",
-        SimpleAlert__cancel: "取消" };
+        SimpleAlert__cancel: "取消",
+        // 启航手册的返回键名字不成词（Back 后面紧跟 iCan），通用规则认不出是返回
+        OnboardingManualVer2__imgBackiCan: "返回" };
     // 按控件 id + 所在组件认：宿主类名在运行时不一定和源码一致（ToolBar 里的 autoOn 表上显示的 qaName 宿主不是 ToolBar）。
     // 战斗：自动战斗开了以后只能干等；三星条件那块写着「战斗胜利」，agent 会当成已经结算
     var SPLAN_ID_LABELS = [
@@ -4306,7 +4337,7 @@
                 for (var w = 0; w < 10; w++) {
                     await sleep(120);
                     var now = sceneInfo().top;
-                    if (!now || hashOf(now) !== hash) return true;
+                    if (!now || hashOf(now) !== hash || panel.stage === null) return true;
                 }
                 return false;
             }
@@ -4363,6 +4394,27 @@
                 if (sole && (!strict || sole._o !== strict.o)) {
                     if (await attempt("confirm", sole._o, sole.point)) {
                         return { ok: true, via: "confirm", panel: name, tried: tried };
+                    }
+                }
+                // 顶层是模块里的子面板（任务面板里的 MainTaskPanel、背包里的列表）时，关闭键、返回键在外层模块上。
+                // 要先于「点遮罩」：子面板外面的「遮罩」其实是外层面板本身，会点到页签。
+                // 验收里主线任务面板、精灵背包都因此报「找不到关闭控件」
+                var outer = moduleRootOf(panel);
+                if (!strict && !back && outer !== panel) {
+                    var outerCtl = findCloseControl(outer, false) || findCloseControl(outer, true);
+                    if (outerCtl) {
+                        var op2 = probePoint(outerCtl.o, false);
+                        if (await attempt("outer", outerCtl.o, op2 ? op2.point : centerOf(outerCtl.rect))) {
+                            return { ok: true, via: "outer", panel: name, tried: tried };
+                        }
+                    }
+                }
+                // 「外壳 + 页签内容是单独模块」（启航手册）：内容模块盖在外壳上、自己没有关闭键，
+                // 返回键在下面那层外壳上、露在外面，点它连同内容一起关掉
+                if (!strict && !back) {
+                    var shell = shellCloseOf(panel);
+                    if (shell && await attempt("shell", shell.o, shell.point)) {
+                        return { ok: true, via: "shell", panel: name, tried: tried };
                     }
                 }
                 var mp = maskPointOutside(panel);

@@ -1,6 +1,6 @@
 // Egret Agent Inspector MCP 桥接：运行在扩展 service worker 中，作为 WebSocket 客户端连接本机 MCP server，
 // 把 MCP 工具请求转发到目标标签页（在页面 MAIN world 中执行 mcp/pageAgent.js）。
-const AGENT_VERSION = "1.7.24";
+const AGENT_VERSION = "1.7.27";
 const AGENT_FILE = "mcp/pageAgent.js";
 const BASE_PORT = 17800;
 // Codex 会为并行任务分别启动 MCP 进程；预留足够端口，避免多个任务同时使用插件时耗尽 bridge。
@@ -296,15 +296,23 @@ async function handleRequest(method, params) {
             let tab;
             if (params.newWindow) {
                 // 多个 agent 并行：同一窗口里不在前台的标签页被当成后台，游戏停止渲染。
-                // 新窗口铺在当前窗口右半边，两边都露着，都算前台
-                const base = await chrome.windows.getLastFocused().catch(() => null);
-                const opts = { url: params.url, focused: true, type: "normal" };
+                // 新窗口铺在右半边、原窗口收到左半边，两边都露着，都算前台。给了 tabId 就把那个标签页挪过去
+                const moving = params.tabId !== undefined && params.tabId !== null ? await chrome.tabs.get(+params.tabId) : null;
+                const focused = await chrome.windows.getLastFocused().catch(() => null);
+                const others = (await chrome.windows.getAll({ windowTypes: ["normal"] })).filter((w) => !moving || w.id !== moving.windowId);
+                const base = focused && (!moving || focused.id !== moving.windowId) ? focused : others[0] || focused;
+                const opts = { focused: true, type: "normal" };
+                if (moving) opts.tabId = moving.id;
+                else opts.url = params.url;
                 if (base && base.width && base.height) {
-                    Object.assign(opts, { left: base.left + Math.round(base.width / 2), top: base.top,
-                        width: Math.round(base.width / 2), height: base.height });
+                    const half = Math.round(base.width / 2);
+                    Object.assign(opts, { left: base.left + half, top: base.top, width: half, height: base.height });
+                    // 原窗口收到左半边：两个窗口重叠时，前置一个就把另一个盖住，那边的游戏又停了
+                    await chrome.windows.update(base.id, { state: "normal" }).catch(() => {});
+                    await chrome.windows.update(base.id, { left: base.left, top: base.top, width: half, height: base.height }).catch(() => {});
                 }
                 const win = await chrome.windows.create(opts);
-                tab = win.tabs[0];
+                tab = moving ? await chrome.tabs.update(moving.id, { url: params.url, active: true }) : win.tabs[0];
             } else if (params.newTab) {
                 tab = await chrome.tabs.create({ url: params.url, active: true });
             } else {
@@ -348,6 +356,17 @@ async function handleRequest(method, params) {
                 if (params.frameId === undefined && frameCache.has(tab.id) && /frame|No tab/i.test(String(e && e.message))) {
                     frameCache.delete(tab.id);
                     frameId = await resolveFrame(tab.id);
+                    const result = await runInPage(tab.id, frameId, params.method, params.params || {});
+                    return { tabId: tab.id, frameId, result };
+                }
+                // 页面在后台：先把标签页切到前台、窗口还原并前置，等游戏恢复渲染再试一次。
+                // 无人值守的验收里窗口常被别的程序盖住，agent 只能停下来等人
+                if (/页面在后台/.test(String(e && e.message))) {
+                    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+                    const win = await chrome.windows.get(tab.windowId).catch(() => null);
+                    await chrome.windows.update(tab.windowId, win && win.state === "minimized"
+                        ? { state: "normal", focused: true } : { focused: true }).catch(() => {});
+                    await new Promise((r) => setTimeout(r, 800));
                     const result = await runInPage(tab.id, frameId, params.method, params.params || {});
                     return { tabId: tab.id, frameId, result };
                 }

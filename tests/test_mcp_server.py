@@ -1354,6 +1354,16 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     out.splanLabels = t.buildActionTable({ limit: 60 }).actions.map(a => a.label).filter(l => l === "进入游戏" || l === "跳过动画");
     remove(startBtn);
     remove(skipBtn);
+    // 顶层是模块里的子面板、自己没有关闭键：点外层模块的返回键（主线任务面板、精灵背包）
+    const taskModule = item("TaskModule", "taskModule", splanRoot, { x: 0, y: 0, width: 800, height: 480 });
+    const taskBg = item("eui.Image", "taskBg", taskModule, { x: 0, y: 0, width: 800, height: 480 });
+    const taskBack = item("eui.Group", "grp_back_landscape", taskModule, { x: 10, y: 10, width: 60, height: 40 });
+    const mainTask = item("MainTaskPanel", "mainTask", taskModule, { x: 100, y: 60, width: 600, height: 400 });
+    const mainTaskBg = item("eui.Image", "mainTaskBg", mainTask, { x: 100, y: 60, width: 600, height: 400 });
+    listenOn(taskBack);
+    taskBack.addEventListener("touchTap", function () { [mainTaskBg, mainTask, taskBg, taskBack, taskModule].forEach(remove); }, null);
+    const outerRun = (await t.handlers.act({ steps: [{ op: "close" }], quietMs: 50, timeoutMs: 200, turnMs: 0 })).executed[0];
+    out.outerClose = { via: outerRun.result && outerRun.result.via, gone: !taskModule.stage };
     // 战斗界面不能 close：返回键是暂停，退出直接判负；自动战斗键写明别点
     // 和实页一样：模块容器类名是 ApplicationViewAdvanced、名字叫 BattlePanel；工具栏类名是 Toolbar，autoOn 的 name 写死成 battle_autoBtn
     const battlePanel = item("plugin.applicationView.ApplicationViewAdvanced", "BattlePanel", splanRoot, { x: 0, y: 0, width: 800, height: 480 });
@@ -1541,6 +1551,7 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertTrue(data["session"]["lost"])
         self.assertEqual(sorted(data["splanLabels"]), ["跳过动画", "进入游戏"])
         self.assertEqual(data["battleClose"], {"ok": False, "stopped": "in-battle", "stillThere": True})
+        self.assertEqual(data["outerClose"], {"via": "outer", "gone": True})
         self.assertTrue(data["autoLabel"])
         self.assertEqual(data["battleTurn"], {"canOP": True, "next": 1})
 
