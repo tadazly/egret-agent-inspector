@@ -211,6 +211,43 @@ def apply_ocr_labels(table, texts):
     return filled
 
 
+# 定位类字段：编号只在一张表里有效、hash 面板重开就变，路线复用时换成页面给的稳定选择器
+ROUTE_LOCATORS = ("i", "hash", "qaName", "id", "name", "className", "text", "source", "match", "index")
+
+
+def route_step(step, rec):
+    """执行过的一步 → (下次照发的步骤, 比对键, 不看第几个的比对键)；失败或拿不到稳定选择器时步骤为 None。
+
+    第三个键用来认「同一类操作的另一轮」：选第 1 只和选第 4 只精灵只差 index。
+    """
+    op = rec.get("op")
+    if rec.get("error") or rec.get("skipped") or not isinstance(step, dict):
+        return None, None, None
+    params = {k: v for k, v in step.items() if k not in ROUTE_LOCATORS}
+    if op in ("tap", "text"):
+        sel = dict((rec.get("target") or {}).get("sel") or {})
+        if op == "text":
+            # 填字时 text 是要填的内容，不是查询条件
+            if "text" in sel:
+                return None, None, None
+            params["text"] = step.get("text", rec.get("text"))
+        if not sel:
+            return None, None, None
+        key = op + json.dumps(sel, ensure_ascii=False, sort_keys=True)
+        loose = op + json.dumps({k: v for k, v in sel.items() if k != "index"}, ensure_ascii=False, sort_keys=True)
+        return dict(sel, **params), key, loose
+    if any(k in step for k in ("i", "hash")):
+        return None, None, None
+    replay = dict(step)
+    key = json.dumps(replay, ensure_ascii=False, sort_keys=True)
+    return replay, key, key
+
+
+def short_label(label, width=12):
+    label = " ".join(str(label or "").split())
+    return label if len(label) <= width else label[:width] + "…"
+
+
 def render_action_table(table):
     """动作表渲染成一行一条的紧凑文本。
 
@@ -289,6 +326,12 @@ def render_action_table(table):
         lines.append("中止 这次调用快到时限，后面的步骤没做；看完新表再发剩下的步骤")
     elif table.get("stopped") and table["stopped"] not in ("done", "stale"):
         lines.append("中止 %s" % table["stopped"])
+    route = table.get("route")
+    if route:
+        # 同一段路线第二次出现：把上次接下来的几步摆出来，一样就一次发完，不用每步再看表想一轮
+        lines.append("路线 上次这之后接着是：%s；路线一样就一次发 %s" % (
+            " → ".join(route["labels"]),
+            json.dumps({"steps": route["steps"]}, ensure_ascii=False, separators=(",", ":"))))
     if table.get("newErrors"):
         lines.append("页面报错 %s 条，首条：%s" % (table["newErrors"], table.get("firstError")))
     texts = [t for t in (table.get("text") or []) if t]
@@ -388,6 +431,8 @@ INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游�
 - 对白与引导用 op=advance 一次推完；弹窗用 op=dismiss；关掉当前这个界面用 op=close（关闭键→返回键→遮罩依次试，并确认它真的没了）；加载过场（mode=transient）用 op=wait。
 - 要把一批同类目标挨个打开看一眼，一次 act 就给多组「打开 + op=close」步骤，不要一个来回只点一下。
 - 表上出现「页面已重载」时，之前记下的 hash 和编号全部作废，按新表重新定位。
+- act 返回里出现「路线」一行，说明这一步和之前走过的路线一样，后面给的就是上次紧接着的步骤；情况一样就照着一次发完，不一样（目标换了、弹窗不同）再按表决策。
+- 回合制战斗：点技能后 act 会等到下一回合能操作再返回；同一招要连着出时给 repeat，停下时看它说停在哪（换宠栏、结算、时限）。
 - 列表屏上只显示几条。要计数、筛选、挑目标时先用 egret_evaluate 的 $items(hash, it => …) 读全量数据，再用 op=scroll 的 toIndex 滚过去点；不要一屏屏滚着数。读数据可以，调业务方法改状态不行。
 - 动作表和 OCR 都定不下来，或要看布局、颜色、半透明遮罩、战斗画面时用 egret_screenshot；游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，视觉兜底该用就用。
 - 目标不在动作表里（在别的子树、需要语义消歧）用 egret_locate；已知稳定标识用 egret_find。显示对象以 hash 标识，id 是组件在代码/EXML 中绑定的属性名；stageRect 是舞台坐标，screenRect 是页面视口 CSS 像素坐标。
@@ -1017,6 +1062,8 @@ class McpServer:
         self.ocr_cache = {}
         # tabId -> 页面代理的 bootId，用来发现页面重载
         self.page_boots = {}
+        # tabId -> 执行过的步骤流水，用来发现「同一段路线第二次出现」
+        self.routes = {}
 
     async def send(self, msg):
         data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
@@ -1080,12 +1127,14 @@ class McpServer:
                 res = await self.enrich_locate_with_ocr(args, res)
             if name in ("egret_observe", "egret_act"):
                 self.note_page_boot(args, res)
+                if name == "egret_act":
+                    self.note_route(args, res)
                 # 整屏都是图片字按钮时自动补一次本地 OCR：让模型专门花一轮决定「要不要 OCR」不划算
                 if args.get("ocr") or (args.get("ocr") is None and res.get("needOcr")):
                     res = await self.enrich_table_with_ocr(args, res, reuse=args.get("ocr") is None)
                 for action in res.get("actions") or []:
                     action.pop("screenRect", None)
-                for key in ("devicePixelRatio", "viewportSize", "captureSize", "needOcr", "bootId"):
+                for key in ("devicePixelRatio", "viewportSize", "captureSize", "needOcr", "bootId", "topKey"):
                     res.pop(key, None)
                 if args.get("format") == "json":
                     body = json.dumps(res, ensure_ascii=False)
@@ -1124,6 +1173,46 @@ class McpServer:
         self.page_boots[key] = boot
         if previous and previous != boot:
             table["reloaded"] = True
+
+    def note_route(self, args, table):
+        """同一段路线第二次出现时，把上次紧接着的几步拼成一次就能发完的 steps。
+
+        升级第二只精灵、打第二关时，路线和第一次一模一样，模型却仍要每一步看表、想一轮。
+        这里按标签页记下每一步「从哪个面板出发、点了什么（稳定选择器）」，
+        当前这一步在同一个面板上出现过，就把上次它后面的几步原样摆出来。
+        """
+        tab = table.get("tabId", args.get("tabId"))
+        log = self.routes.setdefault(tab, [])
+        start = len(log)
+        sent = args.get("steps") or [args]
+        for step, rec in zip(sent, table.get("executed") or []):
+            replay, key, loose = route_step(step, rec)
+            target = rec.get("target") or {}
+            log.append({"from": rec.get("from"), "key": key, "loose": loose, "step": replay,
+                        "label": short_label(target.get("label")) or rec.get("op")})
+        del log[:-300]
+        start = min(start, len(log))
+        if len(log) == start or not log[-1]["key"]:
+            return
+        last = log[-1]
+        for j in range(start - 1, -1, -1):
+            if log[j]["key"] == last["key"] and log[j]["from"] == last["from"]:
+                break
+        else:
+            return
+        # 上次紧挨在它前面的那一步（选第几只精灵）标出一轮的起点：接到它再次出现就是下一轮了，
+        # 那一步每轮都不一样，不能照发
+        head = log[j - 1] if j > 0 else None
+        follow = []
+        for e in log[j + 1:j + 9]:
+            if not e["step"] or (e["key"] == last["key"] and e["from"] == last["from"]):
+                break
+            if head and head["loose"] and e["loose"] == head["loose"] and e["from"] == head["from"]:
+                break
+            follow.append(e)
+        # 上次接下来那一步是在现在这个面板上做的，才算走在同一条路上
+        if len(follow) >= 2 and follow[0]["from"] == table.get("topKey"):
+            table["route"] = {"labels": [e["label"] for e in follow], "steps": [e["step"] for e in follow]}
 
     async def enrich_table_with_ocr(self, args, table, reuse=False):
         """动作表里图片字按钮的标签是 qaName/资源名；一次截图批量 OCR 把真实文案补上。

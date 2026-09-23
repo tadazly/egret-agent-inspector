@@ -1065,6 +1065,42 @@ class RenderTableTest(unittest.TestCase):
         self.assertIn("连出 6 次，停在：这次调用快到时限", budget)
         self.assertIn("后面的步骤没做", budget)
 
+    def test_second_time_on_a_route_offers_the_rest_of_it(self):
+        server = load_server()
+        mcp = server.McpServer.__new__(server.McpServer)
+        mcp.routes = {}
+
+        def tap(sel, label, frm, to, **step):
+            return {"i": 3, **step}, {"tabId": 1, "topKey": to, "executed": [
+                {"op": "tap", "from": frm, "target": {"label": label, "sel": sel}}]}
+
+        bag, up = "PetBag:petBag", "UpPanel:upPanel"
+        history = [
+            tap({"qaName": "PetBag__item", "match": "exact", "index": 0}, "里奥斯", bag, bag),
+            tap({"qaName": "PetBag__btn_up", "match": "exact"}, "升级", bag, up),
+            tap({"text": "确定", "match": "exact"}, "确定", up, up, repeat=1),
+            ({"steps": [{"op": "close"}]}, {"tabId": 1, "topKey": bag,
+                                             "executed": [{"op": "close", "from": up, "result": {"ok": True}}]}),
+            # 第二只精灵：选的不是同一只，但点「升级」和上次一样，而且现在也在升级面板上
+            tap({"qaName": "PetBag__item", "match": "exact", "index": 3}, "缪斯", bag, bag),
+        ]
+        for args, table in history:
+            mcp.note_route(args, table)
+            self.assertNotIn("route", table)
+        args, table = tap({"qaName": "PetBag__btn_up", "match": "exact"}, "升级", bag, up)
+        mcp.note_route(args, table)
+        self.assertEqual(table["route"]["labels"], ["确定", "close"])
+        # 编号换成稳定选择器，其他参数照带
+        self.assertEqual(table["route"]["steps"], [{"text": "确定", "match": "exact", "repeat": 1}, {"op": "close"}])
+        text = server.render_action_table(dict(table, marker="m7", actions=[]))
+        self.assertIn("路线 上次这之后接着是：确定 → close", text)
+        self.assertIn('{"steps":[{"text":"确定"', text)
+
+        # 这次点完落在别的面板上：不在同一条路上，不给
+        args, table = tap({"qaName": "PetBag__btn_up", "match": "exact"}, "升级", bag, bag)
+        mcp.note_route(args, table)
+        self.assertNotIn("route", table)
+
     def test_close_failure_says_what_was_tried(self):
         server = load_server()
         table = {"mode": "normal", "marker": "m3",
