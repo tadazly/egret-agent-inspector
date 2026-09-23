@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.29";
+    var VERSION = "1.7.30";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1681,6 +1681,10 @@
         { id: /^btn_go$/, host: /pve/i, label: "进入星系" },
         { id: /^preBtn$/, host: /pve/i, label: "上一个星球" },
         { id: /^nextBtn$/, host: /pve/i, label: "下一个星球" },
+        { id: /^outBoundBtn$/, host: /pve/i, label: "外传" },
+        { id: /^sptBtn$/, host: /pve/i, label: "SPT" },
+        { id: null, name: /^pve_teach\b/, host: /pve/i, label: "教学" },
+        { id: /^com_modeswitch$/, host: /pve/i, label: "探索 / 挑战切换" },
         { id: /^rb_0$/, host: /pve/i, label: "普通关卡" },
         { id: /^rb_1$/, host: /pve/i, label: "精英关卡" },
         { id: /^rb_2$/, host: /pve/i, label: "探索关卡" },
@@ -1727,11 +1731,41 @@
         for (var t = o, hops = 0; t && hops < 3; t = t.parent, hops++) {
             if (/NewBenefitTab$/.test(className(t)) && SPLAN_BENEFIT_TABS[t.crtVal]) return SPLAN_BENEFIT_TABS[t.crtVal];
         }
+        var galaxy = splanGalaxyLabel(o);
+        if (galaxy) return galaxy;
         var src = sourceOf(o);
         if (src && /new_seer_skipBtn/.test(src)) return "跳过动画";
         return null;
     }
     var SPLAN_BENEFIT_TABS = { 6: "福利商城", 7: "每日福利" };
+
+    // 星际探索的星系按钮只叫 galaxy_N：要找「克洛斯星」的 agent 只好挨个星系点进去看（改后验收里还试了 5 次）。
+    // 标上星系名和前几颗星球（配置表 pvePlanet + CheckLevelManager 的星系归属）
+    var galaxyLabels = null;
+    function splanGalaxyLabel(o) {
+        var m = /^galaxy_(\d+)$/.exec(nameOf(o) || "");
+        var M = m && window.pve && window.pve.CheckLevelManager;
+        if (!M || !window.xls || !window.xls.pvePlanet) return null;
+        try {
+            if (!galaxyLabels) {
+                var byGalaxy = {};
+                window.xls.pvePlanet.getItems().forEach(function (r) {
+                    var g = M.getGalaxyByPlanet(r.planetID);
+                    var list = byGalaxy[g] = byGalaxy[g] || [];
+                    if (r.planet_name && list.indexOf(r.planet_name) < 0) list.push(r.planet_name);
+                });
+                galaxyLabels = {};
+                (M.galaxyName || []).forEach(function (name, id) {
+                    var planets = byGalaxy[id] || [];
+                    if (name) galaxyLabels[id] = name + (planets.length ? "（" + planets.slice(0, 4).join("、") +
+                        (planets.length > 4 ? "…" : "") + "）" : "");
+                });
+            }
+            return galaxyLabels[+m[1]] || null;
+        } catch (e) {
+            return null;
+        }
+    }
 
     // 有子节点、子节点却全都隐藏的容器什么都不画，命中测试照样点得中：星际探索星球页底下压着一排旧的
     // FairyGUI 列表项（只剩一个隐藏的内容层），表上成了两个「UIContainer」，验收里 agent 当成星球去点、卡住。
