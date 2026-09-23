@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.15";
+    var VERSION = "1.7.16";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -2306,10 +2306,28 @@
             }
             return lo <= hi ? { lo: lo, hi: hi } : null;
         }
+        function rendererAt(i) {
+            for (var c = 0; c < numChildren(vp); c++) {
+                var r = childAt(vp, c);
+                if (r && r.visible && r.itemIndex === i) return r;
+            }
+            return null;
+        }
         vp.scrollV = round(maxScroll() * index / Math.max(total - 1, 1));
-        for (var pass = 0; pass < 4; pass++) {
+        for (var pass = 0; pass < 5; pass++) {
             if (typeof vp.validateNow === "function") vp.validateNow();
             await sleep(60);
+            // 目标项要整项露出来：只露一条边时点不到、拖不动，还常被压在列表角上的按钮盖住。
+            // 虚拟布局的 contentHeight 起初是估的，每轮重算可滚范围
+            var target = rendererAt(index);
+            if (target) {
+                var top = target.y, bottom = target.y + (target.height || 0);
+                var want = top < vp.scrollV ? top : bottom > vp.scrollV + viewH ? bottom - viewH : vp.scrollV;
+                want = round(Math.min(Math.max(want, 0), maxScroll()));
+                if (Math.abs(want - vp.scrollV) < 1) break;
+                vp.scrollV = want;
+                continue;
+            }
             var range = visibleRange();
             if (!range || (index >= range.lo && index <= range.hi)) break;
             var span = Math.max(range.hi - range.lo + 1, 1);
