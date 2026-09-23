@@ -382,6 +382,7 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
             _, text = await self.call_text("egret_observe", {})
             self.assertTrue(text.splitlines()[1].startswith("技能 这是 Splan 项目页面"), text)
             self.assertIn("splan-control", text)
+            self.assertIn("splan-battle", text)
             _, text = await self.call_text("egret_act", {"marker": "m1", "steps": [{"i": 1}]})
             self.assertNotIn("splan-control", text)
             ext.project = None

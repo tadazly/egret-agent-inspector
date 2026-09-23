@@ -251,7 +251,7 @@ def route_step(step, rec):
     return replay, key, key
 
 
-SPLAN_SKILL_HINT = "这是 Splan 项目页面：进 PVE 战斗、出招和换精灵、换技能等固定操作写在 splan-control 技能里，还没读过就先读（读过不用再读）"
+SPLAN_SKILL_HINT = "这是 Splan 项目页面：通用操作和换技能见 splan-control，打战斗（进 PVE、出招、换精灵、结算）见 splan-battle；和任务相关的还没读过就先读，读过不用再读"
 
 DRAG_WORDS = {"up": "上滑", "down": "下滑", "left": "左滑", "right": "右滑"}
 
@@ -466,7 +466,7 @@ INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游�
 - 动作表和 OCR 都定不下来，或要看布局、颜色、半透明遮罩、战斗画面时用 egret_screenshot；游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，视觉兜底该用就用。
 - 目标不在动作表里（在别的子树、需要语义消歧）用 egret_locate；已知稳定标识用 egret_find。显示对象以 hash 标识，id 是组件在代码/EXML 中绑定的属性名；stageRect 是舞台坐标，screenRect 是页面视口 CSS 像素坐标。
 - 操作后界面没有预期变化时用 egret_get_errors 看页面报错；想知道某个控件背后是哪段代码用 egret_inspect_code。
-- 页面是 Splan 项目（splan_call probe 返回 MFC: true）时，动手前先读 splan-control 技能：进 PVE 战斗、战斗里出招和换精灵、换技能这些固定操作写在那里，照做比自己摸索快。
+- 页面是 Splan 项目（splan_call probe 返回 MFC: true）时，动手前先读相关技能：通用操作和换技能在 splan-control，打战斗（进 PVE、出招、换精灵、结算）在 splan-battle，照做比自己摸索快。
 - 探索开始前先用 egret_notes 查已有笔记，踩坑、确认入口或测出动画耗时后写回。已确认的流程用 egret_run_steps 复跑。
 - 首次使用或工具提示扩展未连接时，先调用 egret_extension_status；未连接则按 egret-install-extension skill 安装扩展。
 - splan_test_command 仅在用户本轮明确授权且 probe 确认加载 debug.js 时使用。
@@ -688,7 +688,7 @@ TOOLS = {
              "quietMs": {"type": "integer", "description": "一直没变化就提前返回的时间，默认 600"},
              "loadingMs": {"type": "integer", "description": "结束时如果还在加载过场，最多再等多久，默认 6000"},
              "turnMs": {"type": "integer",
-                        "description": "点完后整组按钮被锁住（回合制出招、提交后等结果）时最多等多久再返回，默认 15000，0 关闭"},
+                        "description": "点完后整组按钮被锁住（回合制出招、提交后等结果）时最多等多久再返回，默认 15000，一般不用传；回合制战斗里出招、换宠别设成 0，否则不等下一回合就返回，得自己多看几轮"},
              "occluded": {"type": "boolean", "description": "把被遮挡的条目也列出来，默认 false"},
              "format": {"type": "string", "enum": ["lines", "json"], "description": "默认 lines 紧凑文本；json 带 hash、坐标和完整字段"},
              "screenshot": {"type": "boolean", "description": "附带一张压缩截图，默认 false"}}),
