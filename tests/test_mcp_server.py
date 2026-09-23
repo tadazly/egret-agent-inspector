@@ -1323,6 +1323,27 @@ class RenderTableTest(unittest.TestCase):
         self.assertEqual(table["route"]["labels"], ["确定", "wait", "close"])
         self.assertEqual(table["route"]["steps"][1], {"op": "wait", "until": {"text": "升级成功"}})
 
+    def test_route_ends_where_it_returns_to_the_main_scene(self):
+        server = load_server()
+        mcp = server.McpServer.__new__(server.McpServer)
+        mcp.routes, mcp.route_gates = {}, {}
+        sign, gift, ret, main, pve = "WeekSign:w", "FirstCharge:f", "Return:r", "Toolbar:t", "Pve:p"
+
+        def tap(name, frm, to, scene=False):
+            table = {"tabId": 1, "topKey": to, "scope": "stage" if scene else "panel", "executed": [
+                {"op": "tap", "from": frm, "target": {"label": name, "sel": {"name": name}}}]}
+            mcp.note_route({"i": 3}, table)
+            return (table.get("route") or {}).get("labels")
+
+        # 上个任务：登录后关掉三个弹窗回到主场景，接着去打 PVE
+        for step in [("sign_close", sign, gift), ("gift_close", gift, ret), ("ret_close", ret, main, True),
+                     ("pve_rect", main, pve), ("galaxy_1", pve, pve), ("boss_1", pve, pve)]:
+            tap(*step)
+        # 这个任务登录后是同一串弹窗：路线到回主场景为止，不带上个任务的 PVE
+        self.assertEqual(tap("sign_close", sign, gift), ["gift_close", "ret_close"])
+        tap("gift_close", gift, ret)
+        self.assertIsNone(tap("ret_close", ret, main, True))
+
     def test_route_goes_quiet_while_exploring_and_comes_back_when_repeating(self):
         server = load_server()
         mcp = server.McpServer.__new__(server.McpServer)

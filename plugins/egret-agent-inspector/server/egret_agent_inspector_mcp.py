@@ -1217,6 +1217,8 @@ class McpServer:
                 # 空转和失败一样：不回放，也不拿来认「又走到这一步了」
                 "failed": bool(rec.get("error") or rec.get("skipped")) or filler,
                 "closing": rec.get("op") in ("close", "dismiss", "recommended") or target.get("role") in ("close", "back"),
+                # 落回了主场景（没有模态面板，整个舞台进表）：接下来去哪是新的决定
+                "hub": k == len(recs) - 1 and table.get("scope") == "stage",
                 "label": short_label(target.get("label")) or rec.get("op")})
         del log[:-300]
         start = min(start, len(log))
@@ -1242,6 +1244,9 @@ class McpServer:
                 break
         else:
             return
+        # 回到主场景就是一段路线的终点：登录后关完同一串弹窗，上次接着去打了 PVE，这次未必（探索验收里就被推荐了上个任务的路线）
+        if last["hub"] or log[j]["hub"]:
+            return
         # 同一个面板上的同一类操作出现过不同的具体目标：这一步每轮都不一样，只能由 agent 自己挑
         variants = {}
         for e in log:
@@ -1262,7 +1267,7 @@ class McpServer:
                     del follow[back[-1]:]
                     continue
             follow.append(e)
-            if len(follow) >= 8:
+            if len(follow) >= 8 or e["hub"]:
                 break
         # 上次接下来那一步是在现在这个面板上做的，才算走在同一条路上
         if len(follow) >= 2 and follow[0]["from"] == table.get("topKey"):
