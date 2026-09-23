@@ -292,6 +292,18 @@ class OcrLabelTest(unittest.TestCase):
         self.assertEqual(table["actions"][1]["label"], "开始")
         self.assertEqual(table["actions"][2]["from"], "source")
 
+    def test_ocr_spaces_are_squashed_and_garbage_is_kept_out(self):
+        server = load_server()
+        table = {"actions": [
+            {"hash": 1, "label": "hpBtn", "from": "id"},
+            {"hash": 2, "label": "btn_get", "from": "name"},
+        ]}
+        # Windows OCR 在汉字之间夹空格；美术字常认成生僻字拼的乱码
+        filled = server.apply_ocr_labels(table, {"1": "回 血 药", "2": "颌眍奖"})
+        self.assertEqual(filled, 1)
+        self.assertEqual(table["actions"][0]["label"], "回血药")
+        self.assertEqual(table["actions"][1]["label"], "btn_get")
+
 
 class McpServerTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -1714,6 +1726,21 @@ class RenderTableTest(unittest.TestCase):
         # dismiss 的结果原来把整串 dict 拼进去，几百字节全是噪音
         self.assertIn("关掉 1 个弹窗", text)
         self.assertNotIn("'ok': True", text)
+
+    def test_offscreen_rows_and_auto_scroll_before_tap_are_spelled_out(self):
+        server = load_server()
+        table = {"panel": {"name": "ui.ToolbarNew"}, "marker": "m5",
+                 "executed": [{"op": "tap", "target": {"label": "精灵经验舱"}, "revealed": "←"},
+                              {"op": "tap", "target": {"label": "3 克洛斯星林间 ★3/3"}, "centered": True},
+                              {"op": "tap", "target": {"label": "火山星"}, "centered": False}],
+                 "actions": [{"i": 1, "label": "小屋", "role": "button", "offscreen": "→"},
+                             {"i": 2, "label": "领取电池", "role": "button", "off": True}]}
+        text = server.render_action_table(table)
+        self.assertIn("执行 tap 精灵经验舱（先把它从屏外←滚进来）", text)
+        self.assertIn("执行 tap 3 克洛斯星林间 ★3/3（先滚到正中）", text)
+        self.assertIn("（没能滚到正中，可能点不动）", text)
+        self.assertIn("1 小屋 button 屏外→", text.splitlines())
+        self.assertIn("2 领取电池 button 禁用", text.splitlines())
 
     def test_scroller_with_data_points_at_items(self):
         server = load_server()

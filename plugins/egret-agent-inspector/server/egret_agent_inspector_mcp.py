@@ -193,16 +193,37 @@ def run_fast_ocr(image_data, candidates, scale):
 WEAK_LABEL_SOURCES = ("qaName", "id", "name", "source", "className")
 
 
+def tidy_ocr_text(text):
+    """Windows OCR 把每个汉字当成一个词、中间夹空格（「回 血」）：去掉汉字之间的空格，按字找才对得上。"""
+    return re.sub(r"(?<=[\u3000-\u9fff\uff00-\uffef])\s+(?=[\u3000-\u9fff\uff00-\uffef])", "", (text or "").strip())
+
+
+def looks_garbled(text):
+    """美术字的识别结果多半是生僻字拼的乱码（领取奖励 →「颌眍奖」、返回 →「匾回」）。
+    界面文字几乎都在 GB2312 一级常用字里，生僻字占到三分之一就不拿它换掉原来的标签。"""
+    cjk = [c for c in text if "\u4e00" <= c <= "\u9fff"]
+    if not cjk:
+        return False
+    rare = 0
+    for c in cjk:
+        try:
+            code = c.encode("gb2312")
+            rare += 0 if 0xB0 <= code[0] <= 0xD7 else 1
+        except UnicodeEncodeError:
+            rare += 1
+    return rare * 3 >= len(cjk)
+
+
 def apply_ocr_labels(table, texts):
     """把 OCR 结果写回动作表：只替换图片字造成的弱标签，返回替换了几个。
 
     美术字体经常被识别错（"进入游戏" → "迸八湔懑"），所以原来的结构化标签保留在 alt 里，
-    识别结果不可信时 agent 还能退回去用它。
+    识别结果不可信时 agent 还能退回去用它；一看就是乱码的干脆不替换。
     """
     filled = 0
     for action in table.get("actions") or []:
-        text = (texts.get(str(action.get("hash"))) or "").strip()
-        if text and action.get("from") in WEAK_LABEL_SOURCES:
+        text = tidy_ocr_text(texts.get(str(action.get("hash"))) or "")
+        if text and action.get("from") in WEAK_LABEL_SOURCES and not looks_garbled(text):
             action["alt"] = action["label"]
             action["label"] = text[:32]
             action["from"] = "ocr"
@@ -311,6 +332,11 @@ def render_action_table(table):
             line += "（按住%s）" % DRAG_WORDS.get(rec["drag"], rec["drag"])
         if rec.get("cleared"):
             line += "（先点掉了%s）" % rec["cleared"]
+        if rec.get("revealed"):
+            line += "（先把它从屏外%s滚进来）" % rec["revealed"]
+        if rec.get("centered") is not None:
+            # 滚轮列表只有正中那行能点：工具先把目标滚到正中
+            line += "（先滚到正中）" if rec["centered"] else "（没能滚到正中，可能点不动）"
         if rec.get("error"):
             line += " → 失败：%s" % rec["error"]
         elif rec.get("expectMatched") is False:
@@ -401,6 +427,9 @@ def render_action_table(table):
             if a.get("drag"):
                 # 原地点一下不生效、要拖出去松手的控件（换宠卡）；点它会自动按住滑出去
                 flags.append("按住%s" % DRAG_WORDS.get(a["drag"], a["drag"]))
+            if a.get("offscreen"):
+                # 地图另一头、列表下面：照常按编号点，act 会先滚过去
+                flags.append("屏外%s" % a["offscreen"])
             star = "*" if (a.get("weak") or a.get("from") in WEAK_LABEL_SOURCES) else ""
             if a.get("alt"):
                 # OCR 识别美术字经常出错，原来的结构化标签留一手
@@ -432,7 +461,9 @@ def render_action_table(table):
         lines.append("过场 %s：用 {\"op\":\"wait\",\"ms\":800} 短等" % table["transientOverlay"].get("reason"))
     for sc in table.get("scrollers") or []:
         dirs = "".join([d for d, k in (("↑", "canUp"), ("↓", "canDown"), ("←", "canLeft"), ("→", "canRight")) if sc.get(k)])
-        lines.append("可滚 %s %s → {\"op\":\"scroll\",\"hash\":%s,\"dy\":-200}" % (sc.get("label"), dirs, sc.get("hash")))
+        # 只能横着滚的（主城地图、横排卡片）给 dx，原来一律给 dy，照抄了等于没滚
+        axis = "dx" if dirs and not (sc.get("canUp") or sc.get("canDown")) else "dy"
+        lines.append("可滚 %s %s → {\"op\":\"scroll\",\"hash\":%s,\"%s\":-200}" % (sc.get("label"), dirs, sc.get("hash"), axis))
         # 二十来条的短列表滚两下就看完了，再摆「先读数据」只会把 agent 引去读一堆 id
         if sc.get("items", 0) > 20 and sc.get("list") and dirs:
             # 模型靠滚动去「看」列表，一屏几条，数出来的总数能差几十倍；把全集入口直接摆在它眼前
@@ -1429,7 +1460,7 @@ class McpServer:
         # 关闭 / 返回键多是 × 或箭头图标，OCR 只会认出「行 证」这类乱码，结构化标签反而更准
         candidates = [a for a in (table.get("actions") or [])
                       if a.get("from") in weak and not a.get("occluded") and a.get("screenRect")
-                      and a.get("role") not in ("close", "back")
+                      and a.get("role") not in ("close", "back") and not a.get("domCovered")
                       and not (reuse and str(a.get("hash")) in self.ocr_cache)][:limit]
         if not candidates:
             # 认过没认出字的也会进缓存；这时说「没有弱标签」会误导人去怀疑动作表

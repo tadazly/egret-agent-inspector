@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.27";
+    var VERSION = "1.7.28";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -377,6 +377,19 @@
         }
     }
 
+    // 页面上盖在画布上的网页浮层（测试服的调试菜单挂在右上角，正好压着活动图标）：
+    // 截图做 OCR 会把浮层上的字认进去（「按 H 显示/隐藏」「常用指令」拼进按钮名），这些行不送 OCR
+    function domCoveredAt(sr) {
+        try {
+            var canvas = getCanvas();
+            if (!sr || !canvas || !document.elementFromPoint) return false;
+            var el = document.elementFromPoint(sr.x + sr.width / 2, sr.y + sr.height / 2);
+            return !!el && el !== canvas && !el.contains(canvas);
+        } catch (e) {
+            return false;
+        }
+    }
+
     function screenRect(sr) {
         if (!sr) return null;
         var a = stageToClient(sr.x, sr.y);
@@ -480,12 +493,19 @@
         return found;
     }
 
-    function makeMatcher(value, mode) {
+    // squash：按文字找时不计空格。游戏会在两个字的技能名中间加空格（「火 花」），OCR 也会拆成「回 血」
+    function makeMatcher(value, mode, squash) {
         if (value === undefined || value === null || value === "") return null;
         if (mode === "regex") {
             var re = new RegExp(value, "i");
             return function (s) {
                 return s != null && re.test(String(s));
+            };
+        }
+        if (squash) {
+            var inner = makeMatcher(String(value).replace(/\s+/g, ""), mode);
+            return inner && function (s) {
+                return s != null && inner(String(s).replace(/\s+/g, ""));
             };
         }
         var v = String(value);
@@ -510,7 +530,7 @@
         var mId = makeMatcher(p.id, mode);
         var mName = makeMatcher(p.name, mode);
         var mClass = makeMatcher(p.className, mode);
-        var mText = makeMatcher(p.text, mode);
+        var mText = makeMatcher(p.text, mode, true);
         var mSource = makeMatcher(p.source, mode);
         var mQa = makeMatcher(p.qaName, mode);
         var visibleOnly = p.visibleOnly !== false;
@@ -657,12 +677,18 @@
         return out;
     }
 
+    function isContainerLike(o) {
+        return !!o && typeof o.addChild === "function";
+    }
+
     // 当前界面结构：跳过只起包裹作用的根容器，按渲染顺序找出最上层那个“占地够大、有内容”的面板，
     // 它的兄弟节点就是当前的面板/弹窗栈。只看舞台的直接子节点会停在空的层上。
     function sceneInfo() {
         var stage = requireStage();
         var area = stage.stageWidth * stage.stageHeight;
-        var kids = visibleChildren(stage);
+        // 舞台上常挂着游戏临时加的空容器（0×0、没有子节点）：算进来就认不出唯一的根层，
+        // 主城顶层成了整个 RootLayer、被当成模态面板，默认只给 30 行，底栏背包、商店整排掉出表
+        var kids = visibleChildren(stage).filter(function (c) { return numChildren(c) || !isContainerLike(c); });
         var root = kids.length === 1 && numChildren(kids[0]) ? kids[0] : stage;
         var layers = visibleChildren(root);
         var top = null, best = null, serial = 0;
@@ -909,6 +935,31 @@
     function maskPointOutside(panel) {
         var candidate = backdropPointOutside(panel);
         return candidate && candidate.actionable ? candidate : null;
+    }
+
+    // 点任意处关闭的全屏页：点击监听挂在铺满面板的底子上（捕捉失败页挂在 bg.parent），
+    // 找一个点，命中后往上第一个挂监听的就是这块底子，而不是页面里的「再战一次」这类按钮
+    function tapAnywhereOf(panel) {
+        var stage = getStage(), r = panel && stageRect(panel);
+        if (!stage || !r) return null;
+        var area = stage.stageWidth * stage.stageHeight;
+        var x0 = Math.max(r.x, 0), y0 = Math.max(r.y, 0);
+        var x1 = Math.min(r.x + r.width, stage.stageWidth), y1 = Math.min(r.y + r.height, stage.stageHeight);
+        if ((x1 - x0) * (y1 - y0) < area * 0.6) return null;
+        var fx = [0.5, 0.12, 0.88, 0.3, 0.7], fy = [0.94, 0.06, 0.5, 0.25, 0.75];
+        for (var i = 0; i < fy.length; i++) {
+            for (var j = 0; j < fx.length; j++) {
+                var pt = { x: round(x0 + (x1 - x0) * fx[j]), y: round(y0 + (y1 - y0) * fy[i]) };
+                var h = hitTest(pt.x, pt.y);
+                if (!h || !isSelfOrAncestor(panel, h)) continue;
+                var q = h;
+                while (q && q !== panel && !interactionListenersOf(q).length) q = q.parent;
+                if (!q || !interactionListenersOf(q).length) continue;
+                var qr = stageRect(q);
+                if (qr && qr.width * qr.height >= area * 0.5) return { o: q, point: pt };
+            }
+        }
+        return null;
     }
 
     function backdropDismissTargetOf(panel) {
@@ -1597,23 +1648,128 @@
     var SPLAN_ID_LABELS = [
         { id: /^autoOn$/, name: /^battle_autoBtn$/, host: /toolbar|battle/i, label: "自动战斗（别点）" },
         { id: /^btnClose$/, host: /pvestar/i, label: "收起三星条件" },
-        { id: /^btnOpen$/, host: /pvestar/i, label: "展开三星条件" }
+        { id: /^btnOpen$/, host: /pvestar/i, label: "展开三星条件" },
+        // 下面这些按钮的字都烘在图里，表上原来只有英文名（btn_petBag*、fightBtn*），OCR 又常认成乱码。
+        // 主城底栏（运行时按 name 生成）
+        { id: null, name: /^btn_friend$/, host: /ToolbarNew/, label: "好友" },
+        { id: null, name: /^btn_shop$/, host: /ToolbarNew/, label: "星际商店" },
+        { id: null, name: /^btn_book$/, host: /ToolbarNew/, label: "图鉴" },
+        { id: null, name: /^btn_task$/, host: /ToolbarNew/, label: "任务" },
+        { id: null, name: /^btn_petStrong$/, host: /ToolbarNew/, label: "精灵强化" },
+        { id: null, name: /^btn_eggExchange$/, host: /ToolbarNew/, label: "精灵融合" },
+        { id: null, name: /^btn_petBag$/, host: /ToolbarNew/, label: "精灵背包" },
+        { id: /^btn_qiuck$/, host: /ToolbarNew/, label: "快捷入口（更多功能）" },
+        { id: /^btn_mail$/, host: /ToolbarNew/, label: "邮件" },
+        { id: /^add_coin$/, host: /ToolbarNew/, label: "买赛尔豆" },
+        { id: /^add_diamond$/, host: /ToolbarNew/, label: "钻石充值" },
+        // 战斗工具栏：道具三个键只是展开道具行，点道具格才用掉
+        { id: /^bagBtn$/, name: /^battle_bagBtn$/, host: /toolbar|battle/i, label: "道具" },
+        { id: /^hpBtn$/, name: /^battle_hpBtn$/, host: /toolbar|battle/i, label: "回血药" },
+        { id: /^ppBtn$/, name: /^battle_ppBtn$/, host: /toolbar|battle/i, label: "回PP药" },
+        { id: /^catchBtn$/, name: /^battle_catchBtn$/, host: /toolbar|battle/i, label: "捕捉胶囊" },
+        { id: /^petBtn$/, name: /^battle_petBtn$/, host: /toolbar|battle/i, label: "换精灵" },
+        { id: /^skillBtn$/, name: /^battle_skillBtn$/, host: /toolbar|battle/i, label: "技能" },
+        { id: /^pauseButton$/, host: /shortcut|battle/i, label: "暂停" },
+        // 星际探索：关卡详情
+        { id: /^fightBtn$/, host: /pve/i, label: "挑战" },
+        { id: /^pve_startBattle$/, name: /^pve_startBattle$/, host: /pve/i, label: "挑战" },
+        { id: /^sweepBtn0$/, host: /pve/i, label: "扫荡1次（要三星）" },
+        { id: /^sweepBtn1$/, host: /pve/i, label: "扫荡10次（要三星）" },
+        { id: /^setTeamBtn$/, host: /pve/i, label: "出战阵容" },
+        { id: /^btnTrain$/, host: /pve/i, label: "训练模式" },
+        { id: /^btnReward$/, host: /pve/i, label: "星级奖励" },
+        { id: /^btn_go$/, host: /pve/i, label: "进入星系" },
+        { id: /^preBtn$/, host: /pve/i, label: "上一个星球" },
+        { id: /^nextBtn$/, host: /pve/i, label: "下一个星球" },
+        { id: /^rb_0$/, host: /pve/i, label: "普通关卡" },
+        { id: /^rb_1$/, host: /pve/i, label: "精英关卡" },
+        { id: /^rb_2$/, host: /pve/i, label: "探索关卡" },
+        { id: /^rb_3$/, host: /pve/i, label: "跃迁关卡" },
+        // 精灵经验舱
+        { id: /^_btInject$/, host: /expDevice/i, label: "注入经验（点一下注 10 点，按住连续注入：加 holdMs）" },
+        { id: /^imgFastLevelUp$/, host: /expDevice/i, label: "快速升级（展开等级档）" },
+        { id: /^grpLevelTab0$/, host: /expDevice/i, label: "快速升到20级" },
+        { id: /^grpLevelTab1$/, host: /expDevice/i, label: "快速升到40级" },
+        { id: /^grpLevelTab2$/, host: /expDevice/i, label: "快速升到60级" },
+        { id: /^grpLevelTab3$/, host: /expDevice/i, label: "快速升到80级" },
+        { id: /^grpLevelTab4$/, host: /expDevice/i, label: "快速升到100级" },
+        { id: /^_btPackage$/, host: /expDevice/i, label: "能量包换经验" },
+        { id: /^_btPlus$/, host: /expDevice/i, label: "钻石买经验" },
+        // 结算页：再战会扣电池
+        { id: /^(?:refight|reI)$/, host: /battleEnd|catch|lose/i, label: "再战一次（扣电池）" },
+        { id: /^lookI$/, host: /battleEnd|lose|win/i, label: "看攻略" },
+        // 签到（登录弹窗 WeekSignOld 和福利里的七日签到）、每日电池
+        { id: /^(?:_btnGet|img_get)$/, host: /weekSign/i, label: "签到领取" },
+        { id: /^_btnTomorrow$/, host: /weekSign/i, label: "今日已签到" },
+        { id: /^_getBtn_\d$/, host: /freeEnergy/i, label: "领取电池" }
     ];
 
     function splanFixedLabel(o) {
         if (!window.MFC) return null;
         var qa = qaNameOf(o);
         if (qa && SPLAN_QA_LABELS[qa]) return SPLAN_QA_LABELS[qa];
-        var id = bindId(o) || (qa ? String(qa).split("__").pop() : ""), nm = nameOf(o) || "";
+        var id = bindId(o) || (qa ? String(qa).split("__").pop() : ""), nm = nameOf(o) || "", pid;
         for (var k = 0; k < SPLAN_ID_LABELS.length; k++) {
             var rule = SPLAN_ID_LABELS[k];
-            if (!rule.id.test(id) && !(rule.name && rule.name.test(nm))) continue;
-            for (var c = o.parent, depth = 0; c && depth < 6; c = c.parent, depth++) {
+            // FairyGUI 的控件没有 skin part 绑定，名字就是属性名（星际探索的 btn_go、fightBtn）：id 规则也拿 name 比
+            var hit = rule.id && ((id && rule.id.test(id)) || (nm && rule.id.test(nm)));
+            // 下划线开头的部件名（每日电池的 _getBtn_0）通用 id 不认，规则本身写的是下划线名时单独查
+            if (!hit && rule.id && /^\^(?:\(\?:)?_/.test(rule.id.source)) {
+                if (pid === undefined) pid = privateBindKey(o) || "";
+                hit = !!pid && rule.id.test(pid);
+            }
+            if (!hit && !(rule.name && rule.name.test(nm))) continue;
+            for (var c = o.parent, depth = 0; c && depth < 12; c = c.parent, depth++) {
                 if (rule.host.test(className(c) + " " + (nameOf(c) || ""))) return rule.label;
             }
         }
+        // 福利的两个大类页签是图片字（new_benefit_tab_up_0/1），按页签值（EventSummaryUtils.TabType）认
+        for (var t = o, hops = 0; t && hops < 3; t = t.parent, hops++) {
+            if (/NewBenefitTab$/.test(className(t)) && SPLAN_BENEFIT_TABS[t.crtVal]) return SPLAN_BENEFIT_TABS[t.crtVal];
+        }
         var src = sourceOf(o);
         if (src && /new_seer_skipBtn/.test(src)) return "跳过动画";
+        return null;
+    }
+    var SPLAN_BENEFIT_TABS = { 6: "福利商城", 7: "每日福利" };
+
+    // 有子节点、子节点却全都隐藏的容器什么都不画，命中测试照样点得中：星际探索星球页底下压着一排旧的
+    // FairyGUI 列表项（只剩一个隐藏的内容层），表上成了两个「UIContainer」，验收里 agent 当成星球去点、卡住。
+    // 没有子节点的纯热区（透明 Group / Rect）不算，自己有绘图的 Sprite 也不算
+    function rendersNothing(o, depth) {
+        var n = numChildren(o);
+        if (!n || o.$graphics) return false;
+        for (var i = 0; i < n; i++) {
+            var c = childAt(o, i);
+            if (!c || c.visible === false) continue;
+            // 外面那层列表也一样：每一项都什么都不画
+            if ((depth || 0) < 3 && numChildren(c) && rendersNothing(c, (depth || 0) + 1)) continue;
+            return false;
+        }
+        return true;
+    }
+
+    // 图片按钮的「禁用」常见写法：关掉 touchEnabled 再盖一层去色滤镜（没有 enabled 属性可读）。
+    // 不标出来 agent 会去点还没到时段的领取键，点了没反应再截图看
+    function grayedOut(o) {
+        if (o.touchEnabled !== false) return false;
+        var fs = o.filters;
+        if (!fs || !fs.length) return false;
+        for (var i = 0; i < fs.length; i++) if (/ColorMatrixFilter/.test(className(fs[i]))) return true;
+        return false;
+    }
+
+    // 持有该对象的近处宿主上以单下划线开头的属性名；findBindKey 不收这类键（多是内部状态），只给固定标签对照用
+    function privateBindKey(o) {
+        for (var p = o.parent, depth = 0; p && depth < 4; p = p.parent, depth++) {
+            var keys = Object.keys(p);
+            for (var i = 0; i < keys.length; i++) {
+                if (!/^_[A-Za-z]/.test(keys[i])) continue;
+                try {
+                    if (p[keys[i]] === o) return keys[i];
+                } catch (e) {}
+            }
+        }
         return null;
     }
 
@@ -1771,7 +1927,10 @@
         // 底板、底座、选中态、空态这类装饰图也常开着 touchEnabled，名字一看就不是按钮
         if (DECOR_NAME.test(name)) return false;
         var stage = getStage(), a = areaOf(o);
-        return a >= 150 && (!stage || a <= stage.stageWidth * stage.stageHeight * 0.15);
+        // 列表项里的大图也是被委托的目标：星际探索转到正中的星球（258×234，占舞台 16%）点击挂在外面的滚轮上，
+        // 按 15% 卡掉后正中那颗星球整个不进表
+        var cap = isItemHost(o.parent) || isItemHost(o.parent && o.parent.parent) ? 0.3 : 0.15;
+        return a >= 150 && (!stage || a <= stage.stageWidth * stage.stageHeight * cap);
     }
 
     var DECOR_NAME = /(bg|base|empty|shadow|glow|light|effect|frame|line|mask|select|selected|deco|decor)\d*$/i;
@@ -1984,9 +2143,20 @@
         return null;
     }
 
-    // 命中 h 是否等价于点到了 target：目标自身、其子节点或其祖先（点击常由父容器接管）
+    // 命中 h 是否等价于点到了 target：目标自身、其子节点或其祖先（点击常由父容器接管）。
+    // 同一个列表项里的也算：页签上的字不接触摸，点下去落在同一页签的底图上，照样选中这个页签
     function reaches(target, h) {
-        return !!(target && h && (isSelfOrAncestor(target, h) || isSelfOrAncestor(h, target)));
+        if (!target || !h) return false;
+        if (isSelfOrAncestor(target, h) || isSelfOrAncestor(h, target)) return true;
+        var host = smallItemHostOf(target);
+        return !!host && isSelfOrAncestor(host, h);
+    }
+
+    function smallItemHostOf(o) {
+        var stage = getStage(), host = o && itemHostOf(o, stage);
+        if (!host || isStageObject(host)) return null;
+        var r = stageRect(host);
+        return r && r.width * r.height <= stage.stageWidth * stage.stageHeight * 0.2 ? host : null;
     }
 
     // 在目标包围盒内寻找一个真正能命中目标的点：中心被遮挡、或中心落在名字条等空白处时使用
@@ -2219,7 +2389,7 @@
     async function waitForUnlock(o, lock, cap, seenEntries) {
         var top = sceneInfo().top;
         var baseline = seenEntries ? outsideKeys(seenEntries, lock) : actionableOutside(lock);
-        return watchLock(o, lock, cap, baseline, top && hashOf(top));
+        return watchLock(o, lock, cap, baseline, top);
     }
 
     function knownLockable(o) {
@@ -2231,24 +2401,33 @@
         return false;
     }
 
+    // 回合前后还是不是同一个界面：战斗面板和它里面的 group_ui 会轮流被认成顶层（命中点落在哪层就认哪层），
+    // 只比 hash 会把每一回合都当成「界面换了」，repeat 连出一次就停，多步出招等 0.8 秒就放弃。
+    // 原来那层还在舞台上、和现在的顶层互为祖孙就算没换；结算页在别的图层，照样认得出换了
+    function sameScene(before, now) {
+        if (!before || !now) return false;
+        if (before === now) return true;
+        if (!before.stage || !now.stage) return false;
+        return isSelfOrAncestor(before, now) || isSelfOrAncestor(now, before);
+    }
+
     async function waitForTurn(o, cap, graceMs) {
         var lock = lockedAncestor(o);
-        var top = sceneInfo().top, topHash = top && hashOf(top);
+        var top = sceneInfo().top;
         for (var g0 = Date.now(); !lock && graceMs > 0 && Date.now() - g0 < graceMs && o.stage;) {
             await sleep(100);
             lock = lockedAncestor(o);
             // 最后一击直接结算：锁还没来，界面先换了
-            var then = sceneInfo().top;
-            if (!then || hashOf(then) !== topHash) return { waitedMs: Date.now() - g0, reason: "panel" };
+            if (!sameScene(top, sceneInfo().top)) return { waitedMs: Date.now() - g0, reason: "panel" };
         }
         if (!lock) return null;
         lockableSeen[hashOf(lock)] = true;
         noteLock(lock, false);
         // 锁住的那一块之外、此刻就能点的东西；之后多出来的（比如精灵倒下后的换宠栏）说明游戏在等你做别的决定
-        return watchLock(o, lock, cap, actionableOutside(lock), topHash);
+        return watchLock(o, lock, cap, actionableOutside(lock), top);
     }
 
-    async function watchLock(o, lock, cap, baseline, topHash) {
+    async function watchLock(o, lock, cap, baseline, top) {
         var start = Date.now(), polls = 0, reason = "timeout", added = null;
         // 出招名、伤害数字这类横幅一闪就没；等你做决定的东西（换宠栏）会一直摆着。持续 1s 都在才算；
         // 平时隔 400ms 看一次，冒出候选后每 200ms 盯一次，换宠倒计时只有十来秒，发现得越早越好
@@ -2263,8 +2442,7 @@
                 noteLock(lock, true);
                 break;
             }
-            var now = sceneInfo().top;
-            if (!now || hashOf(now) !== topHash) { reason = "panel"; break; }
+            if (!sameScene(top, sceneInfo().top)) { reason = "panel"; break; }
             if (pending || polls % 2 === 0) {
                 var info = {}, seen = {}, sigs = {}, at = Date.now();
                 added = rowDiff(baseline, actionableOutside(lock, info)).added.filter(function (h) {
@@ -2435,7 +2613,7 @@
         // 弹窗正文、健康游戏忠告这类文字常常也挂着监听，标成 button 会诱导 agent 去点它。
         // 只看界面上真实的文案：qaName/资源名这类弱标签再长也不是正文。
         var realText = from === "text" || from === "childText";
-        if (TEXT_CLASS.test(className(o)) || (realText && label.length >= 12)) return "text";
+        if (TEXT_CLASS.test(className(o)) || (realText && label.length >= 12 && !splanFixedLabel(o))) return "text";
         return "button";
     }
 
@@ -2593,6 +2771,7 @@
             return null;
         }
         vp.scrollV = round(maxScroll() * index / Math.max(total - 1, 1));
+        syncTouchScroll(scroller, true, vp.scrollV);
         for (var pass = 0; pass < 5; pass++) {
             if (typeof vp.validateNow === "function") vp.validateNow();
             await sleep(60);
@@ -2652,6 +2831,207 @@
     // 列表项（技能条、关卡行、奖励格）里的零件——底图、图标、名字、次数、星星——各挂一个监听，
     // 一个技能就拆成五六行，agent 得自己拼出哪几行是同一个技能。按「最近的列表项祖先」把零件并成一行，
     // 标签是零件上的文字拼起来。带独立文案的按钮（领取、购买、详情）不并，免得把真正要点的动作藏起来。
+    // 在舞台外、但挂在能滚的容器里的目标（主城地图宽 1654，经验舱、星际探索、商店在屏外）：
+    // 算出把它滚进屏幕要设的 scrollH / scrollV。点它时 act 直接替你滚过去，等价于玩家拖地图
+    function scrollRevealOf(o, r) {
+        var stage = getStage();
+        r = r || stageRect(o);
+        if (!stage || !r) return null;
+        var cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+        var needH = cx < 0 || cx > stage.stageWidth, needV = cy < 0 || cy > stage.stageHeight;
+        if (!needH && !needV) return null;
+        for (var q = o.parent, hops = 0; q && !isStageObject(q) && hops < 12; q = q.parent, hops++) {
+            var vp = q.viewport;
+            if (!vp || !q.parent) continue;
+            var box = layoutRect(q);
+            if (!box) continue;
+            var sx = box.width / Math.max(q.width, 1), sy = box.height / Math.max(q.height, 1);
+            var out = { scroller: q, viewport: vp };
+            if (needH) {
+                var maxH = Math.max((vp.contentWidth || 0) - q.width, 0);
+                var h = Math.min(Math.max(vp.scrollH + (cx - stage.stageWidth / 2) / (sx || 1), 0), maxH);
+                var nx = cx - (h - vp.scrollH) * sx;
+                if (nx < 8 || nx > stage.stageWidth - 8) continue;
+                out.scrollH = round(h);
+                out.dir = cx < 0 ? "←" : "→";
+            }
+            if (needV) {
+                var maxV = Math.max((vp.contentHeight || 0) - q.height, 0);
+                var v = Math.min(Math.max(vp.scrollV + (cy - stage.stageHeight / 2) / (sy || 1), 0), maxV);
+                var ny = cy - (v - vp.scrollV) * sy;
+                if (ny < 8 || ny > stage.stageHeight - 8) continue;
+                out.scrollV = round(v);
+                out.dir = (out.dir || "") + (cy < 0 ? "↑" : "↓");
+            }
+            return out;
+        }
+        return null;
+    }
+
+    function hasScrollAncestor(o) {
+        for (var q = o && o.parent, hops = 0; q && hops < 12; q = q.parent, hops++) {
+            if (q.viewport) return true;
+        }
+        return false;
+    }
+
+    async function applyReveal(rv) {
+        if (rv.scrollH !== undefined) {
+            rv.viewport.scrollH = rv.scrollH;
+            syncTouchScroll(rv.scroller, false, rv.scrollH);
+        }
+        if (rv.scrollV !== undefined) {
+            rv.viewport.scrollV = rv.scrollV;
+            syncTouchScroll(rv.scroller, true, rv.scrollV);
+        }
+        if (typeof rv.viewport.validateNow === "function") rv.viewport.validateNow();
+        await sleep(150);
+    }
+
+    function clearHotspot(h) {
+        if (!/(^|\.)Rect$/.test(className(h))) return false;
+        if (!(h.fillAlpha === 0 || visualAlpha(h) < 3)) return false;
+        var nm = bindId(h) || nameOf(h);
+        return !!nm && !/^(instance)?\d*$/.test(nm);
+    }
+
+    // 滚轮式列表（星际探索的星球、关卡）：只有正中那一行是原尺寸、能点，其余按离中心远近缩小、变淡，
+    // 远的整个透明。点不在正中的行游戏什么都不做，验收里 agent 点了没反应只能自己去滚
+    function isWheel(scroller) {
+        var vp = scroller && scroller.viewport;
+        if (!vp || !numChildren(vp)) return false;
+        var scales = [];
+        for (var i = 0; i < numChildren(vp); i++) {
+            var c = childAt(vp, i);
+            // 星球转盘的每一格只设了宽（height 0），不能要求宽高都有
+            if (c && c.visible && (c.width > 0 || c.height > 0)) scales.push(c.scaleX);
+        }
+        if (scales.length < 3) return false;
+        return Math.max.apply(null, scales) >= 0.99 && Math.min.apply(null, scales) <= 0.9;
+    }
+
+    function wheelRowOf(o) {
+        for (var q = o, hops = 0; q && q.parent && hops < 6; q = q.parent, hops++) {
+            var sc = q.parent.parent;
+            if (sc && sc.viewport === q.parent && isWheel(sc)) return { row: q, scroller: sc, viewport: q.parent };
+        }
+        return null;
+    }
+
+    // 把滚轮的某一行滚到正中：直接改 scrollV / scrollH（与玩家拖动等价），按它偏离中心多少修正几轮。
+    // 「正中」按当前原尺寸那一行量，不按滚动框中心（星际探索的关卡轮盘正中行在框中心上面 20px）；
+    // 滚轮自己有停靠步长（LocaterScroller 的 DIS）时落到步长整数倍，和手指松开后停的位置一致
+    async function centerWheelRow(w) {
+        var sc = w.scroller, vp = w.viewport;
+        var box = layoutRect(sc);
+        if (!box) return false;
+        var vertical = (vp.contentHeight || 0) - sc.height > (vp.contentWidth || 0) - sc.width;
+        var scale = vertical ? box.height / Math.max(sc.height, 1) : box.width / Math.max(sc.width, 1);
+        var ts = sc.$Scroller && sc.$Scroller[vertical ? 9 : 8];
+        var step = ts && +ts.DIS > 0 ? +ts.DIS : 0;
+        for (var pass = 0; pass < 6 && w.row.scaleX < 0.99; pass++) {
+            var rr = layoutRect(w.row) || stageRect(w.row);
+            if (!rr) return false;
+            var ref = null;
+            for (var i = 0; i < numChildren(vp); i++) {
+                var c = childAt(vp, i);
+                if (c && c !== w.row && c.visible && (c.width > 0 || c.height > 0) && c.scaleX >= 0.99 &&
+                    (!ref || c.scaleX > ref.scaleX)) ref = c;
+            }
+            var rc = ref && (layoutRect(ref) || stageRect(ref)) || box;
+            var delta = vertical ? (rr.y + rr.height / 2 - (rc.y + rc.height / 2))
+                : (rr.x + rr.width / 2 - (rc.x + rc.width / 2));
+            if (Math.abs(delta) < 1) delta = delta < 0 ? -1 : 1;
+            var key = vertical ? "scrollV" : "scrollH";
+            var max = vertical ? Math.max((vp.contentHeight || 0) - sc.height, 0) : Math.max((vp.contentWidth || 0) - sc.width, 0);
+            var pos = vp[key] + delta / (scale || 1);
+            if (step) pos = Math.round(pos / step) * step;
+            if (round(Math.min(Math.max(pos, 0), max)) === vp[key]) {
+                if (step) break;
+                pos += delta < 0 ? -1 : 1;
+            }
+            vp[key] = round(Math.min(Math.max(pos, 0), max));
+            syncTouchScroll(sc, vertical, vp[key]);
+            if (typeof vp.validateNow === "function") vp.validateNow();
+            await sleep(80);
+        }
+        return w.row.scaleX >= 0.99;
+    }
+
+    // eui.Scroller 的拖动状态（$Scroller[8] 横、[9] 竖）自己记着滚到哪了：只改 viewport 不同步它，
+    // 手指一按下去滚轮就弹回旧位置，点的是另一颗星球（星际探索第一下只转不进）
+    function syncTouchScroll(sc, vertical, pos) {
+        try {
+            var ts = sc.$Scroller && sc.$Scroller[vertical ? 9 : 8];
+            if (ts && typeof ts.currentScrollPos === "number") ts.currentScrollPos = pos;
+        } catch (e) {}
+    }
+
+    // 列表项里按「亮几颗」显示的星（star0 / star1 / star2 只把拿到的设成可见）和锁：
+    // 关卡行只看得到名字，agent 挑「还没三星的关卡」只能一关关点进去看
+    // 只看列表项内部的 visible：远处的行整行透明（滚轮）也要读得出星
+    function shownWithin(o, host) {
+        for (var cur = o; cur && cur !== host; cur = cur.parent) if (!cur.visible) return false;
+        return true;
+    }
+
+    // Splan 星际探索的星球：名字烘在星球图里，渲染器上只有 planetID，按配置表 pvePlanet 查名字
+    var planetNames = null;
+    function splanItemName(host) {
+        if (!window.MFC || typeof host.planetID !== "number") return null;
+        try {
+            if (!planetNames) {
+                planetNames = {};
+                var t = window.xls && window.xls.pvePlanet, rows = t && t.getItems ? t.getItems() : [];
+                (rows || []).forEach(function (r) {
+                    if (r && r.planetID !== undefined && r.planet_name && !planetNames[r.planetID]) planetNames[r.planetID] = r.planet_name;
+                });
+            }
+            return planetNames[host.planetID] || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // Splan 战斗技能格上的克制角标（flagCom：strong / weak / invalid，普通克制不显示）
+    var RELATION_WORDS = { strong: "克制", weak: "微弱", invalid: "无效" };
+
+    function itemBadges(host) {
+        var stars = 0, lit = 0, locked = false, relation = null, passive = false;
+        walk(host, function (o) {
+            if (o === host) return;
+            var id = bindId(o) || nameOf(o) || "";
+            if (window.MFC && id === "flagCom" && shownWithin(o, host) && o.alpha > 0 && RELATION_WORDS[o.currentState]) {
+                relation = RELATION_WORDS[o.currentState];
+                return false;
+            }
+            if (window.MFC && id === "passiveflag" && shownWithin(o, host) && o.alpha > 0) passive = true;
+            if (/^(?:img_?)?star_?\d$/i.test(id)) {
+                stars++;
+                if (shownWithin(o, host) && o.alpha > 0) lit++;
+                return false;
+            }
+            if (/^(?:img_?)?lock(?:Image|Icon|Img)?_?\d?$/i.test(id) && shownWithin(o, host)) locked = true;
+        });
+        if (host.isLock === true || host.locked === true) locked = true;
+        var out = [];
+        // 星际探索的捕捉关没有星（星星全藏着），标成「★0/3」会被当成还没打过的普通关
+        var catchLevel = false;
+        var lv = window.MFC && /^PVE_ChooseLevelItem(\d+)$/.exec(nameOf(host) || "");
+        if (lv) {
+            try {
+                var info = window.xls && window.xls.pvePlanet && window.xls.pvePlanet.getItem(+lv[1]);
+                catchLevel = !!(info && +info.canCatch === 1);
+            } catch (e) {}
+        }
+        if (catchLevel) out.push("捕捉关（没有星）");
+        else if (stars >= 2 && stars <= 6) out.push("★" + lit + "/" + stars);
+        if (locked) out.push("未解锁");
+        if (relation) out.push(relation);
+        if (passive) out.push("被动（点了没用）");
+        return out.join(" ");
+    }
+
     var ITEM_CLASS = /item|renderer|cell|slot|card/i;
     var STANDALONE_ROLES = { button: 1, confirm: 1, close: 1, back: 1, tab: 1, input: 1 };
 
@@ -2742,13 +3122,51 @@
         entries.forEach(function (e) {
             if (e.role !== "text" && !captionLike(e) && e._w * e._h <= stageArea * 0.25) controls[e.hash] = e;
         });
+        // 列表项里的字只归这个列表项：外面那层列表是个控件，不能把几个页签的字都认成它自己的
         textNodes.forEach(function (t) {
             for (var q = t.o, hops = 0; q && hops < 10; q = q.parent, hops++) {
                 if (controls[hashOf(q)]) {
                     t.ownerHash = hashOf(q);
                     break;
                 }
+                if (q !== t.o && isItemHost(q)) {
+                    t.itemHost = smallItemHostOf(q) ? q : null;
+                    if (t.itemHost) break;
+                }
             }
+        });
+        // 列表项（页签、菜单项）只有一个动作、字是旁边不接触摸的 Label：整项的字都给这个动作。
+        // 福利的左侧页签原来标成 tab_bg，agent 只好截图、locate 去认哪个是「每日电池」
+        var hostTexts = {}, hostEntries = {};
+        textNodes.forEach(function (t) {
+            if (!t.itemHost || t.ownerHash !== undefined) return;
+            var s = String(t.text || "").trim();
+            if (!s || s.length > CAPTION_MAX) return;
+            (hostTexts[hashOf(t.itemHost)] = hostTexts[hashOf(t.itemHost)] || []).push(t);
+        });
+        entries.forEach(function (e) {
+            if (e.occluded || e.role === "text") return;
+            var host = smallItemHostOf(e._o);
+            if (host) (hostEntries[hashOf(host)] = hostEntries[hashOf(host)] || []).push(e);
+        });
+        var takenText = {};
+        Object.keys(hostTexts).forEach(function (hk) {
+            var list = hostEntries[hk] || [];
+            if (list.length !== 1) return;
+            var e = list[0];
+            if (e.from === "text" || e.from === "childText") return;
+            var ts = hostTexts[hk].slice().sort(function (a, b) {
+                return Math.abs(a.rect.y - b.rect.y) > 6 ? a.rect.y - b.rect.y : a.rect.x - b.rect.x;
+            });
+            var words = [];
+            ts.forEach(function (t) {
+                var w = String(t.text).trim();
+                if (words.indexOf(w) < 0) words.push(w);
+                takenText[textNodes.indexOf(t)] = true;
+            });
+            e.alt = e.alt || e.label;
+            e.label = tidy(words.join(" "), 32);
+            e.from = "nearText";
         });
         // 专门做点击用的热区（pve_rect、hitArea）和压在它上面的动画体、图片抢同一个名字时，名字归热区：
         // 验收里「星际探索」被飞船的 Spine 本体 pve 借走，agent 点了没反应，真正响应的是 pve_rect
@@ -2803,14 +3221,15 @@
         entries.forEach(function (e, ei) {
             // 被挡住的行默认不出现在表里：让它借走标题，标题就跟着一起消失了（飞船的 Spine 本体和它的热区抢「星际探索」）。
             // 只有类名、没有实例名的对象多是地图上走动的角色（跟随精灵 Pet、Nono），走到哪个建筑旁边就会抢走它的名字
-            if (e.from === "text" || e.from === "childText" || e.from === "className" || e.occluded) return;
+            if (e.from === "text" || e.from === "childText" || e.from === "nearText" || e.from === "className" || e.occluded) return;
             if (coveredByHotspot(e)) return;
             var area = e._w * e._h;
             if (!area || area > stageArea * 0.25) return;
             var bottom = e._y + e._h, centerX = e._x + e._w / 2;
             textNodes.forEach(function (t, ti) {
                 var s = String(t.text || "").trim();
-                if (!s || s.length > CAPTION_MAX || COUNTER_LABEL.test(s) || owned[s]) return;
+                if (!s || s.length > CAPTION_MAX || COUNTER_LABEL.test(s) || owned[s] || takenText[ti]) return;
+                if (t.itemHost && smallItemHostOf(e._o) !== t.itemHost) return;
                 if (t.ownerHash !== undefined && t.ownerHash !== e.hash) return;
                 var tl = layerOf(t.o), el = layerOf(e._o);
                 if (tl >= 0 && el >= 0 && tl < el) return;
@@ -2895,6 +3314,7 @@
         var ranked = entries.map(function (e, at) {
             var rank = TRUNCATE_RANK[e.role] !== undefined ? TRUNCATE_RANK[e.role] : 2;
             if (tinyIcon(e)) rank = 5;
+            if (e.offscreen) rank += 1;
             return { at: at, rank: rank + (e.occluded ? 10 : 0) };
         });
         ranked.sort(function (a, b) { return a.rank - b.rank || a.at - b.at; });
@@ -3000,20 +3420,34 @@
         // 不能让还没扫到的弹窗按钮整个消失（limit=10 时「确定」按钮曾经就这样丢掉）。
         // 整个舞台当根时（主城 HUD + 地图）控件多得多，HUD 在最上层会先把名额用光，地图入口就轮不到了
         var discoverCap = Math.max(limit * 3, root === stage ? 300 : 120);
-        var seen = {}, owners = [], order = 0;
+        var seen = {}, owners = [], order = 0, offBudget = 40;
         walk(root, function (o) {
             if (o === root) return;
             if (!o.visible || o.alpha === 0) return false;
             if (owners.length >= discoverCap) return false;
+            // 滚轮列表的每一行都进表（远处的行透明、缩小，照常会被当成看不见）：点哪行 act 都会先把它滚到正中
+            if (o.viewport && isWheel(o)) {
+                for (var wi = 0; wi < numChildren(o.viewport); wi++) {
+                    var wr = childAt(o.viewport, wi);
+                    if (!wr || !wr.visible || !(wr.width > 0) || !(wr.height > 0)) continue;
+                    var wk = String(hashOf(wr));
+                    if (seen[wk]) continue;
+                    seen[wk] = true;
+                    owners.push({ o: wr, order: order++, wheel: true });
+                }
+            }
             var r = stageRect(o);
             if (!r || r.width < 6 || r.height < 6) return;
-            if (r.x + r.width <= 0 || r.y + r.height <= 0 || r.x >= stage.stageWidth || r.y >= stage.stageHeight) return;
+            // 整个在舞台外的一般不要；挂在能滚的容器里的（地图另一头的装置）留一些名额，滚一下就点得到
+            var off = r.x + r.width <= 0 || r.y + r.height <= 0 || r.x >= stage.stageWidth || r.y >= stage.stageHeight;
+            if (off && (scoped || offBudget <= 0 || !hasScrollAncestor(o))) return;
             // semanticActionOwner 只在有真实点击监听或命名像控件时返回宿主，天然滤掉装饰节点
             var owner = semanticActionOwner(o, root);
             if (!owner || owner === root) return;
             var key = String(hashOf(owner));
             if (seen[key]) return;
             seen[key] = true;
+            if (off) offBudget--;
             owners.push({ o: owner, order: order++ });
         }, true);
 
@@ -3060,9 +3494,13 @@
             if (!r || r.width < 4 || r.height < 4) return;
             // Egret 命中测试不看透明度：淡出到几乎透明的横幅照样点得中、进得了表，玩家却看不见（验收里 agent 去点屏幕上没有的「激励·铁碎阵」）
             var seenAlpha = visualAlpha(o);
-            if (seenAlpha >= 0 && seenAlpha < 10) {
+            if (!item.wheel && seenAlpha >= 0 && seenAlpha < 10) {
                 offstage++;
                 faded++;
+                return;
+            }
+            if (!item.wheel && rendersNothing(o)) {
+                offstage++;
                 return;
             }
             var label = actionLabelOf(o);
@@ -3074,12 +3512,15 @@
                 size: [round(r.width), round(r.height)],
                 _y: r.y, _x: r.x, _w: r.width, _h: r.height, _o: o
             };
-            if (o.enabled === false) entry.off = true;
+            if (o.enabled === false || grayedOut(o)) entry.off = true;
             if (o.selected === true) entry.on = true;
             var drag = dragTargetOf(o);
             if (drag) entry.drag = drag.dir;
             if (o.currentState && o.currentState !== "up" && o.currentState !== "normal") entry.st = o.currentState;
-            if (p.rects) entry.screenRect = screenRect(r);
+            if (p.rects) {
+                entry.screenRect = screenRect(r);
+                if (domCoveredAt(entry.screenRect)) entry.domCovered = true;
+            }
             var point = { x: round(r.x + r.width / 2), y: round(r.y + r.height / 2) };
             var hit = hitTest(point.x, point.y);
             if (!reaches(o, hit)) {
@@ -3089,6 +3530,15 @@
                     entry.occluded = true;
                     entry.blocker = hit ? shortClass(hit) + "#" + hashOf(hit) : null;
                 }
+            } else if (hit && hit !== o && isSelfOrAncestor(o, hit) && clearHotspot(hit)) {
+                // 面板上盖着一块透明的命名热区（签到面板的 _btnGet 铺满整块，点哪都是签到）：
+                // 点这一行实际落在它上面，用它的名字，别让 agent 去点被它盖住的日期格
+                var hl = actionLabelOf(hit);
+                if (hl.label && hl.from !== "className" && hl.from !== "source") {
+                    entry.alt = entry.label;
+                    entry.label = hl.label;
+                    entry.from = hl.from;
+                }
             }
             // 红点角标：小块的指示图直接丢掉，不占编号
             if (r.width < 32 && r.height < 32 &&
@@ -3097,9 +3547,21 @@
                 return;
             }
             // 点在舞台外的条目点不到（地图容器伸出舞台的边缘格子），只会让 agent 白点一轮
-            if (point.x < 0 || point.y < 0 || point.x > stage.stageWidth || point.y > stage.stageHeight) {
-                offstage++;
-                return;
+            if (!item.wheel && (point.x < 0 || point.y < 0 || point.x > stage.stageWidth || point.y > stage.stageHeight)) {
+                // 地图、长列表里滚一下就能看到的留着（只留有中文名的，见下面 borrowCaptions 之后），点它时 act 先滚过去
+                var reveal = !scoped && entry.role !== "text" && scrollRevealOf(o, r);
+                if (!reveal) {
+                    offstage++;
+                    return;
+                }
+                entry.offscreen = reveal.dir;
+                delete entry.occluded;
+                delete entry.blocker;
+            }
+            if (item.wheel) {
+                entry.wheel = true;
+                delete entry.occluded;
+                delete entry.blocker;
             }
             // 没有自己的点击监听的纯文字节点是正文，不是按钮：并进 text，别占动作编号
             if (entry.role === "text" && !interactionListenersOf(o).length) {
@@ -3113,6 +3575,12 @@
             textOnly.forEach(function (t) { if (out.text.indexOf(t) < 0) out.text.push(t); });
         }
         entries = borrowCaptions(entries, textNodes, stage);
+        entries = entries.filter(function (e) {
+            if (!e.offscreen) return true;
+            if (e.from === "text" || e.from === "childText" || e.from === "nearText") return true;
+            offstage++;
+            return false;
+        });
         rememberLocks(entries);
         // 祖先-后代去重：容器和它装的按钮不该各占一行，同名的父子只留一行
         var indexed = {}, descendants = {};
@@ -3161,6 +3629,35 @@
         });
         entries = entries.filter(function (e) { return !dropped[e.hash]; });
         entries = mergeItemParts(entries, stage);
+        var perHost = {};
+        entries.forEach(function (e) {
+            var h = itemHostOf(e._o, stage);
+            if (h) perHost[hashOf(h)] = (perHost[hashOf(h)] || 0) + 1;
+        });
+        entries.forEach(function (e) {
+            var host = itemHostOf(e._o, stage);
+            // 列表项里唯一的那一行（星球图 planetImg、页签底图）也算整项，不只是 role=item 的
+            if (!host || (host !== e._o && e.role !== "item" && perHost[hashOf(host)] !== 1)) return;
+            var hr = stageRect(host);
+            if (!hr || hr.width * hr.height > stage.stageWidth * stage.stageHeight * 0.3) return;
+            var planet = splanItemName(host);
+            if (planet && e.label.indexOf(planet) < 0) {
+                e.alt = e.alt || e.label;
+                e.label = planet;
+                e.from = "nearText";
+            }
+            // 格子上只有等级和编号（经验舱「LV.1 3 1793178032」）：名字在列表数据里，补到前面
+            var nameField = host.data && typeof host.data === "object" &&
+                ["nick", "name", "petName", "title"].filter(function (k) {
+                    try { return typeof host.data[k] === "string" && host.data[k].trim(); } catch (err) { return false; }
+                })[0];
+            if (nameField) {
+                var nm = String(host.data[nameField]).trim();
+                if (e.label.replace(/\s+/g, "").indexOf(nm.replace(/\s+/g, "")) < 0) e.label = tidy(nm + " " + e.label, 40);
+            }
+            var badges = itemBadges(host);
+            if (badges) e.label = tidy(e.label + " " + badges, 40);
+        });
         // 两个「返回」时 agent 会挑错：经验舱里 grp_back_landscape 才是返回，btn_return 是「经验返还」。
         // 表里已有明确叫 back / 返回 的，只凭 return 认出来的那些降成普通按钮
         var strongBack = function (e) { return STRONG_BACK_RE.test(ownIds(e._o) + " " + e.label); };
@@ -3226,6 +3723,7 @@
             if (e.st) row.st = e.st;
             if (e.occluded) row.occluded = true;
             if (e.drag) row.drag = e.drag;
+            if (e.offscreen) row.offscreen = e.offscreen;
             if (e.from !== "text" && e.from !== "childText" && e.from !== "nearText") row.weak = true;
             if (e.alt) row.alt = e.alt;
             // rects 是 server 做 OCR 时要的：它也得拿到 hash 和 from 才能把识别结果写回来
@@ -3233,6 +3731,7 @@
                 row.hash = e.hash;
                 row.from = e.from;
                 if (e.screenRect) row.screenRect = e.screenRect;
+                if (e.domCovered) row.domCovered = true;
             }
             if (detail) {
                 row.point = e.point;
@@ -3357,6 +3856,15 @@
             return { o: o, entry: entry };
         }
         var target;
+        // 只按文字找：先找动作表里标签对得上的那一行（能点的控件），再按界面文字查。
+        // 战斗里 {"text":"火花"} 原来点中的是飘出来的招式名，不是技能按钮
+        var textOnly = step.text && !["hash", "id", "name", "className", "source", "qaName"].some(function (k) {
+            return step[k] !== undefined && step[k] !== null && step[k] !== "";
+        });
+        if (textOnly && step.match !== "regex") {
+            var row = tableRowByLabel(String(step.text), +step.index || 0, step.match === "exact");
+            if (row) return row;
+        }
         try {
             target = resolveTarget(step);
         } catch (err) {
@@ -3372,11 +3880,16 @@
         return { o: target, entry: null };
     }
 
-    function tableRowByLabel(text, index) {
-        var want = text.replace(/\*$/, "").trim();
-        var rows = (buildActionTable({ peek: true, limit: 60 })._entries || []).filter(function (e) {
-            return !e.occluded && (e.label === want || e.alt === want);
+    function tableRowByLabel(text, index, exact) {
+        var squash = function (v) { return String(v || "").replace(/\*$/, "").replace(/\s+/g, ""); };
+        var want = squash(text);
+        if (!want) return null;
+        var all = (buildActionTable({ peek: true, limit: 60 })._entries || []).filter(function (e) {
+            return !e.occluded && e.role !== "text";
         });
+        var rows = all.filter(function (e) { return squash(e.label) === want || squash(e.alt) === want; });
+        // 标签里多带了别的字（页签「每日电池 免费送」、技能「火 花 次数: 25/25 威力: 40」）也算，但只在没有完全一样的时候
+        if (!rows.length && !exact) rows = all.filter(function (e) { return squash(e.label).indexOf(want) === 0; });
         var e = rows[index];
         var o = e && byHash(e.hash);
         return o ? { o: o, entry: null } : null;
@@ -3814,6 +4327,8 @@
             var executed = [], stopped = "done";
             // 每步出招时的顶层面板：收尾时拿来复核「解锁了」其实是不是已经结算换了界面
             var turnTops = [];
+            // 编号 → 第一次点它时的稳定选择器：[{"i":27,"repeat":10},{"i":27,…}] 后面那步的对象可能已经重建
+            var selByI = {};
             // 最后一步点的是不是引导目标：是的话收尾时等下一处引导挂出来
             var lastGuideTap = false;
             for (var n = 0; n < steps.length; n++) {
@@ -3840,6 +4355,17 @@
                             try {
                                 resolved = resolveFastTarget(findQuery, fresh, seenEntries);
                             } catch (err) {
+                                // 同一个编号前面已经点过、这一步它被重建了（战斗每回合重建技能格）：按上次点它时的稳定选择器再找
+                                var prevSel = step.i !== undefined && step.i !== null && selByI[step.i];
+                                if (prevSel && /已不在显示列表里/.test(String(err && err.message))) {
+                                    try {
+                                        var again = resolveTarget(prevSel);
+                                        if (again) {
+                                            resolved = { o: again, entry: null };
+                                            break;
+                                        }
+                                    } catch (e2) {}
+                                }
                                 // 多步里后面的目标常常还没出来：点完「挑战」要先进战斗、技能栏滑进来才点得到。
                                 // 验收里照发的路线就这样一进战斗就报「找不到」。后面的步骤等它最多 3 秒再判
                                 if (n === 0 || !/没有找到匹配的显示对象/.test(String(err && err.message)) ||
@@ -3856,6 +4382,7 @@
                         }
                         var sel = stableSelector(o);
                         if (sel) record.target.sel = sel;
+                        if (sel && step.i !== undefined && step.i !== null && !selByI[step.i]) selByI[step.i] = sel;
                         if (op === "text") {
                             // 往标签、按钮文字上写字只会把界面改花，还让人以为输入成功了
                             if (!inputLike(o) && !(o.textDisplay && inputLike(o.textDisplay)) && !step.force) {
@@ -3883,6 +4410,18 @@
                                     throw new Error("目标所在的一组控件一直锁着（等了 " +
                                         (record.unlock.waitedMs / 1000).toFixed(1) + "s，" + record.unlock.reason + "），没有点");
                                 }
+                            }
+                            // 滚轮列表只有正中那一行能点：先把它滚到正中再点，省得 agent 看「点了没反应」再自己去滚
+                            var wheel = op === "tap" && wheelRowOf(o);
+                            if (wheel && wheel.row.scaleX < 0.99) {
+                                record.centered = await centerWheelRow(wheel);
+                                await sleep(120);
+                            }
+                            // 在屏外（地图另一头的装置、长列表下面的行）：先把它滚进屏幕再点
+                            var reveal = op === "tap" && scrollRevealOf(o);
+                            if (reveal) {
+                                await applyReveal(reveal);
+                                record.revealed = reveal.dir;
                             }
                             var r = stageRect(o);
                             if (!r) throw new Error("目标没有有效包围盒，可能已被移出舞台");
@@ -3982,7 +4521,16 @@
                             record.drag = "to";
                             record.to = { label: rec.dropLabel || "引导终点" };
                         } else {
-                            await performGesture([rec.stagePoint], method, 50, null);
+                            // 引导让点的是换宠卡这类要拖出去才生效的控件：原地点一下引导不动，照它的方向滑出去
+                            var recObj = null;
+                            try { recObj = rec.target && rec.target.hash !== undefined ? byHash(rec.target.hash) : null; } catch (e) {}
+                            var recDrag = recObj && dragTargetOf(recObj);
+                            if (recDrag) {
+                                await performGesture(dragPath(rec.stagePoint, recDrag.owner, recDrag.dir), method, 300, recObj);
+                                record.drag = recDrag.dir;
+                            } else {
+                                await performGesture([rec.stagePoint], method, 50, null);
+                            }
                         }
                         record.target = { reason: rec.reason, stagePoint: rec.stagePoint,
                             label: rec.label || rec.target && (rec.target.text || rec.target.qaName || rec.target.id || rec.target.className) };
@@ -4045,8 +4593,8 @@
                         if (turnCap > 0) {
                             turnCap = Math.max(Math.min(turnCap, 60000, deadline - Date.now()), 500);
                             var grace = knownLockable(tapTarget) || +step.repeat > 1 ? 1500 : 0;
-                            var topAtTap = sceneInfo().top, topAtTapHash = topAtTap && hashOf(topAtTap);
-                            turnTops[executed.length] = topAtTapHash;
+                            var topAtTap = sceneInfo().top;
+                            turnTops[executed.length] = topAtTap;
                             var turn = await waitForTurn(tapTarget, turnCap, grace);
                             if (turn) record.turn = turn;
                             // 连出同一招：回合倒计时只有几秒，模型每回合决策一次根本赶不上。
@@ -4076,7 +4624,7 @@
                             // 顶层换了就照实说界面换了，别让 agent 以为还能接着出招
                             if (record.turn && (record.turn.reason === "unlocked" || record.turn.reason === "blocked")) {
                                 var topNow = sceneInfo().top;
-                                if (!tapTarget.stage || !topNow || hashOf(topNow) !== topAtTapHash) record.turn.reason = "panel";
+                                if (!tapTarget.stage || !sameScene(topAtTap, topNow)) record.turn.reason = "panel";
                             }
                         }
                     }
@@ -4125,8 +4673,7 @@
             executed.forEach(function (rec, k) {
                 if (!rec.turn || turnTops[k] === undefined) return;
                 if (rec.turn.reason !== "unlocked" && rec.turn.reason !== "blocked") return;
-                var topEnd = sceneInfo().top;
-                if (!topEnd || hashOf(topEnd) !== turnTops[k]) rec.turn.reason = "panel";
+                if (!sameScene(turnTops[k], sceneInfo().top)) rec.turn.reason = "panel";
             });
             table.executed = executed;
             table.stopped = stopped;
@@ -4422,6 +4969,17 @@
                 if (mp && (await attempt("mask", null, { x: mp.x, y: mp.y }) ||
                         (sceneInfo().top === panel && await attempt("mask", null, { x: mp.x, y: mp.y })))) {
                     return { ok: true, via: "mask", panel: name, tried: tried };
+                }
+                // 「轻触屏幕关闭」的全屏结算页（捕捉成功 / 失败、战斗胜利）：没有关闭键，外面也没有遮罩，
+                // 点铺满面板的那块底子才关。分阶段的第一下只跳过动画，面板还在就隔一会儿再点，最多三下
+                var anywhere = tapAnywhereOf(panel);
+                if (anywhere) {
+                    for (var tap = 0; tap < 3; tap++) {
+                        if (tap && sceneInfo().top !== panel) break;
+                        if (await attempt("anywhere", anywhere.o, anywhere.point)) {
+                            return { ok: true, via: "anywhere", panel: name, tried: tried };
+                        }
+                    }
                 }
                 if (tried.length) break;
             }
