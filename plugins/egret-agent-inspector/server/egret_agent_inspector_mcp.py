@@ -545,6 +545,8 @@ TOOLS = {
     "egret_navigate": (
         "在浏览器中打开 URL（默认复用最近使用的标签页），并等待页面加载完成。",
         obj({"url": {"type": "string"}, "newTab": {"type": "boolean", "description": "在新标签页中打开"},
+             "newWindow": {"type": "boolean", "description": "在新窗口中打开（铺在当前窗口右半边）：多个 agent 并行各占一个窗口，"
+                           "同一窗口里不在前台的标签页游戏会停止渲染"},
              "timeoutMs": {"type": "integer", "description": "等待加载完成的超时，默认 30000"}}, ["url"]),
         "navigate", None),
     "egret_status": (
