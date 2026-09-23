@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.0";
+    var VERSION = "1.7.1";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -753,7 +753,8 @@
         var t = textOf(o);
         var score = 0;
         if (CLOSE_RE.test(tag)) score += 10;
-        else if (allowBack && BACK_RE.test(tag)) score += 7;
+        // 明确叫 back 的压过只叫 return 的：后者可能是「返还」
+        else if (allowBack && BACK_RE.test(tag)) score += STRONG_BACK_RE.test(ownIds(o)) ? 8 : 6;
         if (t && CLOSE_TEXTS.indexOf(String(t).trim()) >= 0) score += 8;
         else if (allowBack && t && BACK_TEXTS.indexOf(String(t).trim()) >= 0) score += 6;
         if (!score) return null;
@@ -1895,6 +1896,14 @@
 
     var BACK_ROLE_RE = /(?:^|[\s_.\-])(?:back|return)(?:$|[\s_.\-])|返回/i;
     var BACK_ROLE_CAMEL = /[a-z](?:Back|Return)(?:$|[A-Z_\s])/;
+    // 明确是「返回」的叫法；只有 return 的可能是「返还」（经验舱的 btn_return 打开的是经验返还）
+    var STRONG_BACK_RE = /(?:^|[\s_.\-])back(?:$|[\s_.\-])|[a-z]Back(?:$|[A-Z_\s])|返回/;
+
+    // 控件自己的名字：qaName 的前半截是宿主类名，ExpDeviceReturnSupply__imgFill 不能因为宿主叫 Return 就成了返回键
+    function ownIds(o) {
+        var qa = qaNameOf(o);
+        return (nameOf(o) || "") + " " + (bindId(o) || "") + " " + (qa ? String(qa).split("__").pop() : "");
+    }
 
     // egret.TextField 是所有文字的基类，标题、关卡名也是它：只有 type=input 或输入类组件才算输入框
     function inputLike(o) {
@@ -1911,7 +1920,10 @@
         ["confirm", /confirm|btn_yes|btn_ok|确定|確定|确认|確認|知道了|好的/i],
         // 只认实例名 / qaName / 文案，且要成词：类名里的 Return（SeerReturn2Component 是「老兵回归」）
         // 和 background 这类前缀都不算返回键
-        ["back", function (blob, ids) { return BACK_ROLE_RE.test(ids) || BACK_ROLE_CAMEL.test(ids); }],
+        ["back", function (blob, ids, o, label) {
+            var own = ownIds(o) + " " + (label || "");
+            return BACK_ROLE_RE.test(own) || BACK_ROLE_CAMEL.test(own);
+        }],
         ["tab", /tab|toggle|switch|radio|check/i],
         ["item", /item|cell|slot|card|grid|list/i]
     ];
@@ -1935,7 +1947,7 @@
         var idBlob = ids + " " + (label || "");
         for (var i = 0; i < FAST_ROLES.length; i++) {
             var match = FAST_ROLES[i][1];
-            if (typeof match === "function" ? match(blob, idBlob, o) : match.test(blob)) return FAST_ROLES[i][0];
+            if (typeof match === "function" ? match(blob, idBlob, o, label) : match.test(blob)) return FAST_ROLES[i][0];
         }
         if (BUTTON_TAG.test(tag)) return "button";
         // 弹窗正文、健康游戏忠告这类文字常常也挂着监听，标成 button 会诱导 agent 去点它。
@@ -2170,6 +2182,12 @@
             if (g.members.length < 2) return;
             var rep = g.members.filter(function (e) { return e._o === g.host; })[0] ||
                 g.members.slice().sort(function (a, b) { return b._w * b._h - a._w * a._h; })[0];
+            // 列表项自己已经有一段真文字（背包格子「LV.57 闪光阿兹 无」）：留它，别再把悬浮详情里的字拼上去
+            if (rep._o === g.host && realTextRow(rep)) {
+                if (rep.role === "text") rep.role = "item";
+                g.members.forEach(function (e) { if (e !== rep) gone[e.hash] = true; });
+                return;
+            }
             var texts = [];
             g.members.slice().sort(function (a, b) {
                 return Math.abs(a._y - b._y) > 8 ? a._y - b._y : a._x - b._x;
@@ -2225,8 +2243,9 @@
         });
         var pairs = [];
         entries.forEach(function (e, ei) {
-            // 被挡住的行默认不出现在表里：让它借走标题，标题就跟着一起消失了（飞船的 Spine 本体和它的热区抢「星际探索」）
-            if (e.from === "text" || e.from === "childText" || e.occluded) return;
+            // 被挡住的行默认不出现在表里：让它借走标题，标题就跟着一起消失了（飞船的 Spine 本体和它的热区抢「星际探索」）。
+            // 只有类名、没有实例名的对象多是地图上走动的角色（跟随精灵 Pet、Nono），走到哪个建筑旁边就会抢走它的名字
+            if (e.from === "text" || e.from === "childText" || e.from === "className" || e.occluded) return;
             var area = e._w * e._h;
             if (!area || area > stageArea * 0.25) return;
             var bottom = e._y + e._h, centerX = e._x + e._w / 2;
@@ -2327,7 +2346,6 @@
     function buildActionTable(p) {
         var stage = requireStage();
         var si = sceneInfo();
-        var limit = Math.min(Math.max(p.limit !== undefined ? +p.limit : 30, 1), 60);
         var scoped = p.rootHash !== undefined && p.rootHash !== null;
         // 顶层「面板」可能只是一块浮动提示；这种时候把整个舞台都收进动作表，
         // 否则地图上的 NPC、入口这些真正的目标会被漏掉。占住大半个舞台的才当模态处理。
@@ -2335,6 +2353,9 @@
         var stageArea = stage.stageWidth * stage.stageHeight;
         var modal = !!(topRect && topRect.width * topRect.height >= stageArea * 0.6) && !passesThrough(si.top, topRect);
         var root = scoped ? byHash(p.rootHash) : (modal ? si.top : stage);
+        // 整个舞台进表时（主城：HUD + 地图）三十行装不下：按阅读顺序截，屏幕最下面那排工具栏（背包、商店、任务）
+        // 整排被挤掉，agent 找背包花了十一次调用。没指定行数时给到上限
+        var limit = Math.min(Math.max(p.limit !== undefined && p.limit !== null ? +p.limit : (scoped || modal ? 30 : 60), 1), 60);
         var out = {
             // 每次注入换一个：页面一重载，server 就能看出上一轮的 i 编号和 hash 全部作废
             bootId: BOOT_ID,
@@ -2540,6 +2561,12 @@
         });
         entries = entries.filter(function (e) { return !dropped[e.hash]; });
         entries = mergeItemParts(entries, stage);
+        // 两个「返回」时 agent 会挑错：经验舱里 grp_back_landscape 才是返回，btn_return 是「经验返还」。
+        // 表里已有明确叫 back / 返回 的，只凭 return 认出来的那些降成普通按钮
+        var strongBack = function (e) { return STRONG_BACK_RE.test(ownIds(e._o) + " " + e.label); };
+        if (entries.some(function (e) { return e.role === "back" && strongBack(e); })) {
+            entries.forEach(function (e) { if (e.role === "back" && !strongBack(e)) e.role = "button"; });
+        }
 
         // 阅读顺序（先上后左），被遮挡的排到最后
         entries.sort(function (a, b) {
@@ -2714,9 +2741,30 @@
             if (!o) throw new Error("编号 " + step.i + "（" + entry.label + "）对应的对象已不在显示列表里");
             return { o: o, entry: entry };
         }
-        var target = resolveTarget(step);
+        var target;
+        try {
+            target = resolveTarget(step);
+        } catch (err) {
+            // agent 照着动作表里看到的标签写 {"text":"confirm"}，但 confirm* 是实例名不是界面文字，按文字查不到。
+            // 只给了 text 时再按动作表的标签（和 alt）找一遍
+            var byLabel = step.text && !["hash", "id", "name", "className", "source", "qaName"].some(function (k) {
+                return step[k] !== undefined && step[k] !== null && step[k] !== "";
+            }) ? tableRowByLabel(String(step.text), +step.index || 0) : null;
+            if (!byLabel) throw err;
+            return byLabel;
+        }
         if (!target) throw new Error("步骤缺少目标：需要 i / hash / 查询条件之一");
         return { o: target, entry: null };
+    }
+
+    function tableRowByLabel(text, index) {
+        var want = text.replace(/\*$/, "").trim();
+        var rows = (buildActionTable({ peek: true, limit: 60 })._entries || []).filter(function (e) {
+            return !e.occluded && (e.label === want || e.alt === want);
+        });
+        var e = rows[index];
+        var o = e && byHash(e.hash);
+        return o ? { o: o, entry: null } : null;
     }
 
     var handlers = {
@@ -3159,12 +3207,22 @@
                 try { record.from = panelKey(sceneInfo().top); } catch (e) {}
                 var tapTarget = null, tapWasLocked = null;
                 try {
+                    if (n > 0 && step.i !== undefined && step.i !== null) {
+                        // 验收里 agent 反复写 [{"i":10},{"i":26},{"i":4}]：以为后面几张表的编号能提前用上。
+                        // 原来只报「动作表已过期」，它看不出错在哪，下一次还这么写
+                        throw new Error("第 " + (n + 1) + " 步用了编号 i：编号只对第一步有效，第一步执行后界面变了、编号会重排。" +
+                            "后面的步骤改用查询条件（{\"text\":\"表里显示的标签\"}、{\"qaName\":…}），或看完新表再发下一次 act");
+                    }
                     if (op === "tap" || op === "text") {
                         // 填字时 text 是要填的内容，不能拿它当查询条件去找目标
                         var resolved = resolveFastTarget(op === "text" ? Object.assign({}, step, { text: undefined }) : step, fresh);
                         var o = resolved.o, entry = resolved.entry;
-                        record.target = entry ? { i: entry.i, label: entry.label, hash: entry.hash }
-                            : { hash: hashOf(o), label: actionLabelOf(o).label };
+                        if (entry) {
+                            record.target = { i: entry.i, label: entry.label, hash: entry.hash, role: entry.role };
+                        } else {
+                            var lab = actionLabelOf(o);
+                            record.target = { hash: hashOf(o), label: lab.label, role: actionRoleOf(o, lab.label, lab.from) };
+                        }
                         var sel = stableSelector(o);
                         if (sel) record.target.sel = sel;
                         if (op === "text") {
@@ -3202,6 +3260,17 @@
                                 : { x: round(r.x + r.width / 2), y: round(r.y + r.height / 2) };
                             // 执行前再解一次几何与遮挡：动作表里的坐标只是参考
                             var hit = hitTest(pt.x, pt.y);
+                            // 刚点开的下拉框、弹窗还在入场动画里，目标会被正在滑入的底图挡一下：
+                            // 等它落定再判「被遮挡」，别让 agent 为一段动画多花一轮
+                            for (var occStart = Date.now(); !reaches(o, hit) && !probePoint(o, true) &&
+                                Date.now() - occStart < 1200 && !step.force;) {
+                                await sleep(100);
+                                r = stageRect(o) || r;
+                                if (step.offsetX === undefined && step.offsetY === undefined) {
+                                    pt = { x: round(r.x + r.width / 2), y: round(r.y + r.height / 2) };
+                                }
+                                hit = hitTest(pt.x, pt.y);
+                            }
                             if (!reaches(o, hit)) {
                                 var alt = probePoint(o, true);
                                 if (alt) pt = alt.point;
