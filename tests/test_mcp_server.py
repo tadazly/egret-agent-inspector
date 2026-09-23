@@ -999,12 +999,36 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         item("eui.Image", "headIcon", card, { x, y: 300, width: 70, height: 70 });
         item("eui.Label", "labelLevel", card, { x: x + 5, y: 350, width: 60, height: 16 }, { text: level });
     });
+    // 项目通用按钮工具也是按下时挂松手回调：松手时在按钮范围内才算点击。四条边都判，不是拖动
+    const btnUtil = { __class: "TMButtonUtil",
+        onTouchBegin(e) {
+            const btn = e.currentTarget;
+            btn.addEventListener(TE.TOUCH_END, this.onTouchEnd, this);
+            btn.addEventListener(TE.TOUCH_RELEASE_OUTSIDE, this.onTouchCancel, this);
+        },
+        onTouchEnd(e) {
+            const p = e.currentTarget.globalToLocal(e.stageX, e.stageY);
+            if (p.x < 0 || p.y < 0 || p.x > e.currentTarget.width || p.y > e.currentTarget.height) return;
+            this.clicked = e.currentTarget.name;
+        },
+        onTouchCancel() {} };
+    const pressBtn = item("eui.Button", "btn_press", hud, { x: 200, y: 300, width: 60, height: 40 }, { solid: true });
+    listenOn(pressBtn);
+    pressBtn.addEventListener(TE.TOUCH_BEGIN, btnUtil.onTouchBegin, btnUtil);
+    // 只挂按下、松手回调里不看方向（按下缩放、松手复原）：也不是拖动
+    const plainUtil = { __class: "ScaleEffect",
+        onDown(e) { e.currentTarget.addEventListener(TE.TOUCH_END, this.onUp, this); },
+        onUp(e) { e.currentTarget.scaleX = 1; } };
+    const scaleBtn = item("eui.Button", "btn_scale", hud, { x: 280, y: 300, width: 60, height: 40 }, { solid: true });
+    listenOn(scaleBtn);
+    scaleBtn.addEventListener(TE.TOUCH_BEGIN, plainUtil.onDown, plainUtil);
     // 原地点一下：游戏不认
     stage.$touchHandler.onTouchBegin(55, 335);
     stage.$touchHandler.onTouchEnd(55, 335);
     out.pickedByTap = cardBar.picked.slice();
     const cardTable = t.buildActionTable({ limit: 60 });
     out.dragRows = cardTable.actions.filter(a => a.drag).map(a => ({ label: a.label, drag: a.drag }));
+    out.pressRows = cardTable.actions.filter(a => /btn_press|btn_scale/.test(a.label)).map(a => ({ label: a.label, drag: a.drag || null }));
     const card0 = cardTable.actions.find(a => a.drag && a.label.indexOf("88") >= 0);
     const swiped = await t.handlers.act({ marker: cardTable.marker, steps: [{ i: card0.i }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
     out.pickedByAct = cardBar.picked.slice();
@@ -1099,6 +1123,8 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertEqual(data["pickedByTap"], [])
         # 动作表标出「要按住上滑」，普通控件不标
         self.assertEqual(sorted(r["drag"] for r in data["dragRows"]), ["up", "up"])
+        # 按下时也挂松手回调、但不看方向或四边都判的普通按钮不算拖动（主城一排按钮曾被误标）
+        self.assertEqual([r["drag"] for r in data["pressRows"]], [None, None])
         self.assertTrue(all("等级" in r["label"] for r in data["dragRows"]))
         # 按编号点它，act 替它按住滑出上沿，游戏认了
         self.assertEqual(data["actDrag"], "up")
@@ -1384,11 +1410,9 @@ class RenderTableTest(unittest.TestCase):
         text = server.render_action_table({"marker": "m9", "executed": [
             {"op": "tap", "target": {"label": "等级:88"}, "drag": "up"}], "actions": [
             {"i": 1, "label": "等级:88", "role": "item", "drag": "up"},
-            {"i": 2, "label": "卡片", "role": "item", "drag": "any"},
             {"i": 3, "label": "技能", "role": "button"}]})
         self.assertIn("执行 tap 等级:88（按住上滑）", text)
         self.assertIn("1 等级:88 item 按住上滑", text)
-        self.assertIn("2 卡片 item 按住拖出去", text)
         self.assertIn("3 技能 button\n", text + "\n")
 
     def test_close_failure_says_what_was_tried(self):

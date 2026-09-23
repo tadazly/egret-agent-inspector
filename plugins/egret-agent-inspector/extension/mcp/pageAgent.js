@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.5";
+    var VERSION = "1.7.6";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1019,7 +1019,9 @@
 
     // 按下才生效一半的控件：自己只挂 touchBegin，按下时才临时挂 touchEnd / touchReleaseOutside / touchMove，
     // 成不成看在哪松手。战斗里的换宠卡就是这样：拖出卡片上沿才换上场，原地点一下什么都不发生。
-    // 从松手回调里认得出方向（globalToLocal 之后 y < 0 = 拖出上沿）就返回方向，认不出返回 "any"；不是这类控件返回 null
+    // 只在松手回调里认得出唯一一个方向（globalToLocal 之后 y < 0 = 拖出上沿）时返回方向，否则返回 null。
+    // 按下时挂松手回调的不一定是拖动：项目里的通用按钮工具（按下缩放、松手在按钮内才算点击）也这么写，
+    // 它要么不看方向，要么四条边都判——主城一排按钮曾因此全被标成「按住拖出去」
     var dragCache = typeof WeakMap === "function" ? new WeakMap() : null;
     var DRAG_DIRS = [
         ["up", /\.y\s*<\s*(?:0(?![.\d])|-)/],
@@ -1063,7 +1065,7 @@
                         if (typeof fn === "function") body += "\n" + String(fn);
                     }
                     var dirs = DRAG_DIRS.filter(function (d) { return d[1].test(body); });
-                    found = dirs.length === 1 ? dirs[0][0] : "any";
+                    found = dirs.length === 1 ? dirs[0][0] : null;
                 }
             } catch (e) {}
             if (dragCache) dragCache.set(bin.listener, found);
@@ -1082,8 +1084,6 @@
         }
         return null;
     }
-
-    var DRAG_WORDS = { up: "上滑", down: "下滑", left: "左滑", right: "右滑", any: "拖出去" };
 
     // 从 pt 按住，拖出 owner 的边界再松手：多给 40px，免得正好落在边上
     function dragPath(pt, owner, dir) {
@@ -3460,8 +3460,7 @@
                             // 拖出去才生效的控件（换宠卡）原地点一下什么都不发生：认得出方向就直接替它按住滑出去，
                             // 不让 agent 为「点了没反应」再花一轮，回合倒计时也等不起
                             var drag = dragTargetOf(o);
-                            var dir = op === "swipe" ? step.dir || (drag && drag.dir) || "up"
-                                : drag && drag.dir !== "any" ? drag.dir : null;
+                            var dir = op === "swipe" ? step.dir || (drag && drag.dir) || "up" : drag && drag.dir;
                             if (dir) {
                                 await performGesture(dragPath(pt, drag ? drag.owner : o, dir), method,
                                     step.holdMs !== undefined ? +step.holdMs : 300, o);
