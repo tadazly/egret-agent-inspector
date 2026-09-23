@@ -1,8 +1,8 @@
 # 更新日志
 
-## 未发布
+## 5.0.1
 
-- 修复 macOS 上 Claude Code 插件的 MCP server 起不来（`ENOENT: Executable not found in $PATH`）：manifest 写死了 `python`，macOS 只有 `python3`。改用插件自带的启动器 `bin/egret-mcp`（Windows 为 `egret-mcp.cmd`），与 Codex 的 Node 启动器一样依次尝试 `EGRET_PYTHON`、`python3` / `python`（Windows：`python`、`py -3`、`python3`），只用 3.8+，跳过 Windows 商店的占位程序；启动后切到用户目录，不占着插件缓存目录。
+- 修复 macOS 上 Claude Code 插件的 MCP server 起不来（`ENOENT: Executable not found in $PATH`）：改用插件自带的启动器按平台挑选 Python 3.8+，与 Codex 一致，也可用 `EGRET_PYTHON` 指定。
 
 ## 5.0.0
 
