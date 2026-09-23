@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.43";
+    var VERSION = "1.7.44";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -4478,7 +4478,9 @@
                     var guideUi = nb && nb.guiding && nb.stepType && !userStep && !gameStep;
                     // 战斗演出中（出了招、还没轮到你）：等这一回合播完，轮到你出招或出结算再说
                     // 等你关奖励框、等战斗结算（没写 statItem 的等玩家步骤）：结算页、奖励框还在入场动画里，多等一会儿再看能不能关
-                    var cap = turn && !turn.canOP && isSplanBattlePanel(top) ? 15000 :
+                    // 开场动画（假战斗、播放视频）自己会播完，二三十秒里没有要你做的事
+                    var cutscene = nb && /^(SetNickName|NickNameBattle)$/.test(nb.stepType || "");
+                    var cap = cutscene ? 40000 : turn && !turn.canOP && isSplanBattlePanel(top) ? 15000 :
                         locked || gameStep || guideUi ? 8000 : turn && turn.canOP ? 1200 :
                         userStep && !nb.want ? 4000 : splan && nb && nb.guiding ? 1500 : 600;
                     if (idle < cap && Date.now() < deadline - 3500) {

@@ -391,21 +391,21 @@ def render_action_table(table):
         unlock = rec.get("unlock")
         if isinstance(unlock, dict) and unlock.get("reason") == "unlocked":
             line += "（先等上一回合解锁 %.1fs）" % ((unlock.get("waitedMs") or 0) / 1000.0)
-        turn = rec.get("turn")
-        if isinstance(turn, dict):
+        step_turn = rec.get("turn")
+        if isinstance(step_turn, dict):
             # 出招后整组按钮被锁：工具已经在这一次调用里等到能再操作了，不用再 observe / wait
             # 「可以再操作了」太含糊：验收里 agent 看到它仍然去 observe、wait 各一轮才敢出下一招
             why = {"unlocked": "轮到你了，技能栏已解锁，直接出下一招", "panel": "界面换了（结算或切换界面）",
                    "blocked": "解锁后被盖住了，可能弹出了结算或提示", "new-controls": "游戏在等你先做别的决定",
                    "rebuilt": "界面重建了", "timeout": "等满仍未解锁",
                    "budget": "这次调用快到时限，先返回；接着再发一次同样的步骤",
-                   "no-lock": "点了没上锁，可能次数用完或不在回合内"}.get(turn.get("reason"), turn.get("reason"))
-            if turn.get("added"):
-                why += "：" + "、".join(str(a) for a in turn["added"])
+                   "no-lock": "点了没上锁，可能次数用完或不在回合内"}.get(step_turn.get("reason"), step_turn.get("reason"))
+            if step_turn.get("added"):
+                why += "：" + "、".join(str(a) for a in step_turn["added"])
             if rec.get("repeated"):
                 line += " → 连出 %s 次，停在：%s" % (rec["repeated"], why)
             else:
-                line += " → 等回合 %.1fs（%s）" % ((turn.get("waitedMs") or 0) / 1000.0, why)
+                line += " → 等回合 %.1fs（%s）" % ((step_turn.get("waitedMs") or 0) / 1000.0, why)
         if rec.get("op") == "close" and isinstance(rec.get("result"), dict):
             if result.get("ok") and result.get("via") == "gone":
                 line += " → %s 自己退场了" % (result.get("panel") or "")

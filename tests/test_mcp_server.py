@@ -1822,6 +1822,11 @@ class RenderTableTest(unittest.TestCase):
             "stages": ["孵化主宠", "基础战斗"], "newbie": {"from": 5, "to": 8, "total": 24}}}]})
         self.assertIn("执行 guide → 跟着引导点了 26 下，新手第 6→9 段（孵化主宠 → 基础战斗），最后几下：点 Group、战斗说明、点 skill0；"
                       "停下：战斗轮到你出招", run)
+        # 执行过一步没有等回合的点击、表上又没有推荐：引导还在走，接着跟（每步的回合结果不能冲掉表上的回合状态）
+        busy = server.render_action_table({"marker": "g6", "actions": [{"i": 1, "label": "bg", "role": "button"}],
+            "executed": [{"op": "tap", "target": {"label": "确定"}}, {"op": "guide", "result": {"steps": 3, "stopped": "budget"}}],
+            "newbie": {"step": 9, "total": 24, "name": "买胶囊", "guiding": True}})
+        self.assertIn('推荐 {"op":"guide"}（新手引导还在走，接着跟）', busy)
         # 「新手已走完」只对看着新手走过来的标签页说
         mcp = server.McpServer.__new__(server.McpServer)
         mcp.newbie_seen = set()
