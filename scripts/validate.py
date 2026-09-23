@@ -73,6 +73,24 @@ def check_claude(errors):
     entry = next((p for p in market.get("plugins", []) if p.get("name") == NAME), None)
     if not entry or entry.get("source") != f"./plugins/{NAME}":
         errors.append(".claude-plugin/marketplace.json: plugin entry missing or wrong source")
+    # Claude 的插件 MCP 配置不分平台：命令名写死哪个解释器都有平台起不来（macOS 没有 python，
+    # Windows 的 python3 常是商店占位程序），交给 bin/ 下的启动器按平台挑 Python
+    server = manifest.get("mcpServers", {}).get(NAME, {})
+    if server.get("command") != "${CLAUDE_PLUGIN_ROOT}/bin/egret-mcp" or server.get("args"):
+        errors.append(".claude-plugin/plugin.json: MCP command must be ${CLAUDE_PLUGIN_ROOT}/bin/egret-mcp without args")
+    sh, cmd = PLUGIN / "bin" / "egret-mcp", PLUGIN / "bin" / "egret-mcp.cmd"
+    sh_bytes = sh.read_bytes() if sh.is_file() else b""
+    if not sh_bytes.startswith(b"#!/bin/sh\n") or b"\r" in sh_bytes:
+        errors.append("bin/egret-mcp: must be a POSIX sh script with LF line endings")
+    elif shutil.which("git"):
+        mode = subprocess.run(["git", "ls-files", "-s", str(sh)], cwd=ROOT, capture_output=True, text=True).stdout
+        if mode and not mode.startswith("100755"):
+            errors.append("bin/egret-mcp: must be executable in git (git update-index --chmod=+x)")
+    cmd_bytes = cmd.read_bytes() if cmd.is_file() else b""
+    if not cmd_bytes.isascii() or b"\r\n" not in cmd_bytes or b"\n" in cmd_bytes.replace(b"\r\n", b""):
+        errors.append("bin/egret-mcp.cmd: must be ASCII with CRLF line endings (cmd.exe reads it in the console code page)")
+
+
 def check_skills(errors):
     skills = sorted(p for p in (PLUGIN / "skills").iterdir() if p.is_dir())
     if not skills:

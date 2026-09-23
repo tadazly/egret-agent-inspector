@@ -171,6 +171,16 @@ process.stdout.write(JSON.stringify({ named, travel, passive, decision, canonica
         response = json.loads(result.stdout.splitlines()[0])
         self.assertEqual(response["result"]["serverInfo"]["name"], "egret-agent-inspector")
 
+    def test_claude_launcher_initializes_mcp(self):
+        # Claude 插件的 MCP 配置不分平台：Windows 走 .cmd，其他平台走 sh，都要挑到 Python 并完成 initialize
+        launcher = SERVER.parents[1] / "bin" / ("egret-mcp.cmd" if os.name == "nt" else "egret-mcp")
+        env = dict(os.environ, EGRET_PYTHON=sys.executable, EGRET_MCP_PORT=str(PORT + 3), PYTHONIOENCODING="utf-8")
+        request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n"
+        result = subprocess.run([str(launcher)], env=env, input=request, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=15, check=True)
+        response = json.loads(result.stdout.splitlines()[0])
+        self.assertEqual(response["result"]["serverInfo"]["name"], "egret-agent-inspector")
+
 
 class FakeExtension:
     """模拟扩展 service worker：连接 server 并按 id 查询假数据应答页面请求。"""

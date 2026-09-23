@@ -10,8 +10,7 @@
   "keywords": ["egret", "game", "e2e", "testing", "browser"],
   "mcpServers": {
     "egret-agent-inspector": {
-      "command": "python",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/server/egret_agent_inspector_mcp.py"]
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/egret-mcp"
     }
   }
 }

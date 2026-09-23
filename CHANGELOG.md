@@ -1,5 +1,9 @@
 # 更新日志
 
+## 未发布
+
+- 修复 macOS 上 Claude Code 插件的 MCP server 起不来（`ENOENT: Executable not found in $PATH`）：manifest 写死了 `python`，macOS 只有 `python3`。改用插件自带的启动器 `bin/egret-mcp`（Windows 为 `egret-mcp.cmd`），与 Codex 的 Node 启动器一样依次尝试 `EGRET_PYTHON`、`python3` / `python`（Windows：`python`、`py -3`、`python3`），只用 3.8+，跳过 Windows 商店的占位程序；启动后切到用户目录，不占着插件缓存目录。
+
 ## 5.0.0
 
 - 新增高速操作主循环 `egret_observe` / `egret_act`：`egret_observe` 一次快照产出带编号的动作表（角色、标签、状态、已解遮挡的点击点）和语义指纹 `marker`；`egret_act` 按编号执行，内部等界面稳定并等过加载过场，直接返回执行后的新动作表。原本「定位 → 点击 → 等待 → 再看一眼」四次往返压缩成一次。
