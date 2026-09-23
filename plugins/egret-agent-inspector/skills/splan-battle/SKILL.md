@@ -5,7 +5,7 @@ description: Splan 项目的回合制战斗规则（页面存在全局 MFC 对�
 
 # Splan 战斗
 
-**进 PVE（玩家路径）**：主城「星际探索」（`pve_rect`）→ `btn_go` 进星系（`galaxy_N` 换星系）→ 点正中间那颗星球 `planetImg`（点两边的只会把它转到中间）→ 关卡行（「1 <关卡名>」，没出来就滚一下 `LocaterScroller`）→ `fightBtn`。开场加载和 VS 动画不用点。`sweepBtn*` 是扫荡，会消耗体力。
+**进 PVE（玩家路径）**：主城「星际探索」（`pve_rect`）→ `btn_go` 进星系（`galaxy_N` 换星系）→ 点正中间那颗星球 `planetImg`（点两边的只会把它转到中间）→ 关卡行（「1 <关卡名>」，没出来就滚一下 `LocaterScroller`）→ `fightBtn`。开场加载和 VS 动画不用点。`sweepBtn*` 是扫荡，会消耗体力。要打简单的：先点 `galaxy_1`（帕诺星系）再 `btn_go`，各星球第 1 关对手 10 级左右；默认星系的对手是 100 级、好几只。
 
 **回合**
 
