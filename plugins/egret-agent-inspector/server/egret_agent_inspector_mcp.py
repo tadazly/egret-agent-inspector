@@ -417,7 +417,11 @@ def render_action_table(table):
             text = " ".join(str(target.get("text") or "").split())
             name = text if 0 < len(text) <= 12 else str(target.get("qaName") or "").split("__")[-1] or \
                 target.get("id") or target.get("name") or str(target.get("className") or "").split(".")[-1]
-        lines.append("推荐 {\"op\":\"%s\"}（%s%s）" % (op, reason, "，点 %s" % name if name else ""))
+        if reason == "guide-drag":
+            lines.append("推荐 {\"op\":\"recommended\"}（guide-drag，按住把 %s 拖到 %s）" % (
+                short_label(rec.get("label") or "起点"), short_label(rec.get("dropLabel") or "引导终点")))
+        else:
+            lines.append("推荐 {\"op\":\"%s\"}（%s%s）" % (op, reason, "，点 %s" % name if name else ""))
     if table.get("transientOverlay"):
         lines.append("过场 %s：用 {\"op\":\"wait\",\"ms\":800} 短等" % table["transientOverlay"].get("reason"))
     for sc in table.get("scrollers") or []:
