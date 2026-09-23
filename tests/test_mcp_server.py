@@ -778,6 +778,205 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["big"]["roles"][labels.index("grp_serverSelectLong")], "button")
 
 
+class SceneAndTurnTest(unittest.TestCase):
+    """主城 HUD 穿透、地图入口借标题、列表项合并，以及回合制界面的等锁 / 连出判定。"""
+
+    probe = None
+
+    @classmethod
+    def run_probe(cls):
+        if cls.probe is not None:
+            return cls.probe
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node is required")
+        script = r'''const fs = require("fs");
+let source = fs.readFileSync(process.argv[1], "utf8");
+source = source.replace("\n    installErrorHooks();",
+    "\n    window.__pageAgentTest = { buildActionTable, waitForTurn, waitForUnlock, rowDiff, describeRowDiff, handlers };\n    installErrorHooks();");
+const vm = require("vm");
+const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480,
+    visible: true, alpha: 1, touchEnabled: true, touchChildren: true, parent: null, children: [],
+    get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; } };
+const player = { stage };
+global.window = { addEventListener() {}, devicePixelRatio: 1, innerWidth: 800, innerHeight: 480,
+    egret: { getQualifiedClassName(o) { return o.__class || "Object"; } } };
+global.document = { documentElement: { clientLeft: 0, clientTop: 0 },
+    querySelector(s) { return s === ".egret-player" ? { "egret-player": player } : null; } };
+vm.runInThisContext(source, { filename: process.argv[1] });
+
+let serial = 10;
+let painted = [];
+function item(cls, name, parent, bounds, opts) {
+    opts = opts || {};
+    const o = { __class: cls, hashCode: serial++, name: name || null, text: opts.text || "",
+        parent, stage, visible: true, alpha: 1, touchEnabled: true, touchChildren: true, children: [],
+        get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; },
+        getTransformedBounds() { return bounds; } };
+    if (opts.itemIndex !== undefined) o.itemIndex = opts.itemIndex;
+    if (opts.listener) o.$EventDispatcher_props_ = { 1: { touchTap: [{ listener() {}, thisObject: o }] } };
+    if (parent) parent.children.push(o);
+    painted.push({ o, bounds, solid: opts.solid !== false });
+    return o;
+}
+function remove(o) {
+    o.parent.children.splice(o.parent.children.indexOf(o), 1);
+    o.stage = null;
+    painted = painted.filter(p => p.o !== o);
+}
+function inside(b, x, y) { return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height; }
+stage.$touchHandler = { findTarget(x, y) {
+    for (let i = painted.length - 1; i >= 0; i--) {
+        if (painted[i].solid && inside(painted[i].bounds, x, y)) return painted[i].o;
+    }
+    return stage;
+} };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const t = window.__pageAgentTest;
+
+// 主城：地图上的飞船热区没有字，「星际探索」四个字摆在热区正下方，自己没有监听
+const mapLayer = item("game.MapLayer", "mapLayer", stage, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
+item("eui.Image", "mapBg", mapLayer, { x: 0, y: 0, width: 800, height: 480 });
+item("eui.Group", "pve_rect", mapLayer, { x: 100, y: 100, width: 80, height: 60 }, { listener: true });
+const capBox = item("eui.Group", "capBox", mapLayer, { x: 105, y: 165, width: 70, height: 18 }, { solid: false });
+item("eui.Label", "capText", capBox, { x: 105, y: 165, width: 70, height: 18 }, { text: "星际探索" });
+// 技能栏：一个技能是一个列表项，名字、次数各是一块，要合成一行
+const uiLayer = item("eui.Group", "uiLayer", stage, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
+// 全屏 HUD：按面积是「全屏面板」，但中间透明，点下去落在地图上
+const hud = item("ui.ToolbarPanel", "toolbarPanel", uiLayer, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
+item("eui.Button", "btn_bag", hud, { x: 720, y: 400, width: 60, height: 60 }, { listener: true });
+const bar = item("ui.SkillListBar", "skillBar", hud, { x: 300, y: 380, width: 320, height: 90 }, { solid: false });
+const skill = item("ui.SkillListBarItem", "skill0", bar, { x: 300, y: 380, width: 149, height: 90 },
+    { solid: false, itemIndex: 0 });
+item("eui.Image", "bg", skill, { x: 300, y: 380, width: 149, height: 90 }, { listener: true });
+item("eui.Label", "skillName", skill, { x: 340, y: 385, width: 60, height: 20 }, { listener: true, text: "撞击" });
+item("eui.Label", "skillCount", skill, { x: 320, y: 420, width: 100, height: 20 }, { listener: true, text: "次数: 35/35" });
+const label = item("eui.Label", "tipLabel", hud, { x: 20, y: 20, width: 100, height: 20 }, { text: "提示文字" });
+// 队伍栏：五只精灵的标签一模一样，少于七个不折叠
+for (let k = 0; k < 5; k++) {
+    item("ui.TeamSlot", "slot" + k, hud, { x: 250 + k * 80, y: 190, width: 70, height: 70 }, { listener: true, text: "等级:100" });
+}
+const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 150, height: 30 }, { listener: true });
+
+(async () => {
+    const out = {};
+    out.table = t.buildActionTable({ limit: 30 });
+    out.table = { scope: out.table.scope, text: out.table.text,
+        rows: out.table.actions.map(a => ({ label: a.label, role: a.role, alt: a.alt || null })) };
+    out.diff = t.describeRowDiff(t.rowDiff(["tab|explore_normal", "text|1/3"], ["tab|explore_select", "text|2/3"]));
+    out.diffTextOnly = t.describeRowDiff(t.rowDiff(["text|1/3"], ["text|2/3"]));
+
+    // 点完一秒左右才上锁（等服务端回包），演出 0.6s 后解锁
+    setTimeout(() => { bar.touchChildren = false; }, 300);
+    setTimeout(() => { bar.touchChildren = true; }, 900);
+    out.lateLock = await t.waitForTurn(skill, 5000, 1500);
+    // 没有宽限期就不等：普通按钮点完不白等
+    out.noGrace = await t.waitForTurn(skill, 5000, 0);
+
+    // 演出里冒出来的 buff 小图标、一闪而过的出招名都不算新选项；一直摆着的换宠栏才算
+    bar.touchChildren = false;
+    let banner, cap, petPick;
+    setTimeout(() => { cap = item("eui.Image", "cap_0", uiLayer, { x: 285, y: 30, width: 16, height: 17 }, { listener: true }); }, 100);
+    setTimeout(() => { banner = item("eui.Label", "castName", uiLayer, { x: 350, y: 200, width: 60, height: 24 }, { listener: true, text: "冲顶" }); }, 150);
+    setTimeout(() => remove(banner), 750);
+    setTimeout(() => { petPick = item("ui.PetPickItem", "pet2", uiLayer, { x: 400, y: 300, width: 70, height: 70 }, { listener: true, text: "等级:100" }); }, 1300);
+    setTimeout(() => { bar.touchChildren = true; }, 6000);
+    out.newControls = await t.waitForTurn(skill, 8000, 0);
+    remove(petPick);
+    remove(cap);
+
+    // 点上去时还锁着：先等解锁
+    bar.touchChildren = false;
+    setTimeout(() => { bar.touchChildren = true; }, 400);
+    out.unlock = await t.waitForUnlock(skill, bar, 3000);
+
+    // 技能栏一直锁着是因为游戏在等你换宠：先等解锁也得看见换宠栏，不能干等到倒计时替你选
+    bar.touchChildren = false;
+    let petPick2;
+    setTimeout(() => { petPick2 = item("ui.PetPickItem", "pet3", uiLayer, { x: 480, y: 300, width: 70, height: 70 }, { listener: true, text: "等级:99" }); }, 300);
+    out.unlockBlocked = await t.waitForUnlock(skill, bar, 5000);
+    remove(petPick2);
+    bar.touchChildren = true;
+
+    // 只给 text 的步骤是按文字找来点；带 hash 的 text 是填字，但只往输入框里填
+    const typedLabel = await t.handlers.act({ steps: [{ hash: label.hashCode, text: "abc" }], quietMs: 50, timeoutMs: 200 });
+    out.labelText = label.text;
+    out.labelError = typedLabel.executed[0].error || null;
+    const typedInput = await t.handlers.act({ steps: [{ hash: input.hashCode, text: "abc", dispatchChange: false }],
+        quietMs: 50, timeoutMs: 200 });
+    out.inputText = input.text;
+    out.inputOp = typedInput.executed[0].op;
+    process.stdout.write(JSON.stringify(out));
+})().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
+'''
+        result = subprocess.run([node, "-e", script, str(PAGE_AGENT)], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=40)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+        cls.probe = json.loads(result.stdout)
+        return cls.probe
+
+    def test_hud_lets_map_entries_through(self):
+        table = self.run_probe()["table"]
+        # 中间透明的全屏 HUD 不是模态：地图上的入口要进动作表
+        self.assertEqual(table["scope"], "stage")
+        labels = [r["label"] for r in table["rows"]]
+        self.assertIn("btn_bag", labels)
+        self.assertTrue(any(r["alt"] == "pve_rect" for r in table["rows"]))
+
+    def test_hotspot_borrows_the_caption_below_it(self):
+        rows = self.run_probe()["table"]["rows"]
+        pve = [r for r in rows if r["alt"] == "pve_rect"]
+        self.assertEqual(pve[0]["label"], "星际探索")
+        # 标题被借走后不再单独占一行，免得 agent 去点那个点了没反应的字
+        self.assertEqual([r["label"] for r in rows].count("星际探索"), 1)
+
+    def test_item_parts_merge_into_one_row(self):
+        rows = self.run_probe()["table"]["rows"]
+        merged = [r for r in rows if r["label"].startswith("撞击")]
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["label"], "撞击 次数: 35/35")
+        self.assertNotIn("次数: 35/35", [r["label"] for r in rows])
+
+    def test_small_group_of_same_label_is_not_collapsed(self):
+        rows = self.run_probe()["table"]["rows"]
+        self.assertEqual([r["label"] for r in rows].count("等级:100"), 5)
+
+    def test_row_diff_names_what_changed(self):
+        data = self.run_probe()
+        self.assertEqual(data["diff"], "少了 explore_normal；多了 explore_select")
+        self.assertEqual(data["diffTextOnly"], "文字有变化")
+
+    def test_lock_that_arrives_late_is_waited_out(self):
+        data = self.run_probe()
+        self.assertEqual(data["lateLock"]["reason"], "unlocked")
+        self.assertLess(data["lateLock"]["waitedMs"], 2000)
+        self.assertIsNone(data["noGrace"])
+
+    def test_only_a_lasting_real_choice_interrupts_the_wait(self):
+        turn = self.run_probe()["newControls"]
+        self.assertEqual(turn["reason"], "new-controls")
+        self.assertEqual(turn["added"], ["等级:100"])
+        # 在解锁（6s）之前就停了，换宠倒计时还来得及
+        self.assertLess(turn["waitedMs"], 3000)
+
+    def test_tap_on_a_locked_group_waits_for_unlock(self):
+        unlock = self.run_probe()["unlock"]
+        self.assertEqual(unlock["reason"], "unlocked")
+        self.assertGreaterEqual(unlock["waitedMs"], 300)
+        blocked = self.run_probe()["unlockBlocked"]
+        self.assertEqual(blocked["reason"], "new-controls")
+        self.assertEqual(blocked["added"], ["等级:99"])
+        self.assertLess(blocked["waitedMs"], 3000)
+
+    def test_text_is_only_typed_into_inputs(self):
+        data = self.run_probe()
+        self.assertEqual(data["labelText"], "提示文字")
+        self.assertIn("不是输入框", data["labelError"])
+        self.assertEqual(data["inputOp"], "text")
+        self.assertEqual(data["inputText"], "abc")
+
+
 class RenderTableTest(unittest.TestCase):
     def test_renders_one_line_per_action(self):
         server = load_server()
@@ -847,6 +1046,24 @@ class RenderTableTest(unittest.TestCase):
         other = {"tabId": 9, "bootId": "ccc"}
         mcp.note_page_boot({}, other)
         self.assertNotIn("reloaded", other)
+
+    def test_turn_wait_and_repeat_are_spelled_out(self):
+        server = load_server()
+        table = {"panel": {"name": "BattlePanel"}, "marker": "m5", "actions": [],
+                 "executed": [
+                     {"op": "tap", "target": {"label": "撞击"}, "unlock": {"reason": "unlocked", "waitedMs": 1476},
+                      "repeated": 2, "turn": {"reason": "new-controls", "added": ["等级:100"], "waitedMs": 2800}},
+                     {"op": "tap", "target": {"label": "nibaba"}, "turn": {"reason": "unlocked", "waitedMs": 3032}}]}
+        text = server.render_action_table(table)
+        self.assertIn("先等上一回合解锁 1.5s", text)
+        self.assertIn("连出 2 次，停在：出现了新的可选项：等级:100", text)
+        self.assertIn("等回合 3.0s（可以再操作了）", text)
+        # 快到桥接时限就先返回：说清楚没做完、接着怎么办，而不是整次调用超时什么都拿不回来
+        budget = server.render_action_table({"marker": "m6", "actions": [], "stopped": "budget",
+                                             "executed": [{"op": "tap", "repeated": 6,
+                                                           "turn": {"reason": "budget", "waitedMs": 0}}]})
+        self.assertIn("连出 6 次，停在：这次调用快到时限", budget)
+        self.assertIn("后面的步骤没做", budget)
 
     def test_close_failure_says_what_was_tried(self):
         server = load_server()
