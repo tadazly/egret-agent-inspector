@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.19";
+    var VERSION = "1.7.20";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -2247,6 +2247,12 @@
     function itemsOf(target, where, opts) {
         var list = listOf(target);
         if (!list) throw new Error("$items 需要 eui.List / DataGroup，或包着它的 Scroller（传 hash 或对象）");
+        // 只写了 {limit} / {fields} 的第二个参数是选项，不是筛选：按筛选理解会一条都匹配不上
+        if (where && typeof where === "object" && !opts && Object.keys(where).length &&
+            Object.keys(where).every(function (k) { return k === "limit" || k === "fields"; })) {
+            opts = where;
+            where = null;
+        }
         opts = opts || {};
         var dp = list.dataProvider;
         var total = +dp.length || 0;
