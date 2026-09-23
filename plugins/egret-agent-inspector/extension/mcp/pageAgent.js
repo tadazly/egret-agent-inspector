@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.11";
+    var VERSION = "1.7.12";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1395,7 +1395,13 @@
         "剧情目标": ["cachetip", "maptip", "questmarker", "taskmarker"],
         "进入游戏": ["start", "entergame"], "开始游戏": ["start", "entergame"],
         "立即前往": ["go", "goto", "enter"], "回到基地": ["backbase", "returnbase"], "返回基地": ["backbase", "returnbase"],
-        "npc": ["npc", "storyinteractobject"]
+        "npc": ["npc", "storyinteractobject"],
+        // 游戏里常见的入口：图标按钮多半只有英文实例名（btn_petBag、btn_shop），中文描述靠这些对上
+        "背包": ["bag", "pack", "knapsack"], "商店": ["shop", "store", "mall"], "商城": ["shop", "store", "mall"],
+        "好友": ["friend"], "邮件": ["mail"], "邮箱": ["mail"], "聊天": ["chat"], "签到": ["sign", "checkin"],
+        "活动": ["activity", "event"], "排行": ["rank"], "图鉴": ["handbook", "book", "atlas"], "仓库": ["storage", "warehouse", "depot"],
+        "宠物": ["pet"], "精灵": ["pet", "spirit", "elf"], "技能": ["skill"], "装备": ["equip"], "队伍": ["team", "lineup"],
+        "阵容": ["lineup", "team"], "挑战": ["challenge", "fight"], "扫荡": ["sweep"], "探索": ["explore"], "升级": ["upgrade", "levelup"]
     };
 
     function semanticVariants(term) {
