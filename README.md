@@ -42,7 +42,8 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | `egret-e2e-test` | 编写、运行和报告 E2E 用例 |
 | `egret-bug-hunt` | 探索式操作游戏，发现报错、异常界面和无响应交互 |
 | `egret-session-recovery` | 浏览器闪退后恢复验收现场；重复闪退时采样运行态指标 |
-| `splan-control` | Splan 项目专属：模块事件直达界面、qaName 定位、连关强弹（页面有全局 `MFC` 时适用） |
+| `splan-control` | Splan 项目专属：模块事件直达界面、qaName 定位、连关强弹、换技能（页面有全局 `MFC` 时适用） |
+| `splan-battle` | Splan 项目专属：回合制战斗规则，进 PVE、出招、换精灵、倒下后的回合、结算与不能点的消耗按钮 |
 | `splan-test` | Splan 项目专属：生成并运行用例、自主探索找 bug、沉淀笔记 |
 
 ## MCP 工具

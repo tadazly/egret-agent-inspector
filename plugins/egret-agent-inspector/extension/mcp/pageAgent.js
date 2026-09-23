@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.16";
+    var VERSION = "1.7.17";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -2607,7 +2607,7 @@
         var out = {
             // 每次注入换一个：页面一重载，server 就能看出上一轮的 i 编号和 hash 全部作废
             bootId: BOOT_ID,
-            // Splan 项目（页面有全局 MFC）：server 据此在 observe 里指向 splan-control 技能
+            // Splan 项目（页面有全局 MFC）：server 据此在 observe 里指向 Splan 的技能
             project: window.MFC ? "splan" : undefined,
             // server 记路线用：和 act 每步记下的 from 同一口径
             topKey: panelKey(si.top),
