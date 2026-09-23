@@ -375,17 +375,23 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         chrome, edge = FakeExtension(), FakeExtension()
         chrome.tabs, edge.tabs = [11], [22, 23]
         await chrome.connect()
-        await edge.connect()
         try:
             await self.call("egret_extension_status", {"waitSeconds": 2})
+            # 刚启动时另一个浏览器还没连上：等它连上再发，不去问手上这个
+            late = asyncio.ensure_future(self.call_text("egret_observe", {"tabId": 22}))
+            await asyncio.sleep(0.5)
+            await edge.connect()
+            await late
+            self.assertIn(("page", "observe"), edge.calls)
+            self.assertNotIn(("page", "observe"), chrome.calls)
             _, tabs = await self.call("egret_list_tabs", {"probe": False})
             self.assertEqual(sorted(t["tabId"] for t in tabs), [11, 22, 23])
             await self.call_text("egret_observe", {"tabId": 11})
             self.assertIn(("page", "observe"), chrome.calls)
-            self.assertNotIn(("page", "observe"), edge.calls)
             # 之后不带 tabId 的请求跟着上一次的浏览器走
             await self.call_text("egret_observe", {})
             self.assertEqual(chrome.calls.count(("page", "observe")), 2)
+            self.assertEqual(edge.calls.count(("page", "observe")), 1)
         finally:
             for ext in (chrome, edge):
                 ext.task.cancel()
