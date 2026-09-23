@@ -495,6 +495,9 @@ BASE_PORT = int(os.environ.get("EGRET_MCP_PORT", "17800"))
 PORT_COUNT = int(os.environ.get("EGRET_MCP_PORT_COUNT", "16"))
 REQUEST_TIMEOUT = float(os.environ.get("EGRET_MCP_TIMEOUT", "30"))
 CONNECT_WAIT = float(os.environ.get("EGRET_MCP_CONNECT_WAIT", "20"))
+# 带 tabId 的请求找不到持有它的浏览器时，等它重连的上限（扩展对备用端口的重连退避到 30 秒）
+REROUTE_WAIT = float(os.environ.get("EGRET_MCP_REROUTE_WAIT", "30"))
+STARTUP_WAIT = float(os.environ.get("EGRET_MCP_STARTUP_WAIT", "45"))
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 # 工具越多，小模型越容易放着 observe/act 不用去挨个试别的工具。默认只暴露 core：
@@ -1077,8 +1080,9 @@ class Bridge:
         owner = next((c for c in live if c.tabs and tab_id in c.tabs), None)
         if owner is None:
             owner = await self.owner_of(tab_id, lambda c: True)
-        # 刚启动时别的浏览器可能还没连上来（扩展对备用端口的重连会退避到 30 秒）：等一会儿新连接
-        deadline = self.started + 45
+        # 刚启动时别的浏览器可能还没连上来；中途扩展被重载、service worker 重启也会断开一阵
+        # （扩展对备用端口的重连会退避到 30 秒）：都等一会儿新连接
+        deadline = max(self.started + STARTUP_WAIT, time.time() + REROUTE_WAIT)
         while owner is None and time.time() < deadline and any(c.tabs for c in self.live()):
             self.changed.clear()
             try:
@@ -1089,7 +1093,14 @@ class Bridge:
         if owner is not None:
             # 没带 tabId 的后续请求（自动选标签页、新开窗口）也跟着这个浏览器走
             self.preferred = owner
-        return {"conn": owner} if owner is not None else None
+            return {"conn": owner}
+        if any(c.tabs for c in self.live()):
+            # 交给不持有它的浏览器只会回「No tab with id」：验收里 agent 以为标签页没了，
+            # 之后不带 tabId 调用，被自动选到别的 agent 的标签页上去点
+            raise RuntimeError("标签页 %d 不在任何已连接的浏览器里（等了 %d 秒它所在的浏览器也没连回来）："
+                               "浏览器扩展可能在重载或重连，稍后用同一个 tabId 重试；不要去操作别的标签页。"
+                               "确认它还在用 egret_list_tabs。" % (tab_id, REROUTE_WAIT))
+        return None
 
     async def start(self):
         for port in range(BASE_PORT, BASE_PORT + PORT_COUNT):

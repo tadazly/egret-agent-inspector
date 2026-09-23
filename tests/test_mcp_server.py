@@ -311,7 +311,7 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         self.install_dir = os.path.join(self.tmp.name, "extension")
         env = dict(os.environ, EGRET_MCP_PORT=str(PORT), EGRET_MCP_CONNECT_WAIT="2", PYTHONIOENCODING="utf-8",
                    EGRET_EXTENSION_DIR=self.install_dir, EGRET_NOTES_DIR=os.path.join(self.tmp.name, "notes"),
-                   EGRET_OCR_PREWARM="0")
+                   EGRET_OCR_PREWARM="0", EGRET_MCP_STARTUP_WAIT="3", EGRET_MCP_REROUTE_WAIT="3")
         self.proc = await asyncio.create_subprocess_exec(
             sys.executable, str(SERVER), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, env=env, limit=2 ** 24)
@@ -408,6 +408,37 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
             for ext in (chrome, edge):
                 ext.task.cancel()
                 ext.writer.close()
+
+    async def test_tab_request_waits_for_its_browser_to_reconnect(self):
+        # 扩展中途被重载、service worker 重启：持有标签页的浏览器断开一阵再连回来
+        chrome, edge = FakeExtension(), FakeExtension()
+        chrome.tabs, edge.tabs = [11], [22]
+        await chrome.connect()
+        await edge.connect()
+        again = None
+        try:
+            await self.call_text("egret_observe", {"tabId": 22})
+            edge.task.cancel()
+            edge.writer.close()
+            await asyncio.sleep(0.3)
+            pending = asyncio.ensure_future(self.call_text("egret_observe", {"tabId": 22}))
+            await asyncio.sleep(0.5)
+            again = FakeExtension()
+            again.tabs = [22]
+            await again.connect()
+            await pending
+            self.assertIn(("page", "observe"), again.calls)
+            self.assertNotIn(("page", "observe"), chrome.calls)
+            # 真找不到的标签页不交给别的浏览器去回「No tab with id」，明说别换标签页
+            res, text = await self.call_text("egret_observe", {"tabId": 99})
+            self.assertTrue(res.get("isError"))
+            self.assertIn("不在任何已连接的浏览器里", text)
+            self.assertNotIn(("page", "observe"), chrome.calls)
+        finally:
+            for ext in (chrome, edge, again):
+                if ext is not None:
+                    ext.task.cancel()
+                    ext.writer.close()
 
     async def test_observe_and_act_use_the_action_table(self):
         ext = FakeExtension()
