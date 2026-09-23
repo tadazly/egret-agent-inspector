@@ -18,11 +18,11 @@ description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象�
 
 **打战斗**（进 PVE、出招、换精灵、结算）：先读 `splan-battle` 技能。
 
-**换技能**：精灵背包（主城 `btn_petBag`）→ 点精灵 →「技能」页签。左边 `st=enabled` 是已装备的，右边列表里 `st=blue` 是已学会没装上的（`canLearn` 要花学习力去学，`notLearn` 未解锁）。把右边的拖到左边要替换的那一格：`{"op":"drag","i":<右边>,"to":{"i":<左边>}}`，弹出 `SkillExchangePopup` 后点 `img_confirm`。
+**换技能**：精灵背包（主城底栏）→ 点精灵 →「技能」页签。左边 `st=enabled` 是已装备的，右边列表里 `st=blue` 是已学会没装上的（`canLearn` 要花学习力去学，`notLearn` 未解锁）。把右边的拖到左边要替换的那一格：`{"op":"drag","i":<右边>,"to":{"i":<左边>}}`，弹出 `SkillExchangePopup` 后点 `img_confirm`。
 
 ## 主城与界面
 
-- 主城底栏：`btn_petBag` 精灵背包、`btn_shop` 商店、`btn_task` 任务、`btn_book` 图鉴、`btn_petStrong` 精灵强化、`btn_eggExchange` 融合。其他功能先点 `ToolbarNew__btn_qiuck`（快捷入口），里面按文字点。顶栏 `add_diamond`、`add_coin`、`add_ticket` 是充值购买。
+- 主城的装置（精灵经验舱、基因重组、星际放生舱、能量补给站、小屋…）和底栏（精灵背包、星际商店、任务、图鉴…）表上都是中文名；地图另一头的装置直接点，工具会先把地图滚过去。其他功能先点「快捷入口（更多功能）」，里面按文字点。顶栏「钻石充值」「买赛尔豆」和 `add_ticket` 是充值购买。
 - 点入口弹出 `FunUnlock` 是功能没解锁：点面板外关掉，报告上面写的解锁条件，别点它的 `btnGo`（会跳去 PVE）。
 - 花钱确认：`SimpleAlert` 文案含「是否消耗 / 花费 / 购买」加数量时，`SimpleAlert__confirm` 会立即扣资源，没授权就点 `SimpleAlert__cancel`；`PopupConsumeConfirm` 同理点 `btn_cancel`。
 - 服务器提示：`SimpleAlert` 末尾带「（NoNo检测服务…）」是服务器报错，只能点确认。掉线时表上会出「掉线」一行，照它重开页面，登录页点「进入游戏」，登录弹窗是一个接一个弹的，dismiss 到主城再继续；「系统忙,稍后再试」是原操作没生效，稍等重试一次；「…不足」停下来报告。
