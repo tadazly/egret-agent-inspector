@@ -185,6 +185,7 @@ class FakeExtension:
     def __init__(self):
         self.calls = []
         self.page_params = []
+        self.project = None
 
     async def connect(self):
         self.reader, self.writer = await asyncio.open_connection("127.0.0.1", PORT)
@@ -249,6 +250,8 @@ class FakeExtension:
             if p.get("rects"):
                 result.update(devicePixelRatio=1, viewportSize={"width": 100, "height": 100},
                               captureSize={"width": 100, "height": 100})
+            if self.project:
+                result["project"] = self.project
             if method == "act":
                 result.update(executed=[{"op": "tap"}], stopped="done", elapsedMs=12)
         elif method == "locate":
@@ -372,6 +375,16 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("1 btn_notice* button", text.splitlines())
             self.assertIn("文案 hi", text.splitlines())
             self.assertNotIn("screenRect", text)
+            self.assertNotIn("splan-control", text)
+
+            # Splan 项目的页面（有全局 MFC）：observe 指向 splan-control，act 不再每步重复
+            ext.project = "splan"
+            _, text = await self.call_text("egret_observe", {})
+            self.assertTrue(text.splitlines()[1].startswith("技能 这是 Splan 项目页面"), text)
+            self.assertIn("splan-control", text)
+            _, text = await self.call_text("egret_act", {"marker": "m1", "steps": [{"i": 1}]})
+            self.assertNotIn("splan-control", text)
+            ext.project = None
 
             _, table = await self.call("egret_observe", {"format": "json"})
             self.assertEqual(table["marker"], "m1")
@@ -1154,6 +1167,12 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     const closed = await t.handlers.act({ steps: [{ op: "close" }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
     out.closeResult = closed.executed[0].result;
     out.bagClosed = !bag.stage;
+
+    // 只有页面有全局 MFC（Splan 项目）才标 project
+    out.projectPlain = t.buildActionTable({}).project || null;
+    window.MFC = {};
+    out.projectSplan = t.buildActionTable({}).project || null;
+    delete window.MFC;
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
@@ -1264,6 +1283,11 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         data = self.run_probe()
         self.assertEqual(data["dragFirstLeg"], "horizontal")
         self.assertEqual(data["dragEnd"], [465, 80])
+
+    def test_only_pages_with_mfc_are_marked_splan(self):
+        data = self.run_probe()
+        self.assertIsNone(data["projectPlain"])
+        self.assertEqual(data["projectSplan"], "splan")
 
     def test_close_skips_a_layer_that_is_already_leaving(self):
         data = self.run_probe()

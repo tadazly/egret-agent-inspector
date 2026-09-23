@@ -251,6 +251,8 @@ def route_step(step, rec):
     return replay, key, key
 
 
+SPLAN_SKILL_HINT = "这是 Splan 项目页面：进 PVE 战斗、出招和换精灵、换技能等固定操作写在 splan-control 技能里，还没读过就先读（读过不用再读）"
+
 DRAG_WORDS = {"up": "上滑", "down": "下滑", "left": "左滑", "right": "右滑"}
 
 
@@ -279,6 +281,8 @@ def render_action_table(table):
         head.append("marker %s" % table["marker"])
     if head:
         lines.append(" | ".join(head))
+    if table.get("skillHint"):
+        lines.append("技能 %s" % table["skillHint"])
     if table.get("stale"):
         lines.append("stale 界面已经不是做决策时那一页，未执行任何操作；按下面这张新表重选")
     if table.get("reloaded"):
@@ -1171,6 +1175,9 @@ class McpServer:
                     res = await self.enrich_table_with_ocr(args, res, reuse=args.get("ocr") is None)
                 for action in res.get("actions") or []:
                     action.pop("screenRect", None)
+                # 只在 observe 里指路：agent 往往卡住以后才想起读技能；act 每步都带就成了重复噪音
+                if res.pop("project", None) == "splan" and name == "egret_observe":
+                    res["skillHint"] = SPLAN_SKILL_HINT
                 for key in ("devicePixelRatio", "viewportSize", "captureSize", "needOcr", "bootId", "topKey"):
                     res.pop(key, None)
                 if args.get("format") == "json":
