@@ -1068,6 +1068,8 @@ class McpServer:
         self.page_boots = {}
         # tabId -> 执行过的步骤流水，用来发现「同一段路线第二次出现」
         self.routes = {}
+        # tabId -> 路线行摆出来之后 agent 照没照走，用来在自由探索时收起它
+        self.route_gates = {}
 
     async def send(self, msg):
         data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
@@ -1204,6 +1206,19 @@ class McpServer:
         del log[:-300]
         start = min(start, len(log))
         done = [e for e in log[start:] if e["key"] and not e["failed"]]
+        # 自由探索时反复进出同一个界面也会凑出「路线」，但每次想做的都不一样，摆出来只是多读一行、还可能把人带回老路。
+        # 摆出来连着两次都没照走就先收起；收起后仍在后台比对，agent 自己连着两步走得和上次一样，说明又在重复了，再摆出来
+        gate = self.route_gates.setdefault(tab, {"misses": 0, "hits": 0})
+        # 一步都没执行（marker 过期被拒）不算没照走
+        offered = gate.pop("offered", None) if log[start:] else None
+        if offered:
+            took = bool(done) and done[0]["key"] == offered
+            if gate.pop("shown", False):
+                gate["misses"] = 0 if took else gate["misses"] + 1
+            else:
+                gate["hits"] = gate["hits"] + 1 if took else 0
+                if gate["hits"] >= 2:
+                    gate["misses"] = gate["hits"] = 0
         if not done:
             return
         last = done[-1]
@@ -1236,7 +1251,10 @@ class McpServer:
                 break
         # 上次接下来那一步是在现在这个面板上做的，才算走在同一条路上
         if len(follow) >= 2 and follow[0]["from"] == table.get("topKey"):
-            table["route"] = {"labels": [e["label"] for e in follow], "steps": [e["step"] for e in follow]}
+            gate["offered"] = follow[0]["key"]
+            if gate["misses"] < 2:
+                gate["shown"] = True
+                table["route"] = {"labels": [e["label"] for e in follow], "steps": [e["step"] for e in follow]}
 
     async def enrich_table_with_ocr(self, args, table, reuse=False):
         """动作表里图片字按钮的标签是 qaName/资源名；一次截图批量 OCR 把真实文案补上。

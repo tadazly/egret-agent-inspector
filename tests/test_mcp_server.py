@@ -1129,7 +1129,7 @@ class RenderTableTest(unittest.TestCase):
     def test_second_time_on_a_route_offers_the_rest_of_it(self):
         server = load_server()
         mcp = server.McpServer.__new__(server.McpServer)
-        mcp.routes = {}
+        mcp.routes, mcp.route_gates = {}, {}
 
         def tap(sel, label, frm, to, **step):
             return {"i": 3, **step}, {"tabId": 1, "topKey": to, "executed": [
@@ -1165,7 +1165,7 @@ class RenderTableTest(unittest.TestCase):
     def test_route_drops_detours_failures_and_the_per_round_pick(self):
         server = load_server()
         mcp = server.McpServer.__new__(server.McpServer)
-        mcp.routes = {}
+        mcp.routes, mcp.route_gates = {}, {}
         bag, prop, exp, alert, supply = "PetBag:bag", "PetProperty:prop", "ExpDevice:exp", "SimpleAlert:alert", "Supply:s"
 
         def step(sel, label, frm, role="button", op="tap"):
@@ -1198,6 +1198,41 @@ class RenderTableTest(unittest.TestCase):
         self.assertEqual(table["route"]["labels"], ["快速升级", "至100级", "confirm", "返回", "返回"])
         self.assertNotIn("btn_return", json.dumps(table["route"]["steps"]))
         self.assertNotIn("petId", json.dumps(table["route"]["steps"]))
+
+    def test_route_goes_quiet_while_exploring_and_comes_back_when_repeating(self):
+        server = load_server()
+        mcp = server.McpServer.__new__(server.McpServer)
+        mcp.routes, mcp.route_gates = {}, {}
+        main, bag, mail, shop = "Main:m", "Bag:b", "Mail:l", "Shop:s"
+
+        def go(name, frm, to):
+            if name == "close":
+                args, rec = {"steps": [{"op": "close"}]}, {"op": "close", "from": frm, "result": {"ok": True}}
+            else:
+                args, rec = {"i": 3}, {"op": "tap", "from": frm,
+                                       "target": {"label": name, "sel": {"name": name, "match": "exact"}}}
+            table = {"tabId": 1, "topKey": to, "executed": [rec]}
+            mcp.note_route(args, table)
+            return (table.get("route") or {}).get("labels")
+
+        # 自由探索：反复进背包，每次点的都不一样。路线摆了两次都没照走，之后收起
+        explore = [("btn_bag", main, bag), ("tab_equip", bag, bag), ("close", bag, main),
+                   ("btn_mail", main, mail), ("close", mail, main),
+                   ("btn_bag", main, bag), ("tab_skin", bag, bag), ("btn_sort", bag, bag), ("close", bag, main),
+                   ("btn_shop", main, shop), ("close", shop, main),
+                   ("btn_bag", main, bag), ("tab_pet", bag, bag), ("close", bag, main)]
+        shown = [(k, labels) for k, step in enumerate(explore) for labels in [go(*step)] if labels]
+        self.assertEqual([k for k, _ in shown], [5, 8])
+        self.assertEqual(shown[0][1], ["tab_equip", "close"])
+
+        # marker 过期被拒、一步没执行：不算没照走
+        mcp.note_route({"i": 3}, {"tabId": 1, "topKey": main, "executed": []})
+        # 开始重复：自己连着两步走得和上次一样，路线重新摆出来
+        self.assertIsNone(go("btn_mail", main, mail))
+        self.assertIsNone(go("btn_read", mail, mail))
+        self.assertIsNone(go("close", mail, main))
+        self.assertIsNone(go("btn_mail", main, mail))
+        self.assertEqual(go("btn_read", mail, mail), ["close", "btn_mail"])
 
     def test_close_failure_says_what_was_tried(self):
         server = load_server()
