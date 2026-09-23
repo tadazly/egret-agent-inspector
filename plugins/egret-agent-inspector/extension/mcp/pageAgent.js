@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.1";
+    var VERSION = "1.7.2";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -2314,16 +2314,18 @@
 
     // 没字的小图标（buff、状态角标、属性图标）占着行却很少是要点的；
     // 战斗里一排十几个，会把「请选择替换的精灵」这种真选项挤出表外
+    // 只认长宽都小的方块：精灵详情里的升级键是 51×23 的扁按钮，按「最短边 < 28」会被当成图标挤出表外，
+    // agent 在详情页找不到升级键，整轮验收一只都没升成
     function tinyIcon(e) {
         if (e.from === "text" || e.from === "childText" || e.from === "nearText") return false;
-        return e.role === "button" && e._w !== undefined && Math.min(e._w, e._h) < 28;
+        return e.role === "button" && e._w !== undefined && Math.max(e._w, e._h) < 32;
     }
 
     function pickWithinLimit(entries, limit) {
         if (entries.length <= limit) return entries;
         var ranked = entries.map(function (e, at) {
             var rank = TRUNCATE_RANK[e.role] !== undefined ? TRUNCATE_RANK[e.role] : 2;
-            if (tinyIcon(e)) rank = Math.max(rank, 4);
+            if (tinyIcon(e)) rank = 5;
             return { at: at, rank: rank + (e.occluded ? 10 : 0) };
         });
         ranked.sort(function (a, b) { return a.rank - b.rank || a.at - b.at; });
