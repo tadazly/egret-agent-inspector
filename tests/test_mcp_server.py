@@ -830,6 +830,14 @@ const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeigh
     visible: true, alpha: 1, touchEnabled: true, touchChildren: true, parent: null, children: [],
     get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; } };
 const player = { stage };
+// debug 版 Egret 读舞台的 visible / alpha 会打 Warning #1009，每次 act 都冒出「页面报错」
+const stageReads = [];
+// 和 Egret 一样挂在原型上：for…in 遍历实例属性时碰不到，只有直接读才算
+const stageProto = {};
+["visible", "alpha"].forEach(k => Object.defineProperty(stageProto, k, { get() {
+    stageReads.push(k + " " + new Error().stack.split(String.fromCharCode(10))[2].trim()); return k === "alpha" ? 1 : true; } }));
+delete stage.visible; delete stage.alpha;
+Object.setPrototypeOf(stage, stageProto);
 global.window = { addEventListener() {}, devicePixelRatio: 1, innerWidth: 800, innerHeight: 480,
     egret: { getQualifiedClassName(o) { return o.__class || "Object"; } } };
 global.document = { documentElement: { clientLeft: 0, clientTop: 0 },
@@ -1173,6 +1181,7 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     window.MFC = {};
     out.projectSplan = t.buildActionTable({}).project || null;
     delete window.MFC;
+    out.stageReads = stageReads.slice(0, 5);
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
@@ -1283,6 +1292,9 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         data = self.run_probe()
         self.assertEqual(data["dragFirstLeg"], "horizontal")
         self.assertEqual(data["dragEnd"], [465, 80])
+
+    def test_never_reads_visible_or_alpha_of_the_stage(self):
+        self.assertEqual(self.run_probe()["stageReads"], [])
 
     def test_only_pages_with_mfc_are_marked_splan(self):
         data = self.run_probe()

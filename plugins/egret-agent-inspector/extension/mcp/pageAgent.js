@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.13";
+    var VERSION = "1.7.14";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -409,7 +409,7 @@
         if (t !== null) info.text = t;
         var src = sourceOf(o);
         if (src) info.source = src;
-        info.visible = !!o.visible;
+        info.visible = o === getStage() ? true : !!o.visible;
         info.onStageVisible = effectiveVisible(o);
         info.touchable = effectiveTouchable(o);
         ["enabled", "selected", "currentState"].forEach(function (k) {
@@ -1158,18 +1158,20 @@
 
     // GuideMask 常挂在 guideMaskLayer 这类与顶层面板平级的图层下，顺着顶层面板找不到，要在舞台范围内找
     function guideMaskIn(panel) {
+        // 舞台本身不读 visible/alpha：debug 版 Egret 一读就打 Warning #1009，每次 act 都报「页面报错」
+        var stage = getStage();
         function search(root) {
             if (!root) return null;
             if (/guideMask\.GuideMask/i.test(className(root))) return root;
             var found = null;
             walk(root, function (o) {
                 if (found) return false;
-                if (!o.visible || o.alpha === 0) return false;
+                if (o !== stage && (!o.visible || o.alpha === 0)) return false;
                 if (/guideMask\.GuideMask/i.test(className(o))) found = o;
             });
             return found;
         }
-        return search(panel) || search(getStage());
+        return search(panel) || search(stage);
     }
 
     // 挖洞区域：优先用 imgKuang 边框；没有边框时由 shapN 遮罩碎片反推没被盖住的那一格
@@ -2311,7 +2313,8 @@
         var out = [];
         walk(root, function (o) {
             if (out.length >= 4) return false;
-            if (!o.visible || o.alpha === 0) return false;
+            // root 可能就是舞台：舞台的 visible / alpha 一读 debug 版 Egret 就打 Warning #1009
+            if (o !== root && (!o.visible || o.alpha === 0)) return false;
             var vp = o.viewport;
             if (!vp) return;
             var r = stageRect(o);
