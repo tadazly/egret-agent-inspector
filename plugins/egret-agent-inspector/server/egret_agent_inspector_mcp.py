@@ -289,6 +289,13 @@ def render_action_table(table):
         lines.append("页面已重载 重载前的 i 编号、marker、hash 全部失效；别再用记下来的 hash，按这张新表重新定位")
     for warning in table.get("warnings") or []:
         lines.append("警告 %s" % warning)
+    session = table.get("session") or {}
+    if session.get("lost"):
+        # 掉线提示框常被引导遮罩压住点不到，点了也只是让游戏自己刷新：直接重开最快
+        what = session.get("text") or {"kicked": "被踢下线", "reconnect-gave-up": "重连失败",
+                                       "disconnected": "连接断开"}.get(session.get("reason"), "掉线")
+        lines.append("掉线 %s：别点提示框，直接 egret_navigate %s 重开页面，再从登录页进游戏" % (
+            what, json.dumps({"url": session.get("url")}, ensure_ascii=False)))
     for rec in table.get("executed") or []:
         target = rec.get("target") or {}
         label = target.get("label") or target.get("reason") or rec.get("text") or ""
@@ -297,6 +304,8 @@ def render_action_table(table):
             line += " → %s" % (rec["to"].get("label") or "")
         elif rec.get("drag"):
             line += "（按住%s）" % DRAG_WORDS.get(rec["drag"], rec["drag"])
+        if rec.get("cleared"):
+            line += "（先点掉了%s）" % rec["cleared"]
         if rec.get("error"):
             line += " → 失败：%s" % rec["error"]
         elif rec.get("expectMatched") is False:
@@ -679,7 +688,7 @@ TOOLS = {
         "{\"op\":\"scroll\",\"i\":3,\"dy\":-200} 滚动列表，{\"op\":\"scroll\",\"hash\":<Scroller>,\"toIndex\":132} 直接滚到第 132 条（先用 $items 读数据找到下标）；{\"op\":\"wait\",\"ms\":800} 或 {\"op\":\"wait\",\"until\":{查询条件}} 等待。"
         "编号只有传了上一次的 marker 且界面没变时才有效：界面已变会原样返回 stale=true 和新动作表，不执行任何点击。"
         "每步可加 expect（查询条件）校验结果，失败即停止并返回当前动作表；加 optional 则该步失败不影响结论。"
-        "已确认的连续操作可以一次给多步，但 i 编号只对第一步有效，后续步骤用查询条件或 op 定位。"
+        "已确认的连续操作可以一次给多步；各步的 i 都指这张表（同一屏先点 3 再点 4 就写 [{\"i\":3},{\"i\":4}]），要点前面步骤打开的新界面里的东西用查询条件或 op。"
         "返回的新表里「变化」一行直接说明这一步把界面改成了什么样，不用自己 diff 两张表。",
         obj({"steps": {"type": "array", "items": {"type": "object"},
                        "description": "1-10 个步骤，按顺序执行，失败即停止"},
@@ -739,8 +748,11 @@ TOOLS = {
     "splan_call": (
         "Splan 项目专属操作，仅当页面存在全局 MFC 对象时可用：probe 探测项目调试接口、listModules 列模块常量、"
         "openModule/closeModule 用模块事件直达界面（比逐级点击稳）、qa 用项目自身 QA 接口查找组件、dispatch 派发任意全局事件。"
-        "先 probe 确认可用能力；openModule 会如实回报派发的事件名与载荷，不对时用 event/payload 覆盖。",
-        obj({"action": {"type": "string", "enum": ["probe", "listModules", "openModule", "closeModule", "qa", "dispatch"]},
+        "先 probe 确认可用能力；openModule 会如实回报派发的事件名与载荷，不对时用 event/payload 覆盖。"
+        "login 在登录页用 debug.js 的内网免密登录切换账号（account 指定账号，newAccount=true 用 agent+时间戳新号）。",
+        obj({"action": {"type": "string", "enum": ["probe", "listModules", "openModule", "closeModule", "qa", "dispatch", "login"]},
+             "account": {"type": "string", "description": "login 的账号；不传就是上次切换的账号"},
+             "newAccount": {"type": "boolean", "description": "login 用 agent+秒级时间戳的新号（服务端自动建号）"},
              "module": {"type": "string", "description": "模块常量名或 id"},
              "filter": {"type": "string", "description": "listModules 的名称过滤"},
              "qaName": {"type": "string"},
@@ -838,7 +850,7 @@ def write_notes(path, items):
 
 
 def validate_route_steps(steps):
-    forbidden_actions = {"openModule", "closeModule", "dispatch", "evaluate", "setProps", "testCommand"}
+    forbidden_actions = {"openModule", "closeModule", "dispatch", "evaluate", "setProps", "testCommand", "login"}
 
     def walk(value):
         if isinstance(value, dict):
@@ -1182,6 +1194,9 @@ class McpServer:
                 # 只在 observe 里指路：agent 往往卡住以后才想起读技能；act 每步都带就成了重复噪音
                 if res.pop("project", None) == "splan" and name == "egret_observe":
                     res["skillHint"] = SPLAN_SKILL_HINT
+                    panel = res.get("panel") or {}
+                    if "NewLogin" in "%s %s" % (panel.get("className") or "", panel.get("name") or ""):
+                        res["skillHint"] += "；登录页换号、用新号跑新手见 splan-login"
                 for key in ("devicePixelRatio", "viewportSize", "captureSize", "needOcr", "bootId", "topKey"):
                     res.pop(key, None)
                 if args.get("format") == "json":

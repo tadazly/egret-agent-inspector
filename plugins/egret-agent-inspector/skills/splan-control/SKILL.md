@@ -25,7 +25,7 @@ description: 操作 Splan 项目的游戏页面（页面存在全局 MFC 对象�
 - 主城底栏：`btn_petBag` 精灵背包、`btn_shop` 商店、`btn_task` 任务、`btn_book` 图鉴、`btn_petStrong` 精灵强化、`btn_eggExchange` 融合。其他功能先点 `ToolbarNew__btn_qiuck`（快捷入口），里面按文字点。顶栏 `add_diamond`、`add_coin`、`add_ticket` 是充值购买。
 - 点入口弹出 `FunUnlock` 是功能没解锁：点面板外关掉，报告上面写的解锁条件，别点它的 `btnGo`（会跳去 PVE）。
 - 花钱确认：`SimpleAlert` 文案含「是否消耗 / 花费 / 购买」加数量时，`SimpleAlert__confirm` 会立即扣资源，没授权就点 `SimpleAlert__cancel`；`PopupConsumeConfirm` 同理点 `btn_cancel`。
-- 服务器提示：`SimpleAlert` 末尾带「（NoNo检测服务…）」是服务器报错，只能点确认。「您已掉线」点确认后页面会重载，点 `btn_start` 重进游戏，登录弹窗是一个接一个弹的，dismiss 到主城再继续；「系统忙,稍后再试」是原操作没生效，稍等重试一次；「…不足」停下来报告。
+- 服务器提示：`SimpleAlert` 末尾带「（NoNo检测服务…）」是服务器报错，只能点确认。掉线时表上会出「掉线」一行，照它重开页面，登录页点「进入游戏」，登录弹窗是一个接一个弹的，dismiss 到主城再继续；「系统忙,稍后再试」是原操作没生效，稍等重试一次；「…不足」停下来报告。
 - 点了没反应先 `egret_get_errors`：有「未收到 cs_xxx 返回」是在等服务器，别重点（消耗类会扣两次）。
 - 系统提示框点遮罩关不掉，点 `role: confirm`；普通弹窗点 `role: close`，没有就用 `{"op":"close"}`。
 - 定位优先 `qaName`（`宿主短类名__部件名`），其次 `id`、`text`。动作表定不下来再截图，用 `rect` 只截目标区域。
