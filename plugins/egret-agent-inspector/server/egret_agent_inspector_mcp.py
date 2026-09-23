@@ -1207,11 +1207,15 @@ class McpServer:
         for k, (step, rec) in enumerate(zip(sent, recs)):
             replay, key, loose = route_step(step, rec)
             target = rec.get("target") or {}
+            # agent 自己垫的干等、什么都没推进的 advance：act 本来就会等，照发只是把空转也复制一遍（战斗里曾经每回合都推荐「wait → advance → wait」）
+            filler = (rec.get("op") == "wait" and not (isinstance(step, dict) and step.get("until"))) or \
+                (rec.get("op") == "advance" and (rec.get("result") or {}).get("advanced") == 0)
             log.append({
                 "from": rec.get("from"),
                 "to": recs[k + 1].get("from") if k + 1 < len(recs) else table.get("topKey"),
                 "key": key, "loose": loose, "step": replay,
-                "failed": bool(rec.get("error") or rec.get("skipped")),
+                # 空转和失败一样：不回放，也不拿来认「又走到这一步了」
+                "failed": bool(rec.get("error") or rec.get("skipped")) or filler,
                 "closing": rec.get("op") in ("close", "dismiss", "recommended") or target.get("role") in ("close", "back"),
                 "label": short_label(target.get("label")) or rec.get("op")})
         del log[:-300]

@@ -1009,6 +1009,17 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     const swiped = await t.handlers.act({ marker: cardTable.marker, steps: [{ i: card0.i }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
     out.pickedByAct = cardBar.picked.slice();
     out.actDrag = swiped.executed[0].drag || null;
+
+    // 多步里后面的目标晚一点才出来（进战斗后技能栏才滑进来）：等它，不马上判找不到
+    setTimeout(() => item("eui.Button", "lateBtn", hud, { x: 600, y: 20, width: 60, height: 40 }, { listener: true }), 500);
+    const late = await t.handlers.act({ steps: [{ op: "wait", ms: 10 }, { name: "lateBtn", match: "exact" }],
+        quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.lateError = late.executed[1] && late.executed[1].error || null;
+    let startedAt = Date.now();
+    const never = await t.handlers.act({ steps: [{ op: "wait", ms: 10 }, { name: "neverThere", match: "exact" }],
+        quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.neverError = never.executed[1] && never.executed[1].error || null;
+    out.neverMs = Date.now() - startedAt;
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
@@ -1092,6 +1103,12 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         # 按编号点它，act 替它按住滑出上沿，游戏认了
         self.assertEqual(data["actDrag"], "up")
         self.assertEqual(data["pickedByAct"], ["card0"])
+
+    def test_later_step_waits_for_its_target_to_show_up(self):
+        data = self.run_probe()
+        self.assertIsNone(data["lateError"])
+        self.assertIn("没有找到匹配的显示对象", data["neverError"])
+        self.assertLess(data["neverMs"], 5000)
 
     def test_tap_on_a_locked_group_waits_for_unlock(self):
         unlock = self.run_probe()["unlock"]
@@ -1270,6 +1287,41 @@ class RenderTableTest(unittest.TestCase):
         self.assertEqual(table["route"]["labels"], ["快速升级", "至100级", "confirm", "返回", "返回"])
         self.assertNotIn("btn_return", json.dumps(table["route"]["steps"]))
         self.assertNotIn("petId", json.dumps(table["route"]["steps"]))
+
+    def test_route_leaves_out_idle_waits_and_empty_advances(self):
+        server = load_server()
+        mcp = server.McpServer.__new__(server.McpServer)
+        mcp.routes, mcp.route_gates = {}, {}
+        bag, up = "PetBag:petBag", "UpPanel:upPanel"
+
+        def tap(sel, label, frm, to):
+            args = {"i": 3}
+            table = {"tabId": 1, "topKey": to, "executed": [{"op": "tap", "from": frm, "target": {"label": label, "sel": sel}}]}
+            mcp.note_route(args, table)
+            return table
+
+        def idle(at, until=None):
+            steps = [{"op": "wait", "ms": 2000}, {"op": "advance"}]
+            if until:
+                steps.append({"op": "wait", "until": until})
+            recs = [{"op": "wait", "from": at}, {"op": "advance", "from": at, "result": {"advanced": 0}}]
+            if until:
+                recs.append({"op": "wait", "from": at})
+            table = {"tabId": 1, "topKey": at, "executed": recs}
+            mcp.note_route({"steps": steps}, table)
+            return table
+
+        tap({"qaName": "PetBag__item", "index": 0}, "里奥斯", bag, bag)
+        tap({"qaName": "PetBag__btn_up"}, "升级", bag, up)
+        idle(up)
+        tap({"text": "确定"}, "确定", up, up)
+        idle(up, until={"text": "升级成功"})
+        tap({"qaName": "UpPanel__close"}, "close", up, bag)
+        tap({"qaName": "PetBag__item", "index": 3}, "缪斯", bag, bag)
+        table = tap({"qaName": "PetBag__btn_up"}, "升级", bag, up)
+        # 干等和推进 0 次不回放；等某个结果出现（until）是有意义的，照带
+        self.assertEqual(table["route"]["labels"], ["确定", "wait", "close"])
+        self.assertEqual(table["route"]["steps"][1], {"op": "wait", "until": {"text": "升级成功"}})
 
     def test_route_goes_quiet_while_exploring_and_comes_back_when_repeating(self):
         server = load_server()

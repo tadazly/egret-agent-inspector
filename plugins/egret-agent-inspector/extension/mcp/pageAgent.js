@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.4";
+    var VERSION = "1.7.5";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -3380,7 +3380,18 @@
                     }
                     if (op === "tap" || op === "text" || op === "swipe") {
                         // 填字时 text 是要填的内容，不能拿它当查询条件去找目标
-                        var resolved = resolveFastTarget(op === "text" ? Object.assign({}, step, { text: undefined }) : step, fresh);
+                        var findQuery = op === "text" ? Object.assign({}, step, { text: undefined }) : step, resolved = null;
+                        for (var findStart = Date.now(); !resolved;) {
+                            try {
+                                resolved = resolveFastTarget(findQuery, fresh);
+                            } catch (err) {
+                                // 多步里后面的目标常常还没出来：点完「挑战」要先进战斗、技能栏滑进来才点得到。
+                                // 验收里照发的路线就这样一进战斗就报「找不到」。后面的步骤等它最多 3 秒再判
+                                if (n === 0 || !/没有找到匹配的显示对象/.test(String(err && err.message)) ||
+                                    Date.now() - findStart > 3000 || deadline - Date.now() < 4000) throw err;
+                                await sleep(150);
+                            }
+                        }
                         var o = resolved.o, entry = resolved.entry;
                         if (entry) {
                             record.target = { i: entry.i, label: entry.label, hash: entry.hash, role: entry.role };
