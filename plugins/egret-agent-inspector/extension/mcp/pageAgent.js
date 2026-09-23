@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.6.9";
+    var VERSION = "1.7.0";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -530,6 +530,30 @@
         var index = p.index || 0;
         if (index >= list.length) throw new Error("匹配到 " + list.length + " 个对象，index " + index + " 越界");
         return list[index];
+    }
+
+    // 给点过的控件找一个下次还能用的查询条件：编号只在这一张表里有效，hash 面板一重开就变。
+    // 路线复用时 server 拿它拼多步 act，所以要能唯一回到同一个控件；实在不唯一就带上是第几个
+    function stableSelector(o) {
+        var qa = qaNameOf(o), id = bindId(o), nm = nameOf(o), tx = textOf(o);
+        var cands = [];
+        if (qa) cands.push({ qaName: qa, match: "exact" });
+        if (id) cands.push({ id: id, match: "exact" });
+        if (nm && !/^(instance)?\d*$/.test(nm)) cands.push({ name: nm, match: "exact" });
+        if (tx && String(tx).length <= 16) cands.push({ text: String(tx), match: "exact" });
+        var fallback = null;
+        for (var k = 0; k < cands.length; k++) {
+            var hits = query(cands[k]), at = hits.indexOf(o);
+            if (at < 0) continue;
+            if (hits.length === 1) return cands[k];
+            if (!fallback && at < 10) fallback = Object.assign({}, cands[k], { index: at });
+        }
+        return fallback;
+    }
+
+    // 面板身份：hash 每次打开都变，类名 + 实例名才认得出「又回到了背包」
+    function panelKey(o) {
+        return o ? shortClass(o) + ":" + stackEntryLabel(o) : "stage";
     }
 
     function pick(o, keys) {
@@ -2314,6 +2338,8 @@
         var out = {
             // 每次注入换一个：页面一重载，server 就能看出上一轮的 i 编号和 hash 全部作废
             bootId: BOOT_ID,
+            // server 记路线用：和 act 每步记下的 from 同一口径
+            topKey: panelKey(si.top),
             stageSize: [stage.stageWidth, stage.stageHeight],
             panel: si.top ? panelBrief(si.top, stage) : null,
             stack: si.stack.map(function (o) { return panelBrief(o, stage); }),
@@ -3130,6 +3156,7 @@
                 var op = step.op || (step.text !== undefined && locatedElsewhere ? "text" : "tap");
                 var before = quickSignature();
                 var record = { op: op };
+                try { record.from = panelKey(sceneInfo().top); } catch (e) {}
                 var tapTarget = null, tapWasLocked = null;
                 try {
                     if (op === "tap" || op === "text") {
@@ -3138,6 +3165,8 @@
                         var o = resolved.o, entry = resolved.entry;
                         record.target = entry ? { i: entry.i, label: entry.label, hash: entry.hash }
                             : { hash: hashOf(o), label: actionLabelOf(o).label };
+                        var sel = stableSelector(o);
+                        if (sel) record.target.sel = sel;
                         if (op === "text") {
                             // 往标签、按钮文字上写字只会把界面改花，还让人以为输入成功了
                             if (!inputLike(o) && !(o.textDisplay && inputLike(o.textDisplay)) && !step.force) {
