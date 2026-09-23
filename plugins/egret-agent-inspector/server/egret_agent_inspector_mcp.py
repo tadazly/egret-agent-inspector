@@ -404,7 +404,8 @@ def render_action_table(table):
     for sc in table.get("scrollers") or []:
         dirs = "".join([d for d, k in (("↑", "canUp"), ("↓", "canDown"), ("←", "canLeft"), ("→", "canRight")) if sc.get(k)])
         lines.append("可滚 %s %s → {\"op\":\"scroll\",\"hash\":%s,\"dy\":-200}" % (sc.get("label"), dirs, sc.get("hash")))
-        if sc.get("items", 0) > 10 and sc.get("list") and dirs:
+        # 二十来条的短列表滚两下就看完了，再摆「先读数据」只会把 agent 引去读一堆 id
+        if sc.get("items", 0) > 20 and sc.get("list") and dirs:
             # 模型靠滚动去「看」列表，一屏几条，数出来的总数能差几十倍；把全集入口直接摆在它眼前
             fields = "/".join(sc.get("fields") or [])
             lines.append("数据 共 %d 条%s，屏上只有几条：计数、筛选、找目标先读数据 egret_evaluate \"$items(%s, it => …)\"；"

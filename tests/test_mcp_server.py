@@ -683,6 +683,8 @@ process.stdout.write(JSON.stringify({
     scrollers: t.buildActionTable({ limit: 30 }).scrollers || [],
     notMax: t.itemsOf(petScroller, it => it.level < 100),
     byField: t.itemsOf(petScroller.viewport.hashCode, { nick: "pet7" }, { fields: ["nick", "level"] }),
+    // 只写了 {limit} 的第二个参数是选项，不是「limit 字段等于 5」的筛选
+    optsAsWhere: (r => ({ matched: r.matched, rows: r.rows.length }))(t.itemsOf(petScroller, { limit: 5 })),
     // 35 条列表小字排在前面，真正的按钮在后面：截断时按钮不能被挤掉
     picked: t.pickWithinLimit(Array.from({ length: 40 }, (_, k) => ({ label: "r" + k,
         role: k < 35 ? "text" : k === 38 ? "close" : "button", occluded: k === 36 })), 8).map(e => e.label),
@@ -777,6 +779,8 @@ process.stdout.write(JSON.stringify({
         by_field = data["byField"]
         self.assertEqual(by_field["matched"], 1)
         self.assertEqual(by_field["rows"], [{"index": 7, "nick": "pet7", "level": 100}])
+        # 只写了 {limit} 的第二个参数按选项处理：全量匹配、只回 5 行
+        self.assertEqual(data["optsAsWhere"], {"matched": 200, "rows": 5})
 
     def test_truncation_keeps_buttons_over_list_labels(self):
         data = self.run_probe()
@@ -1458,7 +1462,9 @@ class RenderTableTest(unittest.TestCase):
                  "scrollers": [{"hash": 540688, "label": "LV.100 里奥斯", "canDown": True, "items": 531,
                                 "list": 540690, "fields": ["nick", "level", "petId"]},
                                # 列表已经全在屏上、滚不动时不用提示读数据
-                               {"hash": 12, "label": "tabs", "items": 4, "list": 13, "fields": ["name"]}],
+                               {"hash": 12, "label": "tabs", "items": 4, "list": 13, "fields": ["name"]},
+                               # 十几条的短列表滚两下就看完，不引去读一堆 id
+                               {"hash": 14, "label": "skills", "canDown": True, "items": 13, "list": 15, "fields": ["skillId"]}],
                  "executed": [{"op": "scroll", "result": {"index": 132, "total": 531, "visible": {"lo": 128, "hi": 139}}}]}
         text = server.render_action_table(table)
         self.assertIn("数据 共 531 条（字段 nick/level/petId）", text)
