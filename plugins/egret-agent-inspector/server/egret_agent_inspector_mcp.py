@@ -245,7 +245,7 @@ def route_step(step, rec):
     return replay, key, key
 
 
-DRAG_WORDS = {"up": "上滑", "down": "下滑", "left": "左滑", "right": "右滑", "any": "拖出去"}
+DRAG_WORDS = {"up": "上滑", "down": "下滑", "left": "左滑", "right": "右滑"}
 
 
 def short_label(label, width=12):
@@ -368,8 +368,8 @@ def render_action_table(table):
             if a.get("occluded"):
                 flags.append("被挡")
             if a.get("drag"):
-                # 原地点一下不生效、要拖出去松手的控件（换宠卡）；认得出方向时点它会自动按住滑出去
-                flags.append("按住拖出去" if a["drag"] == "any" else "按住%s" % DRAG_WORDS.get(a["drag"], a["drag"]))
+                # 原地点一下不生效、要拖出去松手的控件（换宠卡）；点它会自动按住滑出去
+                flags.append("按住%s" % DRAG_WORDS.get(a["drag"], a["drag"]))
             star = "*" if (a.get("weak") or a.get("from") in WEAK_LABEL_SOURCES) else ""
             if a.get("alt"):
                 # OCR 识别美术字经常出错，原来的结构化标签留一手
@@ -443,7 +443,7 @@ INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游�
 - 对白与引导用 op=advance 一次推完；弹窗用 op=dismiss；关掉当前这个界面用 op=close（关闭键→返回键→遮罩依次试，并确认它真的没了）；加载过场（mode=transient）用 op=wait。
 - 要把一批同类目标挨个打开看一眼，一次 act 就给多组「打开 + op=close」步骤，不要一个来回只点一下。
 - 表上出现「页面已重载」时，之前记下的 hash 和编号全部作废，按新表重新定位。
-- 动作表标「按住上滑」这类的控件要拖出去松手才生效（例如把卡片拖上场），照常按编号点，act 会自动按住滑出去；标「按住拖出去」时方向不明，用 op=swipe 带 dir。
+- 动作表标「按住上滑」这类的控件要拖出去松手才生效（例如把卡片拖上场），照常按编号点，act 会自动按住滑出去。
 - act 返回里出现「路线」一行，说明这一步和之前走过的路线一样，后面给的就是上次紧接着的步骤；情况一样就照着一次发完，不一样（目标换了、弹窗不同）再按表决策。
 - 回合制战斗：点技能后 act 会等到下一回合能操作再返回；同一招要连着出时给 repeat，停下时看它说停在哪（换宠栏、结算、时限）。
 - 列表屏上只显示几条。要计数、筛选、挑目标时先用 egret_evaluate 的 $items(hash, it => …) 读全量数据，再用 op=scroll 的 toIndex 滚过去点；不要一屏屏滚着数。读数据可以，调业务方法改状态不行。
@@ -649,7 +649,7 @@ TOOLS = {
         "要按同一招连出时给 {\"i\":3,\"repeat\":20}：解锁后立刻再点，遇到换界面、冒出新选项（换宠）、点了不再上锁或次数用完就停；"
         "回合倒计时往往只有几秒，每回合都靠 observe 决策会丢回合；"
         "动作表标「按住上滑」这类的控件要拖出去松手才生效（例如把卡片拖上场），按编号点它会自动按住滑出去；"
-        "标「按住拖出去」（方向不明）时用 {\"op\":\"swipe\",\"i\":3,\"dir\":\"up\"}，dir 为 up/down/left/right；"
+        "要自己指定方向时用 {\"op\":\"swipe\",\"i\":3,\"dir\":\"up\"}，dir 为 up/down/left/right；"
         "{\"op\":\"close\"} 关掉当前顶层面板：一次往返里依次试关闭键、返回键、遮罩，并确认面板真的消失，"
         "回报是哪条路子生效；打开一个界面看完就关的遍历用它，比 dismiss 更适合全屏面板；"
         "{\"op\":\"recommended\"} 点 observe 给出的 recommendedTarget（引导挖洞、只能点遮罩关闭的弹窗）；"
