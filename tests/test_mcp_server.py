@@ -77,7 +77,7 @@ class LauncherTest(unittest.TestCase):
 const fs = require("fs");
 const vm = require("vm");
 let source = fs.readFileSync(process.argv[1], "utf8");
-source = source.replace("\n    installErrorHooks();", "\n    window.__pageAgentTest = { semanticTerms, dialogueHasDecision, semanticActionOwner, sceneInfo, findCloseControl, maskPointOutside, backdropDismissTargetOf, transientOverlayOf };\n    installErrorHooks();");
+source = source.replace("\n    installErrorHooks();", "\n    window.__pageAgentTest = { semanticTerms, locateSemantic, dialogueHasDecision, semanticActionOwner, sceneInfo, findCloseControl, maskPointOutside, backdropDismissTargetOf, transientOverlayOf };\n    installErrorHooks();");
 const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480,
     visible: true, alpha: 1, touchEnabled: true, touchChildren: true, parent: null, children: [],
     get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; } };
@@ -130,7 +130,12 @@ const sceneBg = item("eui.Image", "sceneBackground", null, scene, true, { x: 0, 
 const sceneContent = item("eui.Group", "content", null, scene, false, { x: 120, y: 60, width: 560, height: 360 });
 stage.$touchHandler = { findTarget(x, y) { return x >= 120 && x <= 680 && y >= 60 && y <= 420 ? sceneContent : sceneBg; } };
 const opaqueSceneBackdrop = t.maskPointOutside(scene);
-process.stdout.write(JSON.stringify({ named, travel, passive, decision, canonical, noticeIsClose,
+// 工具栏的图标按钮只有英文实例名；「精灵背包」不能被旁边带「精灵」二字的活动入口抢走
+const toolbar = item("ui.ToolbarNew", "toolbar", null, stage, false, { x: 0, y: 380, width: 800, height: 100 });
+item("eui.Label", "txt_label", "至臻精灵", toolbar, true, { x: 20, y: 400, width: 66, height: 17 });
+item("eui.Component", "btn_petBag", null, toolbar, true, { x: 700, y: 420, width: 42, height: 47 });
+const bagHit = t.locateSemantic({ description: "精灵背包", rootHash: toolbar.hashCode }).candidates[0];
+process.stdout.write(JSON.stringify({ named, travel, passive, decision, canonical, noticeIsClose, bagHit: bagHit && bagHit.name,
     modalTop: modalScene.top && modalScene.top.name, backdropReason: backdrop && backdrop.reason, backdropPoint: backdrop && backdrop.stagePoint,
     transientReason: transientOverlay && transientOverlay.reason, transientAction: transientOverlay && transientOverlay.action,
     transitionDismiss: !!transitionDismiss, opaqueSceneBackdrop: !!opaqueSceneBackdrop }));
@@ -140,6 +145,7 @@ process.stdout.write(JSON.stringify({ named, travel, passive, decision, canonica
         data = json.loads(result.stdout)
         self.assertTrue({"任务目标", "npc", "萨帕尼克"}.issubset(data["named"]))
         self.assertTrue({"地图", "传送", "新白沙罗域"}.issubset(data["travel"]))
+        self.assertEqual(data["bagHit"], "btn_petBag")
         self.assertFalse(data["passive"])
         self.assertTrue(data["decision"])
         self.assertTrue(data["canonical"])
@@ -406,6 +412,13 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         res, _ = await self.call("egret_find", {"id": "x"})
         self.assertTrue(res["isError"])
         self.assertIn("egret-install-extension", res["content"][0]["text"])
+
+    async def test_missing_required_argument_is_named(self):
+        # 参数名写错时页面拿到 undefined 会悄悄返回 null，agent 以为接口不能用
+        res, message = await self.call("egret_evaluate", {"text": "1 + 1"})
+        self.assertTrue(res["isError"])
+        self.assertIn("缺少必填参数 expression", message)
+        self.assertIn("text", message)
 
     async def test_repeated_dialogue_taps_are_rejected(self):
         res, message = await self.call("egret_run_steps", {"screenshotOnFailure": False, "steps": [

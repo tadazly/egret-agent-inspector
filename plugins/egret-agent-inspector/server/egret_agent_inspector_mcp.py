@@ -1147,6 +1147,11 @@ class McpServer:
     async def call_tool(self, name, args):
         if name not in TOOLS:
             return {"isError": True, "content": [{"type": "text", "text": "未知工具：%s" % name}]}
+        # 必填参数写错名字（evaluate 传成 text）时页面拿到 undefined，悄悄返回 null，agent 以为接口不能用
+        missing = [k for k in TOOLS[name][1].get("required") or [] if args.get(k) in (None, "")]
+        if missing:
+            return {"isError": True, "content": [{"type": "text", "text": "缺少必填参数 %s（收到的参数：%s）" % (
+                "、".join(missing), "、".join(sorted(args)) or "无")}]}
         try:
             if name == "egret_run_steps":
                 report, image = await self.run_steps(args)
