@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.45";
+    var VERSION = "1.7.46";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -3102,7 +3102,9 @@
         var scoped = p.rootHash !== undefined && p.rootHash !== null;
         // 顶层「面板」可能只是一块浮动提示；这种时候把整个舞台都收进动作表，
         // 否则地图上的 NPC、入口这些真正的目标会被漏掉。占住大半个舞台的才当模态处理。
-        var modal = isModalPanel(si.top);
+        // 顶层就是 RootLayer（Splan 主城，上面没开任何界面）：它铺满全屏但不是弹窗，按主场景整个舞台进表，
+        // 否则只给 30 行，底栏的背包、商店被截掉
+        var modal = isModalPanel(si.top) && !/(^|\.)RootLayer$/.test(className(si.top));
         var root = scoped ? byHash(p.rootHash) : (modal ? si.top : stage);
         // 整个舞台进表时（主城：HUD + 地图）三十行装不下：按阅读顺序截，屏幕最下面那排工具栏（背包、商店、任务）
         // 整排被挤掉，agent 找背包花了十一次调用。没指定行数时给到上限
@@ -4442,7 +4444,7 @@
             var deadline = +p.deadline || Date.now() + Math.max(+p.budgetMs || 40000, 5000);
             var splan = !!window.MFC;
             var startNewbie = splanNewbie();
-            var done = [], stopped = null, idleSince = null, lastKey = null, sameCount = 0, why = null, checkedTop = null, checkedAt = 0, lastDragAt = 0, stages = [];
+            var done = [], stopped = null, idleSince = null, lastKey = null, sameCount = 0, why = null, checkedTop = null, checkedAt = 0, lastDragAt = 0, stages = [], idleTop = null;
             var stage = requireStage();
             while (!stopped) {
                 if (Date.now() > deadline - 3500) {
@@ -4468,7 +4470,13 @@
                     // 引导还在走（换界面、等服务器、面板入场特效、下一步延时挂遮罩），下一处目标还没挂出来就等一等；
                     // 界面能点又迟迟没有引导，就是轮到你做决定了
                     var nb = splanNewbie();
-                    if (idleSince === null) idleSince = Date.now();
+                    // 换了界面（战斗打完弹出捕捉成功页）就重新计时：前面等战斗演出的时间不能算到结算页头上。
+                    // 战斗里顶层在 BattlePanel 和它的子组之间来回切，算同一个界面
+                    var idleKey = top ? (isSplanBattlePanel(top) ? "battle" : hashOf(top)) : null;
+                    if (idleSince === null || idleKey !== idleTop) {
+                        idleSince = Date.now();
+                        idleTop = idleKey;
+                    }
                     var idle = Date.now() - idleSince;
                     var turn = splanBattleTurn(si.stack);
                     var locked = stage.touchChildren === false || (next && next.wait);
@@ -4675,6 +4683,21 @@
 
             async function attempt(via, o, point) {
                 if (!point) return false;
+                // 刚弹出来的弹窗还在缩放入场，这时点关闭键不算数（新手走完连着弹的限时礼包就这样报「stuck」）
+                // 只等位置不动（最多 600ms）：呼吸动画的按钮一直在变透明度，不能按它等满
+                if (o) {
+                    for (var st = Date.now(), rk = null, since = st, moved = false; Date.now() - st < 600;) {
+                        var k = JSON.stringify(stageRect(o));
+                        if (k !== rk) {
+                            if (rk !== null) moved = true;
+                            rk = k;
+                            since = Date.now();
+                        } else if (Date.now() - since >= 120) break;
+                        await sleep(40);
+                    }
+                    var settledAt = moved && probePoint(o, false);
+                    if (settledAt) point = settledAt.point;
+                }
                 var entry = { via: via, point: { x: round(point.x), y: round(point.y) } };
                 if (o) entry.control = bindId(o) || qaNameOf(o) || nameOf(o) || sourceOf(o) || className(o);
                 await performGesture([point], method, 50, o || null);
