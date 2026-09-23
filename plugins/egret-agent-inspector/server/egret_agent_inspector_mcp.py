@@ -272,6 +272,22 @@ GUIDE_STOPS = {
 }
 
 
+SKILL_ROW = re.compile(r"次数[:：]\s*(\d+)\s*/\s*\d+.*?威力[:：]\s*(\d+)|威力[:：]\s*(\d+).*?次数[:：]\s*(\d+)\s*/\s*\d+")
+
+
+def strongest_skill(actions):
+    """回合制战斗动作表里还有次数、威力最大的技能行；认不出技能行时返回 None。"""
+    best = None
+    for a in actions:
+        m = SKILL_ROW.search(str(a.get("label") or ""))
+        if not m or a.get("off") or a.get("occluded"):
+            continue
+        left, power = (int(m.group(1)), int(m.group(2))) if m.group(1) else (int(m.group(4)), int(m.group(3)))
+        if left > 0 and (best is None or power > best[0]):
+            best = (power, a)
+    return best[1] if best else None
+
+
 def render_guide_run(result):
     """op=guide 的一行结果：点了几下、走过哪几段新手、最后几下点的什么、停在哪。
 
@@ -337,7 +353,11 @@ def render_action_table(table):
     if newbie.get("done"):
         # 验收里 agent 看主线任务栏还挂着「去商店买胶囊」，以为新手没走完，又绕了十几次调用
         line = "新手 已走完（%s/%s 段），没有新手引导了" % (newbie.get("total"), newbie.get("total"))
-        if table.get("scope") != "stage":
+        bag = next((a for a in table.get("actions") or [] if re.search(r"petBag|背包", str(a.get("label")))), None)
+        if table.get("scope") == "stage" and bag:
+            # 验收里 agent 走完新手后逐个开关背包、商店、领奖确认「能自由开关」，花了近一分钟
+            line += "；要确认入口能自由开关，一次开关一个就够：[{\"i\":%s},{\"op\":\"close\"}]" % bag["i"]
+        elif table.get("scope") != "stage":
             # 走完以后成长计划、礼包弹窗一个接一个，逐个 close 每个都要多一轮
             line += "；剩下的普通界面和礼包弹窗一次关到主城：" \
                     "[{\"op\":\"close\"},{\"op\":\"close\",\"optional\":true},{\"op\":\"close\",\"optional\":true}]"
@@ -353,7 +373,10 @@ def render_action_table(table):
         lines.append("回合 只能换精灵：点换宠栏里的卡片" if turn.get("next") == 3 else
                      "回合 轮到你出招：点技能（对面显示 0 血也要出招，出现结算页才算打完）")
         if guiding and turn.get("next") != 3:
-            lines.append("接着 这一场一次打完并接着跟引导：[{\"i\":<技能编号>,\"repeat\":15},{\"op\":\"guide\"}]")
+            best = strongest_skill(table.get("actions") or [])
+            name = best and str(best.get("label") or "").split("次数")[0].strip()
+            lines.append("接着 这一场一次打完并接着跟引导：[{\"i\":%s,\"repeat\":15},{\"op\":\"guide\"}]%s" % (
+                best["i"] if best else "<技能编号>", "（%s 威力最大）" % name if name else ""))
     elif waiting:
         lines.append("接着 做完这一步在同一次 act 里接着跟引导：[{\"i\":<编号>},{\"op\":\"guide\"}]")
     for rec in table.get("executed") or []:
@@ -1351,7 +1374,9 @@ class McpServer:
                 for action in res.get("actions") or []:
                     action.pop("screenRect", None)
                 # 只在 observe 里指路：agent 往往卡住以后才想起读技能；act 每步都带就成了重复噪音
-                if res.pop("project", None) == "splan" and name == "egret_observe":
+                # 新手途中每一步表上都写了怎么走：验收里 agent 在第一场战斗前读两份技能、截一张图，白花 20 秒
+                newbie = res.get("newbie") or {}
+                if res.pop("project", None) == "splan" and name == "egret_observe" and not (newbie and not newbie.get("done")):
                     res["skillHint"] = SPLAN_SKILL_HINT
                     panel = res.get("panel") or {}
                     if "NewLogin" in "%s %s" % (panel.get("className") or "", panel.get("name") or ""):

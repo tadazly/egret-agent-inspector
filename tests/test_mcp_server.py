@@ -1813,9 +1813,14 @@ class RenderTableTest(unittest.TestCase):
         self.assertIn("引导在等你：点击确定颜色", pick)
         self.assertIn('[{"i":<编号>},{"op":"guide"}]', pick)
         # 战斗轮到你：一场一次打完再接着跟
-        fight = server.render_action_table({"marker": "g3", "actions": [], "battleTurn": {"canOP": True, "next": 1},
+        fight = server.render_action_table({"marker": "g3", "battleTurn": {"canOP": True, "next": 1},
+            "actions": [{"i": 17, "label": "次 数 ： 34 / 35 威 力 ： 40", "role": "button"},
+                        {"i": 24, "label": "抓 次数: 35/35 威力: 40", "role": "item"},
+                        {"i": 25, "label": "疯狂乱抓 次数: 0/15 威力: 95", "role": "item"},
+                        {"i": 26, "label": "火 花 次数: 24/25 威力: 60", "role": "item"}],
             "newbie": {"step": 12, "total": 24, "name": "克罗斯星第一关", "guiding": True, "want": "x"}})
-        self.assertIn('"repeat":15},{"op":"guide"}', fight)
+        # 例子直接给还有次数、威力最大的那招：验收里 agent 为了找技能编号又看一遍表、读技能、截图
+        self.assertIn('[{"i":26,"repeat":15},{"op":"guide"}]（火 花 威力最大）', fight)
         self.assertNotIn("引导在等你", fight)
         run = server.render_action_table({"marker": "g4", "actions": [], "executed": [{"op": "guide", "result": {
             "steps": 26, "stopped": "battle-turn", "trail": ["点 fh_rect", "点 Group", "战斗说明", "点 skill0"],
@@ -1839,6 +1844,10 @@ class RenderTableTest(unittest.TestCase):
         text = server.render_action_table(finished)
         self.assertIn("新手 已走完（24/24 段）", text)
         self.assertIn('[{"op":"close"},{"op":"close","optional":true}', text)
+        home = {"tabId": 4, "marker": "g7", "scope": "stage", "newbie": {"step": 24, "total": 24, "done": True},
+                "actions": [{"i": 3, "label": "首充", "role": "button"}, {"i": 58, "label": "btn_petBag", "role": "button"}]}
+        mcp.note_newbie({}, home)
+        self.assertIn('一次开关一个就够：[{"i":58},{"op":"close"}]', server.render_action_table(home))
 
     def test_turn_wait_and_repeat_are_spelled_out(self):
         server = load_server()

@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.44";
+    var VERSION = "1.7.45";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1661,7 +1661,9 @@
         { id: /^btnClose$/, host: /pvestar/i, label: "收起三星条件" },
         { id: /^btnOpen$/, host: /pvestar/i, label: "展开三星条件" },
         // 新手选颜色的确定键叫 btnOK，认不成确定键，表上反而推荐点遮罩关掉
-        { id: /^btnOK$/, host: /createRole/i, label: "确定" }
+        { id: /^btnOK$/, host: /createRole/i, label: "确定" },
+        // 主城任务栏闲置 10 秒冒出来的手指：只是提示点任务，不是新手引导
+        { id: /^imgHandPointer$/, host: /toolbarTask/i, label: "任务栏闲置提示手指（不是引导）" }
     ];
 
     function splanFixedLabel(o) {
@@ -1777,7 +1779,8 @@
         var t = buildActionTable({ peek: true, detail: true });
         if (t.mode === "modal-backdrop-dismiss") return { label: stackEntryLabel(top) };
         var stage = getStage(), rows = (t.actions || []).filter(function (a) { return !a.occluded; });
-        if (wantClose && rows.length === 1 && rows[0].size && rows[0].point &&
+        // 战斗结算页（捕捉成功）弹出来时引导可能还停在「等抓到精灵」那一步，不看步骤类型
+        if ((wantClose || /BattleEndPanel/.test(className(top))) && rows.length === 1 && rows[0].size && rows[0].point &&
             rows[0].size[0] * rows[0].size[1] >= stage.stageWidth * stage.stageHeight * 0.8) {
             return { label: stackEntryLabel(top), point: rows[0].point };
         }
@@ -4481,7 +4484,7 @@
                     // 开场动画（假战斗、播放视频）自己会播完，二三十秒里没有要你做的事
                     var cutscene = nb && /^(SetNickName|NickNameBattle)$/.test(nb.stepType || "");
                     var cap = cutscene ? 40000 : turn && !turn.canOP && isSplanBattlePanel(top) ? 15000 :
-                        locked || gameStep || guideUi ? 8000 : turn && turn.canOP ? 1200 :
+                        locked || gameStep || guideUi ? 8000 : turn && turn.canOP && isSplanBattlePanel(top) ? 1200 :
                         userStep && !nb.want ? 4000 : splan && nb && nb.guiding ? 1500 : 600;
                     if (idle < cap && Date.now() < deadline - 3500) {
                         // 引导让你拖的那一下（把技能拖进技能栏）会弹「确认 / 取消」二次确认：确认它是拖动的收尾，不是新决定
@@ -4499,7 +4502,7 @@
                         }
                         // 引导途中弹出的奖励框、结算页只能点遮罩关：它就是引导在等的「关掉奖励」
                         var topHash = top ? hashOf(top) : null;
-                        if (splan && nb && !nb.done && idle >= 300 && !(turn && turn.canOP) && (topHash !== checkedTop || Date.now() - checkedAt > 500)) {
+                        if (splan && nb && !nb.done && idle >= 300 && !isSplanBattlePanel(top) && (topHash !== checkedTop || Date.now() - checkedAt > 500)) {
                             checkedTop = topHash;
                             checkedAt = Date.now();
                             var closable = guideClosable(top, nb.stepType === "CloseListener" && !nb.want);
@@ -4524,7 +4527,7 @@
                     }
                     var nbNow = splanNewbie();
                     if (idle < cap) stopped = "budget";
-                    else if (turn && turn.canOP) stopped = "battle-turn";
+                    else if (turn && turn.canOP && isSplanBattlePanel(top)) stopped = "battle-turn";
                     else if (nbNow && nbNow.done && !guideMaskIn(top)) stopped = "finished";
                     else if (splan && !(nbNow && nbNow.guiding) && !splanGuide() && !(startNewbie && !startNewbie.done)) stopped = "no-guide";
                     else stopped = "decision";
