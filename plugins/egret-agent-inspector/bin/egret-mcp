@@ -1,0 +1,15 @@
+#!/bin/sh
+# Claude Code 插件的 MCP 启动器（macOS / Linux）：挑一个 Python 3.8+ 运行 server。
+# 候选顺序、版本检查和 EGRET_PYTHON 与 scripts/start_mcp.js 保持一致。
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
+server="$root/server/egret_agent_inspector_mcp.py"
+# 不占着插件缓存目录，卸载时才删得掉
+cd "$HOME" 2>/dev/null || true
+for py in "$EGRET_PYTHON" python3 python; do
+    [ -n "$py" ] || continue
+    if "$py" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+        exec "$py" "$server" "$@"
+    fi
+done
+echo "Egret Agent Inspector 需要 Python 3.8+；未找到可用的 python3 或 python（可用 EGRET_PYTHON 指定）。" >&2
+exit 1

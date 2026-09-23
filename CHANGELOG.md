@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- 修复 macOS 上 Claude Code 插件的 MCP server 起不来（`ENOENT: Executable not found in $PATH`）：manifest 写死了 `python`，macOS 只有 `python3`。改用插件自带的启动器 `bin/egret-mcp`（Windows 为 `egret-mcp.cmd`），与 Codex 的 Node 启动器一样依次尝试 `EGRET_PYTHON`、`python3` / `python`（Windows：`python`、`py -3`、`python3`），只用 3.8+，跳过 Windows 商店的占位程序；启动后切到用户目录，不占着插件缓存目录。
 - Splan 项目（页面有全局 `MFC`）直接读游戏自己的状态，不再靠遮挡关系去猜：
   - NoNo 对白：`op=advance` 等每条字打完再点，一次推完；原来报「推进 0 次」，agent 只好按 hash 硬点。
   - 新手战斗的说明层（rootLayer 上拉满全屏的 `eui.Rect`）：表上推荐 `op=advance` 点掉；直接点被它压住的技能时先替你点掉再点，返回里注明。原来报「被遮挡，先 dismiss」，dismiss 又关不掉。
