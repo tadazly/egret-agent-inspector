@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.22";
+    var VERSION = "1.7.23";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1426,6 +1426,59 @@
         return Date.now() - start;
     }
 
+    // 手势动画引导（新手「主宠替换技能」）：面板提到黑色遮罩上面，一只手从 A 滑到 B，要把 A 处的东西拖到 B。
+    // 验收里 agent 把它当成关不掉的遮罩，close / dismiss 试了十几次。手的路径直接读它的 Tween
+    function splanDragGuide() {
+        var Tween = window.egret && window.egret.Tween;
+        if (!window.MFC || !Tween || !Tween._tweens || !window.MFC.rootLayer) return null;
+        // 手挂在 rootLayer 直属的容器里：只看两层，不必每次观察都扫整棵树
+        var hand = null, root = window.MFC.rootLayer;
+        for (var i = numChildren(root) - 1; i >= 0 && !hand; i--) {
+            var c = childAt(root, i);
+            if (!c || !c.visible || /Layer$/.test(nameOf(c) || "")) continue;
+            for (var j = numChildren(c) - 1; j >= 0 && !hand; j--) {
+                var h = childAt(c, j), src = h && sourceOf(h);
+                if (src && /guide_hand/.test(src)) hand = h;
+            }
+        }
+        if (!hand || !hand.parent || !effectiveVisible(hand.parent)) return null;
+        var move = null;
+        Tween._tweens.forEach(function (tw) {
+            if (move || tw._target !== hand) return;
+            move = (tw._steps || []).filter(function (s) {
+                return s.type === "step" && s.p0 && s.p1 && s.p0.x !== undefined && (s.p0.x !== s.p1.x || s.p0.y !== s.p1.y);
+            })[0] || null;
+        });
+        if (!move) return null;
+        var a = hand.parent.localToGlobal(move.p0.x, move.p0.y), b = hand.parent.localToGlobal(move.p1.x, move.p1.y);
+        var grab = hitTest(a.x, a.y);
+        for (var depth = 0; grab && depth < 6 && !interactionListenersOf(grab).length; depth++) grab = grab.parent;
+        if (!grab || isStageObject(grab)) return null;
+        var gr = stageRect(grab);
+        var from = gr ? { x: round(gr.x + gr.width / 2), y: round(gr.y + gr.height / 2) } : { x: round(a.x), y: round(a.y) };
+        // 放下的格子常被引导设成不可点，命中测试找不到它：按几何位置找最小的格子来取名字
+        var drop = null, dropArea = Infinity, top = sceneInfo().top;
+        if (top) walk(top, function (o) {
+            if (!o.visible || o.alpha === 0) return false;
+            if (!/cell|slot|item|bar/i.test(className(o))) return;
+            var r = stageRect(o);
+            if (r && b.x >= r.x && b.x <= r.x + r.width && b.y >= r.y && b.y <= r.y + r.height && r.width * r.height < dropArea) {
+                drop = o;
+                dropArea = r.width * r.height;
+            }
+        });
+        var fields = ["hash", "className", "id", "name", "qaName", "text"];
+        return {
+            reason: "guide-drag",
+            stagePoint: from,
+            screenPoint: stageToClient(from.x, from.y),
+            dropPoint: { x: round(b.x), y: round(b.y) },
+            target: project(describe(grab, { center: true }), fields),
+            label: actionLabelOf(grab).label,
+            dropLabel: drop ? actionLabelOf(drop).label : null
+        };
+    }
+
     function splanContinueTargetOf() {
         if (!window.MFC) return null;
         var stage = getStage();
@@ -1439,6 +1492,8 @@
             rec.splan = "nono";
             return rec;
         }
+        var dragGuide = splanDragGuide();
+        if (dragGuide) return dragGuide;
         var g = splanGuide();
         if (g && g.target) {
             var r = stageRect(g.target);
@@ -1486,14 +1541,27 @@
 
     // 图片字按钮在源码里的固定叫法，不用 OCR 猜
     var SPLAN_QA_LABELS = { NewLogin__btn_start: "进入游戏", NewLogin__btn_account: "切换账号",
-        SimpleAlert__cancel: "取消",
-        // 战斗：自动战斗开了以后只能干等；三星条件那块写着「战斗胜利」，agent 会当成已经结算
-        ToolBar__autoOn: "自动战斗（别点）", BattlePveStar__btnClose: "收起三星条件", BattlePveStar__btnOpen: "展开三星条件" };
+        SimpleAlert__cancel: "取消" };
+    // 按控件 id + 所在组件认：宿主类名在运行时不一定和源码一致（ToolBar 里的 autoOn 表上显示的 qaName 宿主不是 ToolBar）。
+    // 战斗：自动战斗开了以后只能干等；三星条件那块写着「战斗胜利」，agent 会当成已经结算
+    var SPLAN_ID_LABELS = [
+        { id: /^autoOn$/, name: /^battle_autoBtn$/, host: /ToolBar|Battle/, label: "自动战斗（别点）" },
+        { id: /^btnClose$/, host: /PveStar/, label: "收起三星条件" },
+        { id: /^btnOpen$/, host: /PveStar/, label: "展开三星条件" }
+    ];
 
     function splanFixedLabel(o) {
         if (!window.MFC) return null;
         var qa = qaNameOf(o);
         if (qa && SPLAN_QA_LABELS[qa]) return SPLAN_QA_LABELS[qa];
+        var id = bindId(o) || (qa ? String(qa).split("__").pop() : ""), nm = nameOf(o) || "";
+        for (var k = 0; k < SPLAN_ID_LABELS.length; k++) {
+            var rule = SPLAN_ID_LABELS[k];
+            if (!rule.id.test(id) && !(rule.name && rule.name.test(nm))) continue;
+            for (var c = o.parent, depth = 0; c && depth < 6; c = c.parent, depth++) {
+                if (rule.host.test(className(c))) return rule.label;
+            }
+        }
         var src = sourceOf(o);
         if (src && /new_seer_skipBtn/.test(src)) return "跳过动画";
         return null;
@@ -2643,6 +2711,21 @@
                 return w > 0 && hh > 0 && w * hh >= 0.3 * Math.min(e._w * e._h, h._w * h._h);
             });
         }
+        // 字在哪一层面板：弹窗上的按钮不能借弹窗后面那层的字（技能替换框的确认键曾被标成背后列表里的「挑拨」）
+        var stack = sceneInfo().stack, layerCache = {};
+        function layerOf(o) {
+            var key = String(hashOf(o));
+            if (layerCache[key] === undefined) {
+                layerCache[key] = -1;
+                for (var li = stack.length - 1; li >= 0; li--) {
+                    if (isSelfOrAncestor(stack[li], o)) {
+                        layerCache[key] = li;
+                        break;
+                    }
+                }
+            }
+            return layerCache[key];
+        }
         var pairs = [];
         entries.forEach(function (e, ei) {
             // 被挡住的行默认不出现在表里：让它借走标题，标题就跟着一起消失了（飞船的 Spine 本体和它的热区抢「星际探索」）。
@@ -2656,6 +2739,8 @@
                 var s = String(t.text || "").trim();
                 if (!s || s.length > CAPTION_MAX || COUNTER_LABEL.test(s) || owned[s]) return;
                 if (t.ownerHash !== undefined && t.ownerHash !== e.hash) return;
+                var tl = layerOf(t.o), el = layerOf(e._o);
+                if (tl >= 0 && el >= 0 && tl < el) return;
                 var tr = t.rect, cx = tr.x + tr.width / 2;
                 if (cx < e._x - 2 || cx > e._x + e._w + 2) return;
                 var inside = tr.x >= e._x - 1 && tr.y >= e._y - 1 &&
@@ -2819,6 +2904,8 @@
                 out.marker = hashString([out.mode, si.top && hashOf(si.top), out.text.join("|")].join("#"));
                 out.hint = recommendedTarget.reason === "guide-hole"
                     ? "引导挖洞：只能点 recommendedTarget，用 egret_act 的 {op:\"recommended\"}"
+                    : recommendedTarget.reason === "guide-drag"
+                    ? "拖动引导（手势动画）：不是关不掉的遮罩，用 egret_act 的 {op:\"recommended\"}，工具会按住拖过去"
                     : "连续对白/引导：用 egret_act 的 op=advance 一次推完，不要逐次点击";
                 return rememberEmpty(p, out);
             }
@@ -3809,10 +3896,19 @@
                             await sleep(200);
                         }
                         if (!rec) throw new Error("当前没有 recommendedTarget：重新 observe 后按动作表选目标");
-                        lastGuideTap = rec.reason === "guide-hole";
-                        await performGesture([rec.stagePoint], method, 50, null);
+                        lastGuideTap = rec.reason === "guide-hole" || rec.reason === "guide-drag";
+                        if (rec.reason === "guide-drag") {
+                            var grabbed = null;
+                            try { grabbed = rec.target && byHash(rec.target.hash); } catch (e) {}
+                            await performGesture(dragToPath(rec.stagePoint, rec.dropPoint, 700, grabbed ? scrollAxisOf(grabbed) : null),
+                                method, 0, grabbed);
+                            record.drag = "to";
+                            record.to = { label: rec.dropLabel || "引导终点" };
+                        } else {
+                            await performGesture([rec.stagePoint], method, 50, null);
+                        }
                         record.target = { reason: rec.reason, stagePoint: rec.stagePoint,
-                            label: rec.target && (rec.target.text || rec.target.qaName || rec.target.id || rec.target.className) };
+                            label: rec.label || rec.target && (rec.target.text || rec.target.qaName || rec.target.id || rec.target.className) };
                     } else if (op === "advance") {
                         record.result = await handlers.advance({
                             max: step.max !== undefined ? step.max : 6,
@@ -3999,7 +4095,7 @@
                         "当前顶层界面不是可直接推进的对白或引导；按返回的动作表定位下一目标";
                     break;
                 }
-                if (target.reason === "guide-hole") {
+                if (target.reason === "guide-hole" || target.reason === "guide-drag") {
                     stopped = "targeted-guide";
                     break;
                 }

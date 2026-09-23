@@ -1235,6 +1235,15 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     remove(nickBox);
     remove(randBtn);
 
+    // 弹窗上的图片字按钮不借弹窗后面那层面板里的字：技能替换框的确认键曾被标成背后技能列表里的「挑拨」
+    const backPanel = item("ui.PetProperty", "petProperty", uiLayer, { x: 0, y: 0, width: 800, height: 480 });
+    item("eui.Label", "skillName", backPanel, { x: 420, y: 262, width: 40, height: 20 }, { text: "挑拨" });
+    const exchange = item("ui.SkillExchangePopup", "exchange", uiLayer, { x: 250, y: 120, width: 300, height: 130 });
+    item("eui.Image", "img_confirm", exchange, { x: 410, y: 225, width: 60, height: 30 }, { listener: true });
+    out.popupLabels = t.buildActionTable({ limit: 60 }).actions.map(a => a.label).filter(l => l === "挑拨" || l === "img_confirm");
+    remove(exchange);
+    remove(backPanel);
+
     // ---- Splan（有全局 MFC）：直接读游戏的对白、说明层、引导、会话状态
     const splanRoot = item("game.RootLayer", "rootLayer", stage, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
     window.MFC = { rootLayer: splanRoot };
@@ -1303,6 +1312,28 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     remove(guidePanel);
     remove(skillBtn);
 
+    // 手势动画引导：一只手从 A 滑到 B，读出它的 Tween 路径，recommended 替你按住把 A 处的东西拖到 B
+    let dropAt = null;
+    const grabItem = item("eui.Group", "skillBarLearned", splanRoot, { x: 600, y: 180, width: 120, height: 70 });
+    listenOn(grabItem);
+    grabItem.addEventListener("touchBegin", function () {}, null);
+    grabItem.addEventListener("touchReleaseOutside", function (e) { dropAt = [e.stageX, e.stageY]; }, null);
+    const dropCell = item("ui.SkillCell", null, splanRoot, { x: 450, y: 170, width: 120, height: 70 }, { solid: false });
+    const handBox = item("egret.Sprite", null, splanRoot, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
+    handBox.localToGlobal = (x, y) => ({ x, y });
+    const hand = item("eui.Image", null, handBox, { x: 660, y: 215, width: 59, height: 52 }, { solid: false });
+    hand.source = "resource/guide/image/guide_hand.png";
+    window.egret.Tween = { _tweens: [{ _target: hand, _steps: [
+        { type: "step", d: 0, p0: { x: 660, y: 215, alpha: 0 }, p1: { x: 660, y: 215, alpha: 0 } },
+        { type: "step", d: 1500, p0: { x: 660, y: 215 }, p1: { x: 510, y: 205 } }] }] };
+    out.dragMode = t.buildActionTable({}).mode;
+    await t.handlers.act({ steps: [{ op: "recommended" }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.dropAt = dropAt;
+    delete window.egret.Tween;
+    remove(handBox);
+    remove(dropCell);
+    remove(grabItem);
+
     // 被踢下线：表上直接给出重开页面的提示
     window.MFC.userInfo = {};
     window.MFC.inGameState = 0;
@@ -1319,8 +1350,9 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     remove(skipBtn);
     // 战斗界面不能 close：返回键是暂停，退出直接判负；自动战斗键写明别点
     const battlePanel = item("BattlePanel", null, splanRoot, { x: 0, y: 0, width: 800, height: 480 });
-    const autoBtn = item("eui.Image", "autoOn", battlePanel, { x: 700, y: 400, width: 50, height: 50 }, { listener: true });
-    autoBtn.qaName = "ToolBar__autoOn";
+    // 和源码一样：ToolBar 里的 autoOn，name 写死成 battle_autoBtn
+    const battleToolbar = item("battle.ToolBar", "toolbar", battlePanel, { x: 600, y: 390, width: 200, height: 70 }, { solid: false });
+    item("eui.Image", "battle_autoBtn", battleToolbar, { x: 700, y: 400, width: 50, height: 50 }, { listener: true });
     item("eui.Image", "pauseButton", battlePanel, { x: 10, y: 10, width: 40, height: 40 }, { listener: true });
     out.battleClose = (await t.handlers.act({ steps: [{ op: "close" }], quietMs: 50, timeoutMs: 200, turnMs: 0 })).executed[0].result;
     out.battleClose = { ok: out.battleClose.ok, stopped: out.battleClose.stopped, stillThere: !!battlePanel.stage };
@@ -1344,8 +1376,14 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
-        result = subprocess.run([node, "-e", script, str(PAGE_AGENT)], capture_output=True, text=True,
-                                encoding="utf-8", errors="replace", timeout=40)
+        # 脚本太长，`node -e` 会超出 Windows 命令行长度上限：写进临时文件跑，页面代理路径顺移成第二个参数
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
+            f.write(script.replace("process.argv[1]", "process.argv[2]"))
+        try:
+            result = subprocess.run([node, f.name, str(PAGE_AGENT)], capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace", timeout=40)
+        finally:
+            os.unlink(f.name)
         if result.returncode:
             raise AssertionError(result.stderr)
         cls.probe = json.loads(result.stdout)
@@ -1461,6 +1499,9 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertEqual(data["hiddenTaps"], 0)
 
 
+    def test_popup_button_does_not_borrow_text_behind_it(self):
+        self.assertEqual(self.run_probe()["popupLabels"], ["img_confirm"])
+
     def test_splan_nono_dialog_advances_after_typing(self):
         data = self.run_probe()
         self.assertEqual(data["nonoMode"], "dialogue-continue")
@@ -1476,6 +1517,11 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertTrue(data["guideTarget"])
         self.assertEqual(data["guideWait"], {"waited": True, "skillTaps": 2})
         self.assertEqual(data["nextGuide"], {"mode": "guide-hole", "target": True})
+
+    def test_splan_drag_guide_is_dragged_along_the_hand_path(self):
+        data = self.run_probe()
+        self.assertEqual(data["dragMode"], "guide-drag")
+        self.assertEqual(data["dropAt"], [510, 205])
 
     def test_splan_lost_session_and_fixed_labels(self):
         data = self.run_probe()
