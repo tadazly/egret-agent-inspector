@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import struct
@@ -520,6 +521,24 @@ def load_server():
     return module
 
 
+class PageAgentLintTest(unittest.TestCase):
+    def test_no_local_shadows_a_top_level_helper(self):
+        # 页面代理整体是一个 IIFE，var 会提升到函数作用域：局部变量叫 round 就把 round() 遮住了，
+        # op=close 曾经因此一调就报 "round is not a function"，而单测完全没覆盖到那条路径
+        src = PAGE_AGENT.read_text(encoding="utf-8")
+        tops = set(re.findall(r"^    (?:async )?function (\w+)\s*\(", src, re.M))
+        self.assertIn("round", tops)
+        shadows = []
+        for m in re.finditer(r"\b(?:var|let|const)\s+(\w+)\b", src):
+            if m.group(1) in tops:
+                shadows.append("%s @ line %d" % (m.group(1), src.count("\n", 0, m.start()) + 1))
+        for m in re.finditer(r"function\s*\w*\s*\(([^)]*)\)", src):
+            for param in (x.strip() for x in m.group(1).split(",")):
+                if param in tops:
+                    shadows.append("%s (param) @ line %d" % (param, src.count("\n", 0, m.start()) + 1))
+        self.assertEqual(shadows, [])
+
+
 class ActionTableTest(unittest.TestCase):
     """动作表的噪音过滤与扫描预算：limit 调小不能把顶层面板的按钮弄丢。"""
 
@@ -529,7 +548,7 @@ class ActionTableTest(unittest.TestCase):
         script = r'''const fs = require("fs");
 let source = fs.readFileSync(process.argv[1], "utf8");
 source = source.replace("\n    installErrorHooks();",
-    "\n    window.__pageAgentTest = { buildActionTable, findCloseControl };\n    installErrorHooks();");
+    "\n    window.__pageAgentTest = { buildActionTable, findCloseControl, itemsOf, pickWithinLimit, actionRoleOf };\n    installErrorHooks();");
 const vm = require("vm");
 const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480,
     visible: true, alpha: 1, touchEnabled: true, touchChildren: true, parent: null, children: [],
@@ -598,6 +617,19 @@ item("eui.Image", "tab_red", menuRow, { x: 745, y: 402, width: 16, height: 16 },
 const toolBtn = item("eui.Group", "grpTool", stage, { x: 700, y: 20, width: 54, height: 59 }, { listener: true });
 item("eui.Label", "toolText", toolBtn, { x: 716, y: 44, width: 22, height: 11 }, { text: "福利" });
 
+// 精灵背包那种列表：屏上只有几条，背后的 dataProvider 有 200 条，前 50 条满级
+const petScroller = item("eui.Scroller", "petScroller", stage, { x: 20, y: 150, width: 200, height: 200 },
+    { solid: false });
+petScroller.height = 200;
+petScroller.viewport = { __class: "eui.List", hashCode: serial++, name: "viewport", parent: petScroller, stage,
+    visible: true, alpha: 1, children: [], get numChildren() { return this.children.length; },
+    getChildAt(i) { return this.children[i]; }, getTransformedBounds() { return { x: 20, y: 150, width: 200, height: 200 }; },
+    scrollV: 0, contentHeight: 4000, height: 200,
+    dataProvider: { length: 200, getItemAt(i) {
+        return { _cache: 1, exp: i * 10, nick: "pet" + i, level: i < 50 ? 100 : i % 7 + 1, petId: 1000 + i, skills: [1, 2] };
+    } } };
+petScroller.children.push(petScroller.viewport);
+
 // 只有返回键的全屏面板（共创投票就是这样）：不挂到舞台上，免得干扰动作表
 const backOnly = item("ui.FullPanel", "fullPanel", null, { x: 0, y: 0, width: 800, height: 480 },
     { offstage: true });
@@ -620,7 +652,21 @@ process.stdout.write(JSON.stringify({
     detail: summarize(t.buildActionTable({ limit: 30, detail: true })),
     withOccluded: summarize(t.buildActionTable({ limit: 30, occluded: true })),
     closeStrict: (t.findCloseControl(backOnly, false) || {}).o ? "found" : null,
-    closeBack: ((t.findCloseControl(backOnly, true) || {}).o || {}).name || null
+    closeBack: ((t.findCloseControl(backOnly, true) || {}).o || {}).name || null,
+    scrollers: t.buildActionTable({ limit: 30 }).scrollers || [],
+    notMax: t.itemsOf(petScroller, it => it.level < 100),
+    byField: t.itemsOf(petScroller.viewport.hashCode, { nick: "pet7" }, { fields: ["nick", "level"] }),
+    // 35 条列表小字排在前面，真正的按钮在后面：截断时按钮不能被挤掉
+    picked: t.pickWithinLimit(Array.from({ length: 40 }, (_, k) => ({ label: "r" + k,
+        role: k < 35 ? "text" : k === 38 ? "close" : "button", occluded: k === 36 })), 8).map(e => e.label),
+    backRoles: [
+        ["toolBarExManager.SeerReturn2Component", "toolBarExManager_icon_32"],
+        ["eui.Group", "grp_back_landscape"],
+        ["eui.Image", "imgBackground"],
+        ["eui.Button", "btnBack"],
+        ["eui.Group", "btn_return"]
+    ].map(([cls, name]) => t.actionRoleOf({ __class: cls, name, parent: null, children: [],
+        get numChildren() { return 0; }, getChildAt() { return null; } }, "", "name"))
 }));
 '''
         result = subprocess.run([node, "-e", script, str(PAGE_AGENT)], capture_output=True, text=True,
@@ -677,6 +723,44 @@ process.stdout.write(JSON.stringify({
         # 空 Group 的内容包围盒是 0x1，退化时要回退到布局盒，否则玩家点得到、动作表里却没有
         self.assertIn("grp_backArea", data["big"]["labels"])
 
+    def test_scroller_reports_what_is_behind_the_screen(self):
+        data = self.run_probe()
+        pets = [s for s in data["scrollers"] if s.get("items")]
+        self.assertEqual(len(pets), 1)
+        # 屏上几条，背后 200 条：模型要看到总数和字段才会想到去读数据
+        self.assertEqual(pets[0]["items"], 200)
+        # 名字、等级这类能拿来筛选的字段排前面；私有字段和数组不列
+        self.assertEqual(pets[0]["fields"][:3], ["nick", "level", "petId"])
+        self.assertNotIn("_cache", pets[0]["fields"])
+        self.assertNotIn("skills", pets[0]["fields"])
+
+    def test_items_reads_the_whole_list(self):
+        data = self.run_probe()
+        not_max = data["notMax"]
+        self.assertEqual(not_max["total"], 200)
+        self.assertEqual(not_max["matched"], 150)
+        # 默认只回 30 行，但 matched 给的是全量计数，不会让模型把「屏上看到的」当成总数
+        self.assertEqual(len(not_max["rows"]), 30)
+        self.assertTrue(not_max["truncated"])
+        self.assertEqual(not_max["rows"][0]["index"], 50)
+        by_field = data["byField"]
+        self.assertEqual(by_field["matched"], 1)
+        self.assertEqual(by_field["rows"], [{"index": 7, "nick": "pet7", "level": 100}])
+
+    def test_truncation_keeps_buttons_over_list_labels(self):
+        data = self.run_probe()
+        # 4 个没被遮挡的按钮全留下；被遮挡的那个排到文字后面；空位按阅读顺序给文字；输出仍是阅读顺序
+        self.assertEqual(data["picked"], ["r0", "r1", "r2", "r3", "r35", "r37", "r38", "r39"])
+
+    def test_back_role_needs_a_real_back_name(self):
+        roles = self.run_probe()["backRoles"]
+        # 类名里的 Return 是「老兵回归」，background 只是背景图，都不是返回键
+        self.assertNotEqual(roles[0], "back")
+        self.assertEqual(roles[1], "back")
+        self.assertNotEqual(roles[2], "back")
+        self.assertEqual(roles[3], "back")
+        self.assertEqual(roles[4], "back")
+
     def test_back_control_only_counts_when_asked(self):
         data = self.run_probe()
         # dismiss 保持严格：只有返回键的面板不当成弹窗去关，免得误点场景里的返回
@@ -730,6 +814,21 @@ class RenderTableTest(unittest.TestCase):
         # dismiss 的结果原来把整串 dict 拼进去，几百字节全是噪音
         self.assertIn("关掉 1 个弹窗", text)
         self.assertNotIn("'ok': True", text)
+
+    def test_scroller_with_data_points_at_items(self):
+        server = load_server()
+        table = {"panel": {"name": "petBag.PetBag"}, "marker": "m4", "actions": [],
+                 "scrollers": [{"hash": 540688, "label": "LV.100 里奥斯", "canDown": True, "items": 531,
+                                "list": 540690, "fields": ["nick", "level", "petId"]},
+                               # 列表已经全在屏上、滚不动时不用提示读数据
+                               {"hash": 12, "label": "tabs", "items": 4, "list": 13, "fields": ["name"]}],
+                 "executed": [{"op": "scroll", "result": {"index": 132, "total": 531, "visible": {"lo": 128, "hi": 139}}}]}
+        text = server.render_action_table(table)
+        self.assertIn("数据 共 531 条（字段 nick/level/petId）", text)
+        self.assertIn("$items(540690, it => …)", text)
+        self.assertIn("\"toIndex\":N", text)
+        self.assertEqual(text.count("数据 共"), 1)
+        self.assertIn("第 132/531 条已在屏上", text)
 
     def test_page_reload_is_detected_per_tab(self):
         server = load_server()

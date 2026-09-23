@@ -255,7 +255,13 @@ def render_action_table(table):
             stuck = [c for c in closed if not c.get("ok")]
             if stuck:
                 line += "，%s 没关掉（%s）" % (stuck[0].get("panel") or "", stuck[0].get("note") or "")
-        if rec.get("op") == "close" and isinstance(result, dict):
+        if rec.get("op") == "scroll" and isinstance(result, dict) and result.get("index") is not None:
+            seen = result.get("visible") or {}
+            shown = seen and seen.get("lo") is not None and seen["lo"] <= result["index"] <= seen.get("hi", -1)
+            line += " → 第 %s/%s 条%s（屏上 %s–%s）" % (
+                result["index"], result.get("total"), "已在屏上" if shown else "没能滚到屏上",
+                seen.get("lo", "?"), seen.get("hi", "?"))
+        if rec.get("op") == "close" and isinstance(rec.get("result"), dict):
             if result.get("ok"):
                 line += " → 点 %s 关掉了 %s" % (result.get("via"), result.get("panel") or "")
             else:
@@ -306,6 +312,12 @@ def render_action_table(table):
     for sc in table.get("scrollers") or []:
         dirs = "".join([d for d, k in (("↑", "canUp"), ("↓", "canDown"), ("←", "canLeft"), ("→", "canRight")) if sc.get(k)])
         lines.append("可滚 %s %s → {\"op\":\"scroll\",\"hash\":%s,\"dy\":-200}" % (sc.get("label"), dirs, sc.get("hash")))
+        if sc.get("items") and sc.get("list") and dirs:
+            # 模型靠滚动去「看」列表，一屏几条，数出来的总数能差几十倍；把全集入口直接摆在它眼前
+            fields = "/".join(sc.get("fields") or [])
+            lines.append("数据 共 %d 条%s，屏上只有几条：计数、筛选、找目标先读数据 egret_evaluate \"$items(%s, it => …)\"；"
+                         "定位第 N 条 {\"op\":\"scroll\",\"hash\":%s,\"toIndex\":N}"
+                         % (sc["items"], "（字段 %s）" % fields if fields else "", sc["list"], sc.get("hash")))
     ocr = table.get("ocr") or {}
     if ocr.get("filled"):
         lines.append("ocr 补了 %s 个标签（%sms）" % (ocr["filled"], ocr.get("elapsedMs")))
@@ -356,6 +368,7 @@ INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游�
 - 对白与引导用 op=advance 一次推完；弹窗用 op=dismiss；关掉当前这个界面用 op=close（关闭键→返回键→遮罩依次试，并确认它真的没了）；加载过场（mode=transient）用 op=wait。
 - 要把一批同类目标挨个打开看一眼，一次 act 就给多组「打开 + op=close」步骤，不要一个来回只点一下。
 - 表上出现「页面已重载」时，之前记下的 hash 和编号全部作废，按新表重新定位。
+- 列表屏上只显示几条。要计数、筛选、挑目标时先用 egret_evaluate 的 $items(hash, it => …) 读全量数据，再用 op=scroll 的 toIndex 滚过去点；不要一屏屏滚着数。读数据可以，调业务方法改状态不行。
 - 动作表和 OCR 都定不下来，或要看布局、颜色、半透明遮罩、战斗画面时用 egret_screenshot；游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，视觉兜底该用就用。
 - 目标不在动作表里（在别的子树、需要语义消歧）用 egret_locate；已知稳定标识用 egret_find。显示对象以 hash 标识，id 是组件在代码/EXML 中绑定的属性名；stageRect 是舞台坐标，screenRect 是页面视口 CSS 像素坐标。
 - 操作后界面没有预期变化时用 egret_get_errors 看页面报错；想知道某个控件背后是哪段代码用 egret_inspect_code。
@@ -510,7 +523,9 @@ TOOLS = {
         "page", "advance"),
     "egret_evaluate": (
         "在页面中执行 JavaScript 表达式，或语句块（需显式 return，支持 await），可用辅助变量：$stage（舞台）、$obj(hash)（按 hash 取对象）、"
-        "$find({id,name,className,text,...})（查询对象数组）、$describe(obj)。返回值会被安全序列化。",
+        "$find({id,name,className,text,...})（查询对象数组）、$describe(obj)、"
+        "$items(列表或 Scroller 的 hash, 可选筛选 it => … 或 {字段: 值}, 可选 {fields, limit})（读列表背后的全量数据，返回 total / matched / rows[{index, 字段…}]）。返回值会被安全序列化。"
+        "读数据用来计数、筛选、找目标；不要用它调业务方法或改业务状态来代替界面操作。",
         obj({"expression": {"type": "string"}, "depth": {"type": "integer", "description": "返回值序列化深度，默认 3"}},
             ["expression"]),
         "page", "evaluate"),
@@ -555,7 +570,7 @@ TOOLS = {
         "{\"op\":\"close\"} 关掉当前顶层面板：一次往返里依次试关闭键、返回键、遮罩，并确认面板真的消失，"
         "回报是哪条路子生效；打开一个界面看完就关的遍历用它，比 dismiss 更适合全屏面板；"
         "{\"op\":\"recommended\"} 点 observe 给出的 recommendedTarget（引导挖洞、只能点遮罩关闭的弹窗）；"
-        "{\"op\":\"scroll\",\"i\":3,\"dy\":-200} 滚动列表；{\"op\":\"wait\",\"ms\":800} 或 {\"op\":\"wait\",\"until\":{查询条件}} 等待。"
+        "{\"op\":\"scroll\",\"i\":3,\"dy\":-200} 滚动列表，{\"op\":\"scroll\",\"hash\":<Scroller>,\"toIndex\":132} 直接滚到第 132 条（先用 $items 读数据找到下标）；{\"op\":\"wait\",\"ms\":800} 或 {\"op\":\"wait\",\"until\":{查询条件}} 等待。"
         "编号只有传了上一次的 marker 且界面没变时才有效：界面已变会原样返回 stale=true 和新动作表，不执行任何点击。"
         "每步可加 expect（查询条件）校验结果，失败即停止并返回当前动作表；加 optional 则该步失败不影响结论。"
         "已确认的连续操作可以一次给多步，但 i 编号只对第一步有效，后续步骤用查询条件或 op 定位。"
@@ -1101,8 +1116,10 @@ class McpServer:
                 if hit:
                     known[str(action["hash"])] = hit
             cached = apply_ocr_labels(table, known) if known else 0
+        # 关闭 / 返回键多是 × 或箭头图标，OCR 只会认出「行 证」这类乱码，结构化标签反而更准
         candidates = [a for a in (table.get("actions") or [])
                       if a.get("from") in weak and not a.get("occluded") and a.get("screenRect")
+                      and a.get("role") not in ("close", "back")
                       and not (reuse and str(a.get("hash")) in self.ocr_cache)][:limit]
         if not candidates:
             table["ocr"] = {"available": True, "filled": cached,
