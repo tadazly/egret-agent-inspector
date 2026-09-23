@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.23";
+    var VERSION = "1.7.24";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1539,15 +1539,34 @@
         }
     }
 
+    // 战斗面板：模块容器的类名是 ApplicationViewAdvanced，名字才叫 BattlePanel
+    function isSplanBattlePanel(panel) {
+        if (!window.MFC || !panel) return false;
+        return /(^|\.)BattlePanel$/.test(className(panel)) || /^BattlePanel(__|$)/.test(nameOf(panel) || "");
+    }
+
+    // 回合状态：新手战斗停了倒计时，轮到你时不出招就一直僵着。对面倒下后界面上还是那只 0 血的精灵，
+    // agent 以为打完了、一直等结算
+    function splanBattleTurn(stack) {
+        if (!window.MFC || !(stack || []).some(isSplanBattlePanel)) return null;
+        try {
+            var M = window.ClientOPManager, op = M && M.getInstance && M.getInstance();
+            if (!op || typeof op.canOP !== "boolean") return null;
+            return { canOP: op.canOP, next: op.selfInfo ? op.selfInfo.nextRoundOP : null };
+        } catch (e) {
+            return null;
+        }
+    }
+
     // 图片字按钮在源码里的固定叫法，不用 OCR 猜
     var SPLAN_QA_LABELS = { NewLogin__btn_start: "进入游戏", NewLogin__btn_account: "切换账号",
         SimpleAlert__cancel: "取消" };
     // 按控件 id + 所在组件认：宿主类名在运行时不一定和源码一致（ToolBar 里的 autoOn 表上显示的 qaName 宿主不是 ToolBar）。
     // 战斗：自动战斗开了以后只能干等；三星条件那块写着「战斗胜利」，agent 会当成已经结算
     var SPLAN_ID_LABELS = [
-        { id: /^autoOn$/, name: /^battle_autoBtn$/, host: /ToolBar|Battle/, label: "自动战斗（别点）" },
-        { id: /^btnClose$/, host: /PveStar/, label: "收起三星条件" },
-        { id: /^btnOpen$/, host: /PveStar/, label: "展开三星条件" }
+        { id: /^autoOn$/, name: /^battle_autoBtn$/, host: /toolbar|battle/i, label: "自动战斗（别点）" },
+        { id: /^btnClose$/, host: /pvestar/i, label: "收起三星条件" },
+        { id: /^btnOpen$/, host: /pvestar/i, label: "展开三星条件" }
     ];
 
     function splanFixedLabel(o) {
@@ -1559,7 +1578,7 @@
             var rule = SPLAN_ID_LABELS[k];
             if (!rule.id.test(id) && !(rule.name && rule.name.test(nm))) continue;
             for (var c = o.parent, depth = 0; c && depth < 6; c = c.parent, depth++) {
-                if (rule.host.test(className(c))) return rule.label;
+                if (rule.host.test(className(c) + " " + (nameOf(c) || ""))) return rule.label;
             }
         }
         var src = sourceOf(o);
@@ -2726,6 +2745,29 @@
             }
             return layerCache[key];
         }
+        // 字被盖住了（弹窗的黑色遮罩压在上面）也不借：技能替换框和背后的技能列表可能在同一层
+        function drawnAbove(a, b) {
+            var chainB = [];
+            for (var q = b; q; q = q.parent) chainB.push(q);
+            for (var pa = a, prev = null; pa; prev = pa, pa = pa.parent) {
+                var at = chainB.indexOf(pa);
+                if (at < 0) continue;
+                if (!prev || at === 0) return false;
+                var under = chainB[at - 1];
+                return pa.getChildIndex ? pa.getChildIndex(prev) > pa.getChildIndex(under) : false;
+            }
+            return false;
+        }
+        // 只认大块的遮挡（弹窗遮罩、面板）：地图上走动的跟随精灵压在建筑名字上，名字仍是建筑的
+        function coverOf(t) {
+            if (t.cover === undefined) {
+                var h = hitTest(t.rect.x + t.rect.width / 2, t.rect.y + t.rect.height / 2);
+                var hr = h && stageRect(h);
+                t.cover = hr && hr.width * hr.height >= stageArea * 0.25 && !isSelfOrAncestor(h, t.o) &&
+                    !isSelfOrAncestor(t.o, h) && drawnAbove(h, t.o) ? h : null;
+            }
+            return t.cover;
+        }
         var pairs = [];
         entries.forEach(function (e, ei) {
             // 被挡住的行默认不出现在表里：让它借走标题，标题就跟着一起消失了（飞船的 Spine 本体和它的热区抢「星际探索」）。
@@ -2741,6 +2783,8 @@
                 if (t.ownerHash !== undefined && t.ownerHash !== e.hash) return;
                 var tl = layerOf(t.o), el = layerOf(e._o);
                 if (tl >= 0 && el >= 0 && tl < el) return;
+                var cover = coverOf(t);
+                if (cover && !isSelfOrAncestor(e._o, cover)) return;
                 var tr = t.rect, cx = tr.x + tr.width / 2;
                 if (cx < e._x - 2 || cx > e._x + e._w + 2) return;
                 var inside = tr.x >= e._x - 1 && tr.y >= e._y - 1 &&
@@ -2877,6 +2921,8 @@
         if (document.hidden) out.warnings = ["页面在后台，浏览器会节流游戏动画与加载；请用户把浏览器窗口恢复到前台"];
         var session = splanSession();
         if (session) out.session = session;
+        var battleTurn = splanBattleTurn(si.stack);
+        if (battleTurn) out.battleTurn = battleTurn;
         if (!root) {
             out.mode = "empty";
             out.marker = "empty";
@@ -4251,7 +4297,7 @@
             var tried = [];
             // Splan 战斗里没有「关掉」这回事：返回键是暂停，暂停框里的退出直接判负。
             // 验收里 agent 把左边的三星条件当成结算，对着战斗界面 close
-            if (window.MFC && (/(^|\.)BattlePanel$/.test(className(panel)) || /^BattlePanel__/.test(nameOf(panel) || ""))) {
+            if (isSplanBattlePanel(panel)) {
                 return { ok: false, stopped: "in-battle", panel: name,
                     note: "战斗还没结束，没有点：「战斗胜利 / 30回合内取得胜利…」是三星条件不是结算，接着出招；结算页出来后再 close" };
             }

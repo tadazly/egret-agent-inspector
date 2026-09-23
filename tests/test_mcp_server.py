@@ -842,7 +842,8 @@ source = source.replace("\n    installErrorHooks();",
 const vm = require("vm");
 const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480,
     visible: true, alpha: 1, touchEnabled: true, touchChildren: true, parent: null, children: [],
-    get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; } };
+    get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; },
+    getChildIndex(c) { return this.children.indexOf(c); } };
 const player = { stage };
 // debug 版 Egret 读舞台的 visible / alpha 会打 Warning #1009，每次 act 都冒出「页面报错」
 const stageReads = [];
@@ -868,7 +869,7 @@ function item(cls, name, parent, bounds, opts) {
     const o = { __class: cls, hashCode: serial++, name: name || null, text: opts.text || "",
         parent, stage, visible: true, alpha: 1, touchEnabled: true, touchChildren: true, children: [],
         get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; },
-        getTransformedBounds() { return bounds; } };
+        getChildIndex(c) { return this.children.indexOf(c); }, getTransformedBounds() { return bounds; } };
     if (opts.itemIndex !== undefined) o.itemIndex = opts.itemIndex;
     if (opts.listener) o.$EventDispatcher_props_ = { 1: { touchTap: [{ listener() {}, thisObject: o }] } };
     if (parent) parent.children.push(o);
@@ -1242,6 +1243,11 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     item("eui.Image", "img_confirm", exchange, { x: 410, y: 225, width: 60, height: 30 }, { listener: true });
     out.popupLabels = t.buildActionTable({ limit: 60 }).actions.map(a => a.label).filter(l => l === "挑拨" || l === "img_confirm");
     remove(exchange);
+    // 同一层里：弹窗和它的黑色遮罩直接加在技能页上，字被遮罩盖住，也不能借
+    item("eui.Image", "common_color_black_png", backPanel, { x: 0, y: 0, width: 800, height: 480 });
+    const sameLayerPopup = item("eui.Group", "exchange2", backPanel, { x: 250, y: 120, width: 300, height: 130 });
+    item("eui.Image", "img_confirm", sameLayerPopup, { x: 410, y: 225, width: 60, height: 30 }, { listener: true });
+    out.sameLayerLabels = t.buildActionTable({ limit: 60 }).actions.map(a => a.label).filter(l => l === "挑拨" || l === "img_confirm");
     remove(backPanel);
 
     // ---- Splan（有全局 MFC）：直接读游戏的对白、说明层、引导、会话状态
@@ -1349,14 +1355,18 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     remove(startBtn);
     remove(skipBtn);
     // 战斗界面不能 close：返回键是暂停，退出直接判负；自动战斗键写明别点
-    const battlePanel = item("BattlePanel", null, splanRoot, { x: 0, y: 0, width: 800, height: 480 });
-    // 和源码一样：ToolBar 里的 autoOn，name 写死成 battle_autoBtn
-    const battleToolbar = item("battle.ToolBar", "toolbar", battlePanel, { x: 600, y: 390, width: 200, height: 70 }, { solid: false });
+    // 和实页一样：模块容器类名是 ApplicationViewAdvanced、名字叫 BattlePanel；工具栏类名是 Toolbar，autoOn 的 name 写死成 battle_autoBtn
+    const battlePanel = item("plugin.applicationView.ApplicationViewAdvanced", "BattlePanel", splanRoot, { x: 0, y: 0, width: 800, height: 480 });
+    const battleToolbar = item("Toolbar", null, battlePanel, { x: 600, y: 390, width: 200, height: 70 }, { solid: false });
     item("eui.Image", "battle_autoBtn", battleToolbar, { x: 700, y: 400, width: 50, height: 50 }, { listener: true });
     item("eui.Image", "pauseButton", battlePanel, { x: 10, y: 10, width: 40, height: 40 }, { listener: true });
     out.battleClose = (await t.handlers.act({ steps: [{ op: "close" }], quietMs: 50, timeoutMs: 200, turnMs: 0 })).executed[0].result;
     out.battleClose = { ok: out.battleClose.ok, stopped: out.battleClose.stopped, stillThere: !!battlePanel.stage };
     out.autoLabel = t.buildActionTable({ limit: 60 }).actions.some(a => a.label === "自动战斗（别点）");
+    // 回合状态：轮到你时表上写明，新手战斗停了倒计时，不出招就一直僵着
+    window.ClientOPManager = { getInstance() { return { canOP: true, selfInfo: { nextRoundOP: 1 } }; } };
+    out.battleTurn = t.buildActionTable({}).battleTurn || null;
+    delete window.ClientOPManager;
     remove(battlePanel);
     remove(splanRoot);
     delete window.MFC;
@@ -1500,7 +1510,9 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
 
 
     def test_popup_button_does_not_borrow_text_behind_it(self):
-        self.assertEqual(self.run_probe()["popupLabels"], ["img_confirm"])
+        data = self.run_probe()
+        self.assertEqual(data["popupLabels"], ["img_confirm"])
+        self.assertEqual(data["sameLayerLabels"], ["img_confirm"])
 
     def test_splan_nono_dialog_advances_after_typing(self):
         data = self.run_probe()
@@ -1530,6 +1542,7 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertEqual(sorted(data["splanLabels"]), ["跳过动画", "进入游戏"])
         self.assertEqual(data["battleClose"], {"ok": False, "stopped": "in-battle", "stillThere": True})
         self.assertTrue(data["autoLabel"])
+        self.assertEqual(data["battleTurn"], {"canOP": True, "next": 1})
 
     def test_later_steps_resolve_numbers_against_the_table_the_agent_saw(self):
         data = self.run_probe()
@@ -1898,6 +1911,10 @@ class RenderTableTest(unittest.TestCase):
         kicked = server.render_action_table({"marker": "m11", "actions": [],
                                              "session": {"lost": True, "reason": "kicked", "url": "http://game.test/"}})
         self.assertIn("掉线 被踢下线：", kicked)
+        turn = server.render_action_table({"marker": "m12", "actions": [], "battleTurn": {"canOP": True, "next": 1}})
+        self.assertIn("回合 轮到你出招", turn)
+        self.assertNotIn("回合", server.render_action_table({"marker": "m13", "actions": [],
+                                                             "battleTurn": {"canOP": False, "next": 1}}))
 
     def test_close_failure_says_what_was_tried(self):
         server = load_server()

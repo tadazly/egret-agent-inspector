@@ -296,6 +296,11 @@ def render_action_table(table):
                                        "disconnected": "连接断开"}.get(session.get("reason"), "掉线")
         lines.append("掉线 %s：别点提示框，直接 egret_navigate %s 重开页面，再从登录页进游戏" % (
             what, json.dumps({"url": session.get("url")}, ensure_ascii=False)))
+    turn = table.get("battleTurn") or {}
+    if turn.get("canOP"):
+        # 新手战斗停了倒计时，轮到你时不出招就一直僵着；对面倒下后界面上还是那只 0 血的精灵
+        lines.append("回合 只能换精灵：点换宠栏里的卡片" if turn.get("next") == 3 else
+                     "回合 轮到你出招：点技能（对面显示 0 血也要出招，出现结算页才算打完）")
     for rec in table.get("executed") or []:
         target = rec.get("target") or {}
         label = target.get("label") or target.get("reason") or rec.get("text") or ""
