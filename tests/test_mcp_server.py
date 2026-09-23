@@ -659,6 +659,10 @@ process.stdout.write(JSON.stringify({
     // 35 条列表小字排在前面，真正的按钮在后面：截断时按钮不能被挤掉
     picked: t.pickWithinLimit(Array.from({ length: 40 }, (_, k) => ({ label: "r" + k,
         role: k < 35 ? "text" : k === 38 ? "close" : "button", occluded: k === 36 })), 8).map(e => e.label),
+    // 51×23 的扁按钮（精灵详情的升级键）不是小图标；22×22 的 buff 图标才排到最后
+    flat: t.pickWithinLimit([{ label: "buff", role: "button", _w: 22, _h: 22 }]
+        .concat(Array.from({ length: 5 }, (_, k) => ({ label: "t" + k, role: "text" })))
+        .concat([{ label: "_btUpgrade", role: "button", _w: 51, _h: 23 }]), 3).map(e => e.label),
     backRoles: [
         ["toolBarExManager.SeerReturn2Component", "toolBarExManager_icon_32"],
         ["eui.Group", "grp_back_landscape"],
@@ -751,6 +755,7 @@ process.stdout.write(JSON.stringify({
         data = self.run_probe()
         # 4 个没被遮挡的按钮全留下；被遮挡的那个排到文字后面；空位按阅读顺序给文字；输出仍是阅读顺序
         self.assertEqual(data["picked"], ["r0", "r1", "r2", "r3", "r35", "r37", "r38", "r39"])
+        self.assertEqual(data["flat"], ["t0", "t1", "_btUpgrade"])
 
     def test_back_role_needs_a_real_back_name(self):
         roles = self.run_probe()["backRoles"]
