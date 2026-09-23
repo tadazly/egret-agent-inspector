@@ -187,6 +187,7 @@ class FakeExtension:
         self.page_params = []
         self.project = None
         self.panel = None
+        self.tabs = None
 
     async def connect(self):
         self.reader, self.writer = await asyncio.open_connection("127.0.0.1", PORT)
@@ -222,6 +223,8 @@ class FakeExtension:
     def answer(self, msg):
         params = msg["params"]
         self.calls.append((msg["method"], params.get("method")))
+        if msg["method"] == "listTabs" and self.tabs is not None:
+            return {"id": msg["id"], "result": [{"tabId": t, "active": True, "url": "http://game/"} for t in self.tabs]}
         if msg["method"] != "page":
             return {"id": msg["id"], "result": {"ok": True}}
         method, p = params["method"], params["params"]
@@ -366,6 +369,27 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ocrLimit", locate)
         command = next(tool for tool in listed if tool["name"] == "splan_test_command")["inputSchema"]
         self.assertIn("authorized", command["required"])
+
+    async def test_requests_go_to_the_browser_that_owns_the_tab(self):
+        # Chrome 和 agent 专用的 Edge 都装了扩展：谁后连上谁是 active，按 tabId 找对浏览器
+        chrome, edge = FakeExtension(), FakeExtension()
+        chrome.tabs, edge.tabs = [11], [22, 23]
+        await chrome.connect()
+        await edge.connect()
+        try:
+            await self.call("egret_extension_status", {"waitSeconds": 2})
+            _, tabs = await self.call("egret_list_tabs", {"probe": False})
+            self.assertEqual(sorted(t["tabId"] for t in tabs), [11, 22, 23])
+            await self.call_text("egret_observe", {"tabId": 11})
+            self.assertIn(("page", "observe"), chrome.calls)
+            self.assertNotIn(("page", "observe"), edge.calls)
+            # 之后不带 tabId 的请求跟着上一次的浏览器走
+            await self.call_text("egret_observe", {})
+            self.assertEqual(chrome.calls.count(("page", "observe")), 2)
+        finally:
+            for ext in (chrome, edge):
+                ext.task.cancel()
+                ext.writer.close()
 
     async def test_observe_and_act_use_the_action_table(self):
         ext = FakeExtension()
