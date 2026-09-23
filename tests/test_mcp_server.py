@@ -964,7 +964,7 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     let down = null;
     Object.assign(stage.$touchHandler, {
         onTouchBegin(x, y) { down = this.findTarget(x, y); fire(down, "touchBegin", x, y); },
-        onTouchMove() {},
+        onTouchMove(x, y) { if (down) fire(down, "touchMove", x, y); },
         onTouchEnd(x, y) {
             const up = this.findTarget(x, y);
             fire(up, "touchEnd", x, y);
@@ -1074,6 +1074,30 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     const psGrp = item("eui.Group", "ps_grp", toolbar, { x: 720, y: 350, width: 54, height: 54 }, { solid: false });
     item("eui.Image", "battle_petBtn", psGrp, { x: 720, y: 350, width: 54, height: 54 });
     out.shellRows = t.buildActionTable({ limit: 60 }).actions.map(a => a.label).filter(l => /ps_grp|petBtn/.test(l));
+    remove(toolbar);
+
+    // 拖到目标：长按满 1 秒才起步，拖到技能栏的槽位上松手才算换上
+    const dragState = { dragging: false, dropped: null };
+    const skillSrc = item("ui.SkillBar", "skillBar_20164", hud, { x: 600, y: 120, width: 120, height: 40 }, { text: "斗志" });
+    listenOn(skillSrc);
+    skillSrc.addEventListener("touchBegin", function () { dragState.t0 = Date.now(); dragState.dragging = false; }, null);
+    skillSrc.addEventListener("touchMove", function () { if (Date.now() - dragState.t0 >= 1000) dragState.dragging = true; }, null);
+    const slot = item("ui.SkillCell", "skillCell_1", hud, { x: 420, y: 120, width: 90, height: 40 }, { text: "突破" });
+    listenOn(slot);
+    slot.addEventListener("touchEnd", function () { if (dragState.dragging) dragState.dropped = this.name; }, slot);
+    let dragTable = t.buildActionTable({ limit: 60 });
+    let srcRow = dragTable.actions.find(a => a.label === "斗志"), slotRow = dragTable.actions.find(a => a.label === "突破");
+    const dragged = await t.handlers.act({ marker: dragTable.marker, steps: [{ i: srcRow.i, op: "drag", to: { i: slotRow.i } }],
+        quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.dropped = dragState.dropped;
+    out.dragTo = dragged.executed[0].to || null;
+    // 不按住直接拖：挪完就松手，长按门槛还没到，起不了步
+    dragState.dropped = null;
+    dragTable = t.buildActionTable({ limit: 60 });
+    srcRow = dragTable.actions.find(a => a.label === "斗志"); slotRow = dragTable.actions.find(a => a.label === "突破");
+    await t.handlers.act({ marker: dragTable.marker, steps: [{ i: srcRow.i, op: "drag", holdMs: 0, to: { i: slotRow.i } }],
+        quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.droppedNoHold = dragState.dropped;
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
@@ -1172,6 +1196,13 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
 
     def test_delegation_shell_shows_the_button_inside(self):
         self.assertEqual(self.run_probe()["shellRows"], ["battle_petBtn"])
+
+    def test_drag_onto_another_control(self):
+        data = self.run_probe()
+        self.assertEqual(data["dropped"], "skillCell_1")
+        self.assertEqual(data["dragTo"]["label"], "突破")
+        # 先按住那一段是必要的：不按住直接拖，长按才起步的拖动起不来
+        self.assertIsNone(data["droppedNoHold"])
 
     def test_later_step_waits_for_its_target_to_show_up(self):
         data = self.run_probe()
