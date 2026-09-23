@@ -332,10 +332,14 @@ def render_action_table(table):
             else:
                 line += " → 等回合 %.1fs（%s）" % ((turn.get("waitedMs") or 0) / 1000.0, why)
         if rec.get("op") == "close" and isinstance(rec.get("result"), dict):
-            if result.get("ok"):
+            if result.get("ok") and result.get("via") == "gone":
+                line += " → %s 自己退场了" % (result.get("panel") or "")
+            elif result.get("ok"):
                 line += " → 点 %s 关掉了 %s" % (result.get("via"), result.get("panel") or "")
             else:
                 line += " → 没关掉（%s）：%s" % (result.get("stopped"), result.get("note") or "")
+            if result.get("passed"):
+                line += "（%s 是上一层正在退场，跳过）" % result["passed"]
         lines.append(line)
     if table.get("changed"):
         lines.append("变化 %s" % table["changed"])

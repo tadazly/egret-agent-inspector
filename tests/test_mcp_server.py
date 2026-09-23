@@ -1128,6 +1128,19 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     const firstMove = moves.find(m => m[0] !== 670 || m[1] !== 220);
     out.dragFirstLeg = firstMove ? (firstMove[1] === 220 ? "horizontal" : "diagonal") : null;
     out.dragEnd = moves[moves.length - 1];
+
+    // 连关两层：上一层关掉后，退场特效层自己顶在最上面一会儿就没了；这次 close 要关的是下面的背包
+    const bag = item("petBag.PetBagPanel", "petBag", uiLayer, { x: 0, y: 0, width: 800, height: 480 });
+    item("eui.Image", "bagBg", bag, { x: 0, y: 0, width: 800, height: 480 });
+    const bagClose = item("eui.Button", "_btnClose", bag, { x: 740, y: 10, width: 50, height: 50 });
+    listenOn(bagClose);
+    bagClose.addEventListener("touchTap", function () { remove(bag); }, null);
+    const fx = item("plugin.applicationView.EffectContainer", null, uiLayer, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
+    item("eui.Image", "fxImg", fx, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
+    setTimeout(() => remove(fx), 150);
+    const closed = await t.handlers.act({ steps: [{ op: "close" }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.closeResult = closed.executed[0].result;
+    out.bagClosed = !bag.stage;
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
@@ -1239,6 +1252,12 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertEqual(data["dragFirstLeg"], "horizontal")
         self.assertEqual(data["dragEnd"], [465, 80])
 
+    def test_close_skips_a_layer_that_is_already_leaving(self):
+        data = self.run_probe()
+        self.assertTrue(data["bagClosed"])
+        self.assertEqual(data["closeResult"]["via"], "close")
+        self.assertIn("EffectContainer", data["closeResult"]["passed"])
+
     def test_act_waits_for_a_list_that_is_fading_in(self):
         self.assertTrue(self.run_probe()["fadedInListed"])
 
@@ -1291,6 +1310,8 @@ class RenderTableTest(unittest.TestCase):
         server = load_server()
         table = {"panel": {"name": "ui.ToolbarNew"}, "mode": "normal", "marker": "m2", "reloaded": True,
                  "executed": [{"op": "close", "result": {"ok": True, "via": "back", "panel": "tenVote.TenVote"}},
+                              {"op": "close", "result": {"ok": True, "via": "close", "panel": "petBag.PetBag",
+                                                         "passed": "EffectContainer"}},
                               {"op": "dismiss", "result": {"closed": [
                                   {"ok": True, "panel": "petBag.PetBag", "via": "close"},
                                   {"ok": False, "panel": "ui.ToolbarNew", "note": "没有可识别的关闭控件"}]}}],
@@ -1298,6 +1319,7 @@ class RenderTableTest(unittest.TestCase):
         text = server.render_action_table(table)
         self.assertIn("页面已重载", text)
         self.assertIn("点 back 关掉了 tenVote.TenVote", text)
+        self.assertIn("点 close 关掉了 petBag.PetBag（EffectContainer 是上一层正在退场，跳过）", text)
         # dismiss 的结果原来把整串 dict 拼进去，几百字节全是噪音
         self.assertIn("关掉 1 个弹窗", text)
         self.assertNotIn("'ok': True", text)
