@@ -261,6 +261,22 @@ def render_action_table(table):
             line += " → 第 %s/%s 条%s（屏上 %s–%s）" % (
                 result["index"], result.get("total"), "已在屏上" if shown else "没能滚到屏上",
                 seen.get("lo", "?"), seen.get("hi", "?"))
+        unlock = rec.get("unlock")
+        if isinstance(unlock, dict) and unlock.get("reason") == "unlocked":
+            line += "（先等上一回合解锁 %.1fs）" % ((unlock.get("waitedMs") or 0) / 1000.0)
+        turn = rec.get("turn")
+        if isinstance(turn, dict):
+            # 出招后整组按钮被锁：工具已经在这一次调用里等到能再操作了，不用再 observe / wait
+            why = {"unlocked": "可以再操作了", "panel": "界面换了", "new-controls": "出现了新的可选项",
+                   "rebuilt": "界面重建了", "timeout": "等满仍未解锁",
+                   "budget": "这次调用快到时限，先返回；接着再发一次同样的步骤",
+                   "no-lock": "点了没上锁，可能次数用完或不在回合内"}.get(turn.get("reason"), turn.get("reason"))
+            if turn.get("added"):
+                why += "：" + "、".join(str(a) for a in turn["added"])
+            if rec.get("repeated"):
+                line += " → 连出 %s 次，停在：%s" % (rec["repeated"], why)
+            else:
+                line += " → 等回合 %.1fs（%s）" % ((turn.get("waitedMs") or 0) / 1000.0, why)
         if rec.get("op") == "close" and isinstance(rec.get("result"), dict):
             if result.get("ok"):
                 line += " → 点 %s 关掉了 %s" % (result.get("via"), result.get("panel") or "")
@@ -269,7 +285,9 @@ def render_action_table(table):
         lines.append(line)
     if table.get("changed"):
         lines.append("变化 %s" % table["changed"])
-    if table.get("stopped") and table["stopped"] not in ("done", "stale"):
+    if table.get("stopped") == "budget":
+        lines.append("中止 这次调用快到时限，后面的步骤没做；看完新表再发剩下的步骤")
+    elif table.get("stopped") and table["stopped"] not in ("done", "stale"):
         lines.append("中止 %s" % table["stopped"])
     if table.get("newErrors"):
         lines.append("页面报错 %s 条，首条：%s" % (table["newErrors"], table.get("firstError")))
@@ -312,7 +330,7 @@ def render_action_table(table):
     for sc in table.get("scrollers") or []:
         dirs = "".join([d for d, k in (("↑", "canUp"), ("↓", "canDown"), ("←", "canLeft"), ("→", "canRight")) if sc.get(k)])
         lines.append("可滚 %s %s → {\"op\":\"scroll\",\"hash\":%s,\"dy\":-200}" % (sc.get("label"), dirs, sc.get("hash")))
-        if sc.get("items") and sc.get("list") and dirs:
+        if sc.get("items", 0) > 10 and sc.get("list") and dirs:
             # 模型靠滚动去「看」列表，一屏几条，数出来的总数能差几十倍；把全集入口直接摆在它眼前
             fields = "/".join(sc.get("fields") or [])
             lines.append("数据 共 %d 条%s，屏上只有几条：计数、筛选、找目标先读数据 egret_evaluate \"$items(%s, it => …)\"；"
@@ -320,7 +338,9 @@ def render_action_table(table):
                          % (sc["items"], "（字段 %s）" % fields if fields else "", sc["list"], sc.get("hash")))
     ocr = table.get("ocr") or {}
     if ocr.get("filled"):
-        lines.append("ocr 补了 %s 个标签（%sms）" % (ocr["filled"], ocr.get("elapsedMs")))
+        # 全部命中缓存时没有耗时
+        took = "（%sms）" % ocr["elapsedMs"] if ocr.get("elapsedMs") is not None else "（缓存）"
+        lines.append("ocr 补了 %s 个标签%s" % (ocr["filled"], took))
     elif ocr.get("error"):
         lines.append("ocr 失败 %s" % ocr["error"])
     if table.get("hint"):
@@ -567,6 +587,9 @@ TOOLS = {
         "加载过场也会在同一次调用里等过去。steps 每项："
         "{\"i\":3} 点动作表编号；{\"hash\"/\"qaName\"/\"id\"/\"name\"/\"text\":...} 直接定位（可加 match:\"exact\"）；"
         "{\"i\":3,\"text\":\"abc\"} 输入文本；{\"op\":\"advance\"} 推进对白/引导；{\"op\":\"dismiss\"} 关弹窗；"
+        "回合制界面（出招后整组按钮被锁）点完会在这一次调用里等到下一回合再返回，返回里有「等回合」；"
+        "要按同一招连出时给 {\"i\":3,\"repeat\":20}：解锁后立刻再点，遇到换界面、冒出新选项（换宠）、点了不再上锁或次数用完就停；"
+        "回合倒计时往往只有几秒，每回合都靠 observe 决策会丢回合；"
         "{\"op\":\"close\"} 关掉当前顶层面板：一次往返里依次试关闭键、返回键、遮罩，并确认面板真的消失，"
         "回报是哪条路子生效；打开一个界面看完就关的遍历用它，比 dismiss 更适合全屏面板；"
         "{\"op\":\"recommended\"} 点 observe 给出的 recommendedTarget（引导挖洞、只能点遮罩关闭的弹窗）；"
@@ -585,6 +608,8 @@ TOOLS = {
              "timeoutMs": {"type": "integer", "description": "每步等待界面变化的上限，默认 3000"},
              "quietMs": {"type": "integer", "description": "一直没变化就提前返回的时间，默认 600"},
              "loadingMs": {"type": "integer", "description": "结束时如果还在加载过场，最多再等多久，默认 6000"},
+             "turnMs": {"type": "integer",
+                        "description": "点完后整组按钮被锁住（回合制出招、提交后等结果）时最多等多久再返回，默认 15000，0 关闭"},
              "occluded": {"type": "boolean", "description": "把被遮挡的条目也列出来，默认 false"},
              "format": {"type": "string", "enum": ["lines", "json"], "description": "默认 lines 紧凑文本；json 带 hash、坐标和完整字段"},
              "screenshot": {"type": "boolean", "description": "附带一张压缩截图，默认 false"}}),
@@ -1122,8 +1147,11 @@ class McpServer:
                       and a.get("role") not in ("close", "back")
                       and not (reuse and str(a.get("hash")) in self.ocr_cache)][:limit]
         if not candidates:
+            # 认过没认出字的也会进缓存；这时说「没有弱标签」会误导人去怀疑动作表
+            missed = any(a.get("from") in weak and self.ocr_cache.get(str(a.get("hash"))) == ""
+                         for a in (table.get("actions") or []))
             table["ocr"] = {"available": True, "filled": cached,
-                            "skipped": "cached" if cached else "no-weak-labels"}
+                            "skipped": "cached" if cached else "cached-miss" if missed else "no-weak-labels"}
             return table
         try:
             shot = await self.invoke("egret_screenshot", {"tabId": args.get("tabId"), "format": "png", "maxWidth": 1600})
@@ -1261,6 +1289,9 @@ class McpServer:
                 if page_method in ("tap", "drag", "advance", "act", "dismissPopups", "splan", "splanTestCommand"):
                     # 这些方法内部会等界面变化（动画、弹窗消失、模块 js 加载），比普通查询慢得多
                     timeout = REQUEST_TIMEOUT + 30
+                if page_method == "act":
+                    # 页面侧留出收尾（等加载过场、扫表）的余量，连出、等回合到点就先返回，不让整次调用超时白跑
+                    args["budgetMs"] = int(max(timeout - 15, 10) * 1000)
                 res = await self.bridge.request("page", {"tabId": tab_id, "method": page_method, "params": args}, timeout)
                 payload = dict(res.get("result") or {}) if isinstance(res.get("result"), dict) else {"value": res.get("result")}
                 payload["tabId"] = res.get("tabId")

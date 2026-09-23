@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.4.13";
+    var VERSION = "1.6.9";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -890,14 +890,15 @@
 
     function transientOverlayOf(panel) {
         if (!panel || findCloseControl(panel) || continueTargetOf(panel)) return null;
-        // 面板里有带文字的可点控件（对白选项、功能按钮）就不是过场：有东西可点，不该让调用方空等
-        if (dialogueHasDecision(panel)) return null;
         var tags = [], cur = panel;
         for (var depth = 0; cur && depth < 4; depth++, cur = cur.parent) {
             tags.push(className(cur), nameOf(cur), bindId(cur), qaNameOf(cur), sourceOf(cur));
         }
         var namedTransition = /loading|transition|fade|switch.?map|map.?title|scene.?title|chapter.?title|location.?title|过场|转场/i
             .test(tags.filter(Boolean).join(" "));
+        // 面板里有带文字的可点控件（对白选项、功能按钮）就不是过场：有东西可点，不该让调用方空等。
+        // 但加载页上的「Tips：…」提示常挂着监听，不能因此把战斗加载页当成可以点遮罩关掉的弹窗
+        if (!namedTransition && dialogueHasDecision(panel)) return null;
         var backdrop = backdropPointOutside(panel);
         // 有点击监听的普通遮罩由 modal-backdrop-dismiss 处理；已知 loading/转场层即使可点也不应盲点跳过。
         if (!namedTransition && (!backdrop || backdrop.actionable)) return null;
@@ -1301,14 +1302,66 @@
             cur = cur.parent;
         }
         cur = o;
-        for (var depth = 0; cur && depth < 8; depth++) {
-            var tag = className(cur) + " " + (nameOf(cur) || "") + " " + (bindId(cur) || "") + " " + (qaNameOf(cur) || "");
-            if (!fallback && /button|btn|item|tab|check|toggle|close/i.test(tag)) fallback = cur;
-            if (interactionListenersOf(cur).length) return fallback || cur;
-            if (cur === root || cur === getStage()) break;
+        var delegated = null, aboveRoot = 0;
+        for (var depth = 0; cur && depth < 12; depth++) {
+            if (!aboveRoot) {
+                var tag = className(cur) + " " + (nameOf(cur) || "") + " " + (bindId(cur) || "") + " " + (qaNameOf(cur) || "");
+                if (!fallback && /button|btn|item|tab|check|toggle|close/i.test(tag)) fallback = cur;
+                if (!delegated && depth < 3 && isDelegateTarget(cur)) delegated = cur;
+            }
+            if (interactionListenersOf(cur).length) {
+                // 监听挂在面板根之上：面板按点中的是谁分发（结算页的「再战一次」只是一张有名字的图），只有委托目标算数
+                if (aboveRoot) return fallback || delegated;
+                if (fallback) return fallback;
+                // 监听挂在比它大得多的容器上（地图容器、列表）也是委托：点中的那个有名字的控件才是动作
+                if (delegated && delegated !== cur && areaOf(cur) >= areaOf(delegated) * 12) return delegated;
+                return cur;
+            }
+            if (cur === getStage()) break;
+            if (cur === root || aboveRoot) {
+                if (++aboveRoot > 3) break;
+            }
             cur = cur.parent;
         }
         return fallback;
+    }
+
+    // 事件委托的目标：自己开着 touchEnabled、有名字（skin part / name，代码里多半靠它判断点的是谁）、
+    // 尺寸像个控件而不是背景
+    function isDelegateTarget(o) {
+        if (!o || o.touchEnabled !== true) return false;
+        var name = bindId(o) || nameOf(o);
+        if (!name || /^(instance)?\d+$/i.test(name)) return false;
+        // 只装着字的容器是标题（地图建筑下面的「星际探索」），不是被委托的按钮：
+        // 提成一行正好把 agent 引去点那个点了没反应的标签
+        if (onlyText(o)) return false;
+        // 底板、底座、选中态、空态这类装饰图也常开着 touchEnabled，名字一看就不是按钮
+        if (DECOR_NAME.test(name)) return false;
+        var stage = getStage(), a = areaOf(o);
+        return a >= 150 && (!stage || a <= stage.stageWidth * stage.stageHeight * 0.15);
+    }
+
+    var DECOR_NAME = /(bg|base|empty|shadow|glow|light|effect|frame|line|mask|select|selected|deco|decor)\d*$/i;
+
+    function onlyText(o) {
+        if (TEXT_CLASS.test(className(o))) return true;
+        var n = numChildren(o);
+        if (!n) return false;
+        for (var i = 0; i < n; i++) {
+            if (!onlyText(childAt(o, i))) return false;
+        }
+        return true;
+    }
+
+    function soleConfirmOf(panel) {
+        var rows = (buildActionTable({ peek: true, rootHash: hashOf(panel), limit: 20 })._entries || [])
+            .filter(function (e) { return e.role !== "text"; });
+        return rows.length === 1 && rows[0].role === "confirm" && rows[0].point ? rows[0] : null;
+    }
+
+    function areaOf(o) {
+        var r = stageRect(o);
+        return r ? r.width * r.height : 0;
     }
 
     // 把自然语言描述、子树文案/资源名和真实点击监听在页面侧一次聚合，避免 agent 逐个 find/get_tree 试探。
@@ -1598,6 +1651,175 @@
     // 动作表对外只给编号和标签；hash、坐标和对象引用留在这里，编号靠它解析回真实对象
     var lastEntries = [];
 
+    // 整张表（截断前）每一行的「角色|标签」，挂成不可枚举属性，不进序列化结果。
+    // act 前后各取一次对比：页签切换、列表滑入、技能栏上锁这些变化不改面板栈也不改文案，
+    // 只看指纹会误报「界面没有变化」，还会劝 agent 再点一次——页签就又切回去了。
+    function hideRowKeys(out, keys, entries) {
+        try {
+            Object.defineProperty(out, "_rowKeys", { value: keys, enumerable: false, configurable: true });
+            Object.defineProperty(out, "_entries", { value: entries || [], enumerable: false, configurable: true });
+        } catch (e) {}
+        return out;
+    }
+
+    // peek=true 只看不记：act 执行前要取一次「之前的样子」，不能把 agent 手里的编号冲掉
+    function rememberEmpty(p, out) {
+        if (!p.peek) {
+            lastEntries = [];
+            lastTable = out;
+        }
+        return hideRowKeys(out, ["mode|" + out.mode]);
+    }
+
+    // 回合制界面：出招后整组按钮被锁住（父容器 touchChildren=false 或 enabled=false），演出播完才解锁。
+    // 这时就返回，agent 看到的是半截演出，只能再 observe / wait 好几轮——回合还带倒计时，慢了直接丢回合。
+    // 所以点完之后只要点中的控件被「整组锁住」，就在这里等到能再操作为止。
+    function lockedAncestor(o) {
+        var stage = getStage();
+        for (var q = o && o.parent; q && q !== stage; q = q.parent) {
+            if (q.touchChildren === false || q.enabled === false) return q;
+        }
+        return null;
+    }
+
+    // 纯数字的行多是倒计时、血量、计数，变了不代表出现了新的可选项
+    var COUNTER_LABEL = /^[\d\s.:/%+\-×x]*$/i;
+
+    // 演出途中冒出来的 buff 图标、状态角标、血条都是没字的小东西，不算「游戏在等你做别的决定」；
+    // 换宠栏、选项按钮要么自己带字，要么是头像这种够大的块。借来的标签（nearText）不算自己带字
+    function decisionLike(e) {
+        if (e.from === "text" || e.from === "childText") return true;
+        return Math.min(e._w, e._h) >= 32;
+    }
+
+    // 按对象比，不按标签比：演出里血量、换上场的精灵名会让同一个控件的标签一直变，那不是新选项；
+    // 新冒出来的控件、原来被挡住现在露出来的控件才是
+    function outsideKeys(entries, lock, names) {
+        return (entries || []).filter(function (e) {
+            return e.role !== "text" && !e.occluded && !COUNTER_LABEL.test(e.label) && decisionLike(e) &&
+                !isSelfOrAncestor(lock, e._o);
+        }).map(function (e) {
+            if (names) names[e.hash] = e.label;
+            return String(e.hash);
+        });
+    }
+
+    function actionableOutside(lock, names) {
+        return outsideKeys(buildActionTable({ peek: true, limit: 60 })._entries, lock, names);
+    }
+
+    // 见过被锁住的控件组（技能栏）：游戏往往等服务端回包、点完一秒左右才上锁，
+    // 只有这些组值得在点完后多等一会儿看锁来不来；普通按钮不白等
+    var lockableSeen = {};
+
+    // 锁上过又解开过的组才是「回合锁」；一直锁着的多半是真禁用，不值得等
+    var lockToggled = {};
+
+    function rememberLocks(entries) {
+        var stage = getStage();
+        entries.forEach(function (e) {
+            var lock = lockedAncestor(e._o);
+            if (lock) lockableSeen[hashOf(lock)] = true;
+            for (var q = e._o && e._o.parent; q && q !== stage; q = q.parent) {
+                var h = hashOf(q);
+                if (lockableSeen[h] && q.touchChildren !== false && q.enabled !== false) lockToggled[h] = true;
+            }
+        });
+    }
+
+    // 点上去时整组还锁着：可能是上一回合的演出没播完（等它解开再点），
+    // 也可能是游戏在等你先做别的决定（精灵倒下后的换宠栏）——技能栏会一直锁到你选完，干等只会等到倒计时替你选。
+    // 所以和出招后一样盯着新冒出的选项；基准用 agent 做决策时看到的那张表，那之后冒出来的它都没见过
+    async function waitForUnlock(o, lock, cap, seenEntries) {
+        var top = sceneInfo().top;
+        var baseline = seenEntries ? outsideKeys(seenEntries, lock) : actionableOutside(lock);
+        return watchLock(o, lock, cap, baseline, top && hashOf(top));
+    }
+
+    function knownLockable(o) {
+        var stage = getStage();
+        for (var q = o && o.parent; q && q !== stage; q = q.parent) {
+            if (lockableSeen[hashOf(q)]) return true;
+        }
+        return false;
+    }
+
+    async function waitForTurn(o, cap, graceMs) {
+        var lock = lockedAncestor(o);
+        var top = sceneInfo().top, topHash = top && hashOf(top);
+        for (var g0 = Date.now(); !lock && graceMs > 0 && Date.now() - g0 < graceMs && o.stage;) {
+            await sleep(100);
+            lock = lockedAncestor(o);
+            // 最后一击直接结算：锁还没来，界面先换了
+            var then = sceneInfo().top;
+            if (!then || hashOf(then) !== topHash) return { waitedMs: Date.now() - g0, reason: "panel" };
+        }
+        if (!lock) return null;
+        lockableSeen[hashOf(lock)] = true;
+        // 锁住的那一块之外、此刻就能点的东西；之后多出来的（比如精灵倒下后的换宠栏）说明游戏在等你做别的决定
+        return watchLock(o, lock, cap, actionableOutside(lock), topHash);
+    }
+
+    async function watchLock(o, lock, cap, baseline, topHash) {
+        var start = Date.now(), polls = 0, reason = "timeout", added = null;
+        // 出招名、伤害数字这类横幅一闪就没；等你做决定的东西（换宠栏）会一直摆着。持续 1s 都在才算；
+        // 平时隔 400ms 看一次，冒出候选后每 200ms 盯一次，换宠倒计时只有十来秒，发现得越早越好
+        var firstSeen = {}, pending = false;
+        while (Date.now() - start < cap) {
+            await sleep(200);
+            polls++;
+            if (!o.stage) { reason = "rebuilt"; break; }
+            if (!lockedAncestor(o)) { reason = "unlocked"; lockToggled[hashOf(lock)] = true; break; }
+            var now = sceneInfo().top;
+            if (!now || hashOf(now) !== topHash) { reason = "panel"; break; }
+            if (pending || polls % 2 === 0) {
+                var names = {}, seen = {}, at = Date.now();
+                added = rowDiff(baseline, actionableOutside(lock, names)).added.filter(function (h) {
+                    seen[h] = firstSeen[h] || at;
+                    return at - seen[h] >= 1000;
+                });
+                firstSeen = seen;
+                pending = Object.keys(seen).length > 0;
+                if (added.length) {
+                    reason = "new-controls";
+                    added = added.slice(0, 4).map(function (h) { return names[h]; });
+                    break;
+                }
+            }
+        }
+        var out = { waitedMs: Date.now() - start, reason: reason };
+        if (reason === "new-controls") out.added = added;
+        return out;
+    }
+
+    function rowDiff(before, after) {
+        var left = {};
+        (before || []).forEach(function (k) { left[k] = (left[k] || 0) + 1; });
+        var added = [];
+        (after || []).forEach(function (k) {
+            if (left[k]) left[k]--;
+            else added.push(k);
+        });
+        var removed = [];
+        Object.keys(left).forEach(function (k) {
+            for (var c = 0; c < left[k]; c++) removed.push(k);
+        });
+        return { added: added, removed: removed };
+    }
+
+    // 「少了 challenge_normal；多了 explore_normal」：文字行（血量、计数）变化只算有变化，不逐条列
+    function describeRowDiff(diff) {
+        function labels(list) {
+            return list.filter(function (k) { return k.indexOf("text|") !== 0; })
+                .map(function (k) { return k.slice(k.indexOf("|") + 1); }).slice(0, 3);
+        }
+        var parts = [], gone = labels(diff.removed), come = labels(diff.added);
+        if (gone.length) parts.push("少了 " + gone.join("、"));
+        if (come.length) parts.push("多了 " + come.join("、"));
+        if (!parts.length) parts.push("文字有变化");
+        return parts.join("；");
+    }
+
     function hashString(s) {
         var h = 5381;
         for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
@@ -1650,9 +1872,17 @@
     var BACK_ROLE_RE = /(?:^|[\s_.\-])(?:back|return)(?:$|[\s_.\-])|返回/i;
     var BACK_ROLE_CAMEL = /[a-z](?:Back|Return)(?:$|[A-Z_\s])/;
 
+    // egret.TextField 是所有文字的基类，标题、关卡名也是它：只有 type=input 或输入类组件才算输入框
+    function inputLike(o) {
+        if (!o) return false;
+        var cls = className(o);
+        if (/TextInput|EditableText|InputText|EditText/i.test(cls)) return true;
+        return /TextField/i.test(cls) && o.type === "input";
+    }
+
     var FAST_ROLES = [
         ["npc", /storyInteractObject|(^|[_-])npc(?:[_-]|$)/i],
-        ["input", /inputText|textInput|editText|textField/i],
+        ["input", function (blob, ids, o) { return inputLike(o); }],
         ["close", /close|关闭|關閉|quit|dismiss|(?:^|[\s_-])btn_no(?:$|[\s_-])/i],
         ["confirm", /confirm|btn_yes|btn_ok|确定|確定|确认|確認|知道了|好的/i],
         // 只认实例名 / qaName / 文案，且要成词：类名里的 Return（SeerReturn2Component 是「老兵回归」）
@@ -1681,7 +1911,7 @@
         var idBlob = ids + " " + (label || "");
         for (var i = 0; i < FAST_ROLES.length; i++) {
             var match = FAST_ROLES[i][1];
-            if (typeof match === "function" ? match(blob, idBlob) : match.test(blob)) return FAST_ROLES[i][0];
+            if (typeof match === "function" ? match(blob, idBlob, o) : match.test(blob)) return FAST_ROLES[i][0];
         }
         if (BUTTON_TAG.test(tag)) return "button";
         // 弹窗正文、健康游戏忠告这类文字常常也挂着监听，标成 button 会诱导 agent 去点它。
@@ -1696,8 +1926,10 @@
         var texts = [], stack = [], scanned = 0, total = 0, seen = {};
         // 从最上层的子节点开始：弹窗正文是最后加入的子节点，从底层扫会被背景和地图吃光预算
         for (var i = 0; i < numChildren(root); i++) stack.push(childAt(root, i));
-        // 输出的文案有字数预算，但给动作表配标签的候选要一直收到扫描上限为止
-        while (stack.length && scanned < 400 && (total < budget || sink)) {
+        // 输出的文案有字数预算，但给动作表配标签的候选要一直收到扫描上限为止。
+        // 收候选时上限放宽：整个舞台当根时 HUD 在最上层，400 个对象扫完了还轮不到地图上的建筑标题
+        var scanCap = sink ? 1500 : 400;
+        while (stack.length && scanned < scanCap && (total < budget || sink)) {
             var c = stack.pop();
             scanned++;
             if (!c || !c.visible || c.alpha === 0) continue;
@@ -1711,7 +1943,7 @@
                 // sink 里带上矩形：给动作表把「压在控件上的那段文字」当标签用
                 if (sink) {
                     var tr = stageRect(c);
-                    if (tr) sink.push({ text: t, rect: tr });
+                    if (tr) sink.push({ text: t, rect: tr, o: c });
                 }
             }
             for (var j = 0; j < numChildren(c); j++) stack.push(childAt(c, j));
@@ -1874,15 +2106,181 @@
         return out;
     }
 
+    // 列表项（技能条、关卡行、奖励格）里的零件——底图、图标、名字、次数、星星——各挂一个监听，
+    // 一个技能就拆成五六行，agent 得自己拼出哪几行是同一个技能。按「最近的列表项祖先」把零件并成一行，
+    // 标签是零件上的文字拼起来。带独立文案的按钮（领取、购买、详情）不并，免得把真正要点的动作藏起来。
+    var ITEM_CLASS = /item|renderer|cell|slot|card/i;
+    var STANDALONE_ROLES = { button: 1, confirm: 1, close: 1, back: 1, tab: 1, input: 1 };
+
+    function isItemHost(o) {
+        return !!o && ((typeof o.itemIndex === "number" && o.itemIndex >= 0) || ITEM_CLASS.test(className(o)));
+    }
+
+    function itemHostOf(o, stage) {
+        if (isItemHost(o)) return o;
+        for (var q = o && o.parent, hops = 0; q && q !== stage && hops < 6; q = q.parent, hops++) {
+            if (isItemHost(q)) return q;
+        }
+        return null;
+    }
+
+    function realTextRow(e) {
+        return e.from === "text" || e.from === "childText" || e.from === "nearText";
+    }
+
+    function mergeItemParts(entries, stage) {
+        var stageArea = stage.stageWidth * stage.stageHeight;
+        var groups = {};
+        entries.forEach(function (e) {
+            if (STANDALONE_ROLES[e.role] && realTextRow(e) && !COUNTER_LABEL.test(e.label)) return;
+            var host = itemHostOf(e._o, stage);
+            if (!host) return;
+            var hr = stageRect(host);
+            if (!hr || hr.width * hr.height > stageArea * 0.2) return;
+            var key = String(hashOf(host));
+            (groups[key] = groups[key] || { host: host, members: [] }).members.push(e);
+        });
+        var gone = {};
+        Object.keys(groups).forEach(function (key) {
+            var g = groups[key];
+            if (g.members.length < 2) return;
+            var rep = g.members.filter(function (e) { return e._o === g.host; })[0] ||
+                g.members.slice().sort(function (a, b) { return b._w * b._h - a._w * a._h; })[0];
+            var texts = [];
+            g.members.slice().sort(function (a, b) {
+                return Math.abs(a._y - b._y) > 8 ? a._y - b._y : a._x - b._x;
+            }).forEach(function (e) {
+                if ((realTextRow(e) || e.role === "text") && texts.indexOf(e.label) < 0) texts.push(e.label);
+            });
+            if (texts.length) {
+                if (rep.label !== texts.join(" ")) rep.alt = rep.alt || rep.label;
+                rep.label = tidy(texts.join(" "), 32);
+                rep.from = "childText";
+            } else if (/^(UIContainer|Group|Component|Image|Sprite|DisplayObjectContainer)$/.test(rep.label)) {
+                // 零件上一个字都没有（名字是贴图）：至少告诉 agent 这是哪一类列表项
+                rep.label = shortClass(g.host);
+            }
+            if (rep.role === "text") rep.role = "item";
+            g.members.forEach(function (e) { if (e !== rep) gone[e.hash] = true; });
+        });
+        return entries.filter(function (e) { return !gone[e.hash]; });
+    }
+
+    // 弱标签的行借用「挂在它身上的那段字」当标签。两种常见摆法：列表项、菜单把名字放在同级 Label 里、压在行上；
+    // 地图建筑把名字放在热区正下方或跨在底边上（星际探索、星际邮箱）。此前只认完全落在框内、且面积占 3% 以上的字，
+    // 「太空站」「战队」这种短名字和框外的标题都借不到，agent 只能去点那个点了没反应的标题。
+    // 每段字只归最近的一个热区；借走之后，标题自己那一行从表里去掉。
+    var CAPTION_MAX = 16;
+
+    // 像标题的行：标签就是它自己的字、短、矮、自己没挂监听（被上层容器委托才进的表）。
+    // 地图建筑下面「底板 + 文字」的「星际探索」就是这样，结构上和靠委托的按钮分不开，只能靠旁边有没有热区来判断
+    function captionLike(e) {
+        return (e.from === "text" || e.from === "childText") && e.label.length <= CAPTION_MAX &&
+            e._h <= 48 && !interactionListenersOf(e._o).length;
+    }
+
+    function borrowCaptions(entries, textNodes, stage) {
+        var stageArea = stage.stageWidth * stage.stageHeight;
+        // 已经是别的按钮自己的文案，就不是谁的标题
+        var owned = {};
+        entries.forEach(function (e) {
+            if ((e.from === "text" || e.from === "childText") && e.role !== "text" && !captionLike(e)) owned[e.label] = true;
+        });
+        // 文字挂在哪个控件里：HUD 图标下面的「限时签到」是那个图标自己的字，不能被地图上的热区借走
+        var controls = {};
+        entries.forEach(function (e) {
+            if (e.role !== "text" && !captionLike(e) && e._w * e._h <= stageArea * 0.25) controls[e.hash] = e;
+        });
+        textNodes.forEach(function (t) {
+            for (var q = t.o, hops = 0; q && hops < 10; q = q.parent, hops++) {
+                if (controls[hashOf(q)]) {
+                    t.ownerHash = hashOf(q);
+                    break;
+                }
+            }
+        });
+        var pairs = [];
+        entries.forEach(function (e, ei) {
+            // 被挡住的行默认不出现在表里：让它借走标题，标题就跟着一起消失了（飞船的 Spine 本体和它的热区抢「星际探索」）
+            if (e.from === "text" || e.from === "childText" || e.occluded) return;
+            var area = e._w * e._h;
+            if (!area || area > stageArea * 0.25) return;
+            var bottom = e._y + e._h, centerX = e._x + e._w / 2;
+            textNodes.forEach(function (t, ti) {
+                var s = String(t.text || "").trim();
+                if (!s || s.length > CAPTION_MAX || COUNTER_LABEL.test(s) || owned[s]) return;
+                if (t.ownerHash !== undefined && t.ownerHash !== e.hash) return;
+                var tr = t.rect, cx = tr.x + tr.width / 2;
+                if (cx < e._x - 2 || cx > e._x + e._w + 2) return;
+                var inside = tr.x >= e._x - 1 && tr.y >= e._y - 1 &&
+                    tr.x + tr.width <= e._x + e._w + 1 && tr.y + tr.height <= bottom + 1;
+                var below = tr.y >= e._y + e._h * 0.5 && tr.y <= bottom + Math.max(36, e._h * 0.35);
+                if (!inside && !below) return;
+                // 越贴底边、越居中越像它的名字；框内的同分时取字大的
+                var score = (inside ? 0 : 5 + Math.max(0, tr.y - bottom)) +
+                    20 * Math.abs(cx - centerX) / Math.max(e._w, 1) - Math.min(tr.width * tr.height / 1000, 2);
+                pairs.push({ ei: ei, ti: ti, score: score });
+            });
+        });
+        pairs.sort(function (a, b) { return a.score - b.score; });
+        var usedEntry = {}, usedText = {}, captions = {};
+        pairs.forEach(function (pr) {
+            if (usedEntry[pr.ei] || usedText[pr.ti]) return;
+            usedEntry[pr.ei] = usedText[pr.ti] = true;
+            var e = entries[pr.ei], t = textNodes[pr.ti];
+            e.alt = e.label;
+            e.label = tidy(t.text, 32);
+            e.from = "nearText";
+            captions[e.label] = true;
+        });
+        // 被借走的标题自己那一行（点了没反应）去掉，免得 agent 去点它
+        return entries.filter(function (e) {
+            return e.from === "nearText" || !((e.role === "text" || captionLike(e)) && captions[e.label]);
+        });
+    }
+
+    // 全屏 HUD（主城工具栏）只在四周摆按钮，中间是透明的，点下去落在地图上。按面积它是「全屏面板」，
+    // 当成模态就把地图上的入口（星际探索的飞船、各种建筑）整个挡在动作表外面，agent 只能去点地图上的文字标签。
+    // 在中间区域打一片点：大多数点穿过它落到下层、且下层不是遮罩，它就不是模态。
+    function passesThrough(panel, r) {
+        // 取样只在面板和舞台的交集里：滚动列表的内容能把面板包围盒撑到几百万像素宽（星际探索面板实测 7864355px），
+        // 按比例取的点全落在舞台外，命中的是 stage 本身，会被误算成「穿透」
+        var stage = getStage();
+        var x0 = Math.max(r.x, 0), y0 = Math.max(r.y, 0);
+        var x1 = Math.min(r.x + r.width, stage.stageWidth), y1 = Math.min(r.y + r.height, stage.stageHeight);
+        if (x1 - x0 < 20 || y1 - y0 < 20) return false;
+        var through = 0, total = 0;
+        [0.25, 0.375, 0.5, 0.625, 0.75].forEach(function (fx) {
+            [0.3, 0.5, 0.7].forEach(function (fy) {
+                var hit = hitTest(round(x0 + (x1 - x0) * fx), round(y0 + (y1 - y0) * fy));
+                total++;
+                if (!hit || hit === stage || isSelfOrAncestor(panel, hit)) return;
+                for (var q = hit, hops = 0; q && hops < 4; q = q.parent, hops++) {
+                    if (BACKDROP_RE.test(className(q) + " " + (nameOf(q) || "") + " " + (qaNameOf(q) || ""))) return;
+                }
+                through++;
+            });
+        });
+        return total > 0 && through >= total * 0.6;
+    }
+
     // 超出 limit 时按重要性挑，而不是按阅读顺序切：列表项上的小字标签（role text）一个面板能有几十条，
     // 按顺序切会把真正的按钮挤出表外（经验舱的「快速升级」曾排到第 51 位，默认 30 行根本轮不到）。
     // 挑完仍按阅读顺序排回去，编号照旧从上到下。
     var TRUNCATE_RANK = { close: 0, back: 0, confirm: 0, input: 1, button: 2, tab: 2, npc: 2, item: 3, text: 4 };
 
+    // 没字的小图标（buff、状态角标、属性图标）占着行却很少是要点的；
+    // 战斗里一排十几个，会把「请选择替换的精灵」这种真选项挤出表外
+    function tinyIcon(e) {
+        if (e.from === "text" || e.from === "childText" || e.from === "nearText") return false;
+        return e.role === "button" && e._w !== undefined && Math.min(e._w, e._h) < 28;
+    }
+
     function pickWithinLimit(entries, limit) {
         if (entries.length <= limit) return entries;
         var ranked = entries.map(function (e, at) {
             var rank = TRUNCATE_RANK[e.role] !== undefined ? TRUNCATE_RANK[e.role] : 2;
+            if (tinyIcon(e)) rank = Math.max(rank, 4);
             return { at: at, rank: rank + (e.occluded ? 10 : 0) };
         });
         ranked.sort(function (a, b) { return a.rank - b.rank || a.at - b.at; });
@@ -1911,7 +2309,7 @@
         // 否则地图上的 NPC、入口这些真正的目标会被漏掉。占住大半个舞台的才当模态处理。
         var topRect = si.top && stageRect(si.top);
         var stageArea = stage.stageWidth * stage.stageHeight;
-        var modal = !!(topRect && topRect.width * topRect.height >= stageArea * 0.6);
+        var modal = !!(topRect && topRect.width * topRect.height >= stageArea * 0.6) && !passesThrough(si.top, topRect);
         var root = scoped ? byHash(p.rootHash) : (modal ? si.top : stage);
         var out = {
             // 每次注入换一个：页面一重载，server 就能看出上一轮的 i 编号和 hash 全部作废
@@ -1928,9 +2326,7 @@
         if (!root) {
             out.mode = "empty";
             out.marker = "empty";
-            lastEntries = [];
-            lastTable = out;
-            return out;
+            return rememberEmpty(p, out);
         }
         var textNodes = [];
         out.text = panelTexts(root, 600, textNodes);
@@ -1955,9 +2351,7 @@
                 out.hint = recommendedTarget.reason === "guide-hole"
                     ? "引导挖洞：只能点 recommendedTarget，用 egret_act 的 {op:\"recommended\"}"
                     : "连续对白/引导：用 egret_act 的 op=advance 一次推完，不要逐次点击";
-                lastEntries = [];
-                lastTable = out;
-                return out;
+                return rememberEmpty(p, out);
             }
             out.hint = "没有识别到关闭控件：优先用动作表里的关闭/确定/领取按钮，都不行再用 egret_act 的 {op:\"recommended\"} 点遮罩";
         }
@@ -1966,14 +2360,13 @@
             out.transientOverlay = transientOverlay;
             out.marker = hashString(["transient", si.top && hashOf(si.top), out.text.join("|")].join("#"));
             out.hint = "地图标题/加载过场，没有安全点击目标：用 op=wait 短等后看返回的新动作表";
-            lastEntries = [];
-            lastTable = out;
-            return out;
+            return rememberEmpty(p, out);
         }
 
         // 发现阶段的上限不能跟展示 limit 绑死：limit 调小只应该少显示几行，
         // 不能让还没扫到的弹窗按钮整个消失（limit=10 时「确定」按钮曾经就这样丢掉）。
-        var discoverCap = Math.max(limit * 3, 120);
+        // 整个舞台当根时（主城 HUD + 地图）控件多得多，HUD 在最上层会先把名额用光，地图入口就轮不到了
+        var discoverCap = Math.max(limit * 3, root === stage ? 300 : 120);
         var seen = {}, owners = [], order = 0;
         walk(root, function (o) {
             if (o === root) return;
@@ -2012,7 +2405,8 @@
                     points.push([sx0 + (sx1 - sx0) * fx, sy0 + (sy1 - sy0) * fy]);
                 });
             });
-            for (var pi = 0; pi < points.length && owners.length < discoverCap; pi++) {
+            // 网格扫描单独留一份名额：它补的正是遍历漏掉的东西，不能因为遍历先用满了就整个跳过
+            for (var pi = 0; pi < points.length && owners.length < discoverCap + 80; pi++) {
                 var hit = hitTest(round(points[pi][0]), round(points[pi][1]));
                 if (!hit) continue;
                 var hitOwner = semanticActionOwner(hit, root);
@@ -2076,27 +2470,8 @@
         if (textOnly.length) {
             textOnly.forEach(function (t) { if (out.text.indexOf(t) < 0) out.text.push(t); });
         }
-        // 弱标签的行如果正压着一段界面文字，就用那段文字当标签：列表项和左侧菜单常把名字放在
-        // 同级的 Label 里，行本身只剩 tab_bg / itemIcon 这种组件名，模型只能去截图或 OCR。
-        entries.forEach(function (e) {
-            if (e.from === "text" || e.from === "childText") return;
-            var area = e._w * e._h, best = null, bestArea = 0;
-            for (var ti = 0; ti < textNodes.length; ti++) {
-                var tr = textNodes[ti].rect, trArea = tr.width * tr.height;
-                if (trArea > area * 1.02 || trArea < area * 0.03) continue;
-                if (tr.x < e._x - 1 || tr.y < e._y - 1 ||
-                    tr.x + tr.width > e._x + e._w + 1 || tr.y + tr.height > e._y + e._h + 1) continue;
-                if (trArea > bestArea) {
-                    best = textNodes[ti];
-                    bestArea = trArea;
-                }
-            }
-            if (best) {
-                e.alt = e.label;
-                e.label = tidy(best.text, 32);
-                e.from = "nearText";
-            }
-        });
+        entries = borrowCaptions(entries, textNodes, stage);
+        rememberLocks(entries);
         // 祖先-后代去重：容器和它装的按钮不该各占一行，同名的父子只留一行
         var indexed = {}, descendants = {};
         entries.forEach(function (e) { indexed[e.hash] = e; });
@@ -2138,6 +2513,7 @@
             });
         });
         entries = entries.filter(function (e) { return !dropped[e.hash]; });
+        entries = mergeItemParts(entries, stage);
 
         // 阅读顺序（先上后左），被遮挡的排到最后
         entries.sort(function (a, b) {
@@ -2146,12 +2522,18 @@
             return a._x - b._x;
         });
         // 奖励格子这类一模一样的条目会几十个地刷屏，把真正的按钮挤出表外：同款各留前三个。
-        var repeats = {}, collapsed = 0;
+        // 六个以内的不折：换宠栏五只精灵标签都是「等级:100」，折掉后两只，活着的恰好全在后面。
+        // alt 不同就不是同款（petDie 和 headIcon 是死的和活的）
+        function repeatKey(e) { return e.role + "|" + e.label + "|" + (e.alt || "") + "|" + e.size.join("x"); }
+        var groupSize = {}, repeats = {}, collapsed = 0;
+        entries.forEach(function (e) {
+            if (!e.occluded) groupSize[repeatKey(e)] = (groupSize[repeatKey(e)] || 0) + 1;
+        });
         entries = entries.filter(function (e) {
             if (e.occluded) return true;
-            var key = e.role + "|" + e.label + "|" + e.size.join("x");
+            var key = repeatKey(e);
             repeats[key] = (repeats[key] || 0) + 1;
-            if (repeats[key] <= 3) return true;
+            if (groupSize[key] <= 6 || repeats[key] <= 3) return true;
             collapsed++;
             return false;
         });
@@ -2167,9 +2549,11 @@
         out.omitted = Math.max(0, entries.length - limit) + collapsed + offstage + indicators;
         if (collapsed) out.collapsed = collapsed;
         if (occludedHidden) out.occludedHidden = occludedHidden;
+        var visibleEntries = entries.filter(function (e) { return !e.occluded; });
+        var rowKeys = visibleEntries.map(function (e) { return e.role + "|" + e.label; });
         entries = pickWithinLimit(entries, limit);
         entries.forEach(function (entry, i) { entry.i = i + 1; });
-        lastEntries = entries;
+        if (!p.peek) lastEntries = entries;
         // 默认只给「编号 + 标签 + 角色 + 状态」：按编号决策时 hash/point/size 是死重量，
         // 摆在眼前还会把模型引到 find/get_node 这些慢路径上去。detail=true 时才带回来。
         var detail = !!p.detail;
@@ -2241,8 +2625,8 @@
             entries.map(function (e) {
                 return [e.hash, e.label, e.role, e.off ? 1 : 0, e.on ? 1 : 0, e.st || "", e.occluded ? 1 : 0].join(",");
             }).join(";")].join("#"));
-        lastTable = out;
-        return out;
+        if (!p.peek) lastTable = out;
+        return hideRowKeys(out, rowKeys, visibleEntries);
     }
 
     function stackEntryLabel(o) {
@@ -2704,7 +3088,9 @@
             var steps = raw.slice(0, 10);
             if (!steps.length) throw new Error("需要提供 steps：[{i:3}] 或 [{op:\"advance\"}] 等");
             var method = p.method || (touchHandler() ? "touch" : "dom");
-            var tableArgs = { rootHash: p.rootHash, limit: p.limit };
+            // 执行后的新表要和 observe 同口径：少了 detail/rects，server 侧拿不到 from/screenRect，
+            // 自动 OCR 在 act 结果上就一次都不会跑
+            var tableArgs = { rootHash: p.rootHash, limit: p.limit, occluded: p.occluded, detail: p.detail, rects: p.rects };
             var errorsBefore = errorBuffer().length;
             // 编号只在「界面还是决策时那一页」时有效：对不上就直接把新动作表交回去重新决策
             var fresh = !!lastTable;
@@ -2721,21 +3107,42 @@
                 }
                 fresh = true;
             }
+            // 执行前的样子：marker 对得上就用 agent 刚看到的那张表，否则只看不记地扫一张
+            var rowsBefore = p.marker && lastTable && lastTable.marker === p.marker && lastTable._rowKeys
+                ? lastTable._rowKeys
+                : buildActionTable(Object.assign({}, tableArgs, { peek: true }))._rowKeys;
             var started = Date.now();
+            // 整次调用的时限：连出、等回合都可能很久，超过桥接超时就整个白跑、结果也拿不回来。
+            // 快到点就停手先返回，已经做了什么照实报，agent 接着再发一次同样的步骤即可
+            var deadline = started + Math.max(+p.budgetMs || 45000, 5000);
             var sceneBefore = stackSnapshot();
             var executed = [], stopped = "done";
             for (var n = 0; n < steps.length; n++) {
                 var step = steps[n] || {};
-                var op = step.op || (step.text !== undefined ? "text" : "tap");
+                if (n > 0 && Date.now() > deadline - 3000) {
+                    stopped = "budget";
+                    break;
+                }
+                // {"i":3,"text":"abc"} 是往 3 号输入框里填字；只有 text 没别的定位条件时是「按文字找来点」
+                var locatedElsewhere = ["i", "hash", "id", "name", "className", "source", "qaName"].some(function (k) {
+                    return step[k] !== undefined && step[k] !== null && step[k] !== "";
+                });
+                var op = step.op || (step.text !== undefined && locatedElsewhere ? "text" : "tap");
                 var before = quickSignature();
                 var record = { op: op };
+                var tapTarget = null, tapWasLocked = null;
                 try {
                     if (op === "tap" || op === "text") {
-                        var resolved = resolveFastTarget(step, fresh);
+                        // 填字时 text 是要填的内容，不能拿它当查询条件去找目标
+                        var resolved = resolveFastTarget(op === "text" ? Object.assign({}, step, { text: undefined }) : step, fresh);
                         var o = resolved.o, entry = resolved.entry;
                         record.target = entry ? { i: entry.i, label: entry.label, hash: entry.hash }
                             : { hash: hashOf(o), label: actionLabelOf(o).label };
                         if (op === "text") {
+                            // 往标签、按钮文字上写字只会把界面改花，还让人以为输入成功了
+                            if (!inputLike(o) && !(o.textDisplay && inputLike(o.textDisplay)) && !step.force) {
+                                throw new Error("目标不是输入框，没有写入：要按文字点它请只给 text（不带 i/hash），要填字请指到输入框");
+                            }
                             o.text = String(step.text);
                             if (step.dispatchChange !== false) {
                                 var eg = egretNs();
@@ -2744,6 +3151,21 @@
                             record.text = String(step.text);
                         } else {
                             if (step.settleMs) await waitStable(o, +step.settleMs);
+                            var preCap = Math.min(step.turnMs !== undefined ? +step.turnMs : p.turnMs !== undefined ? +p.turnMs : 15000,
+                                60000, deadline - Date.now() - 3000);
+                            var preLock = lockedAncestor(o);
+                            if (preLock && preCap > 0 && (lockToggled[hashOf(preLock)] || +step.repeat > 1)) {
+                                record.unlock = await waitForUnlock(o, preLock, preCap,
+                                    fresh && lastTable && lastTable._entries);
+                                if (record.unlock.reason === "new-controls") {
+                                    throw new Error("没有点：它所在的一组控件锁着，游戏在等你先做别的决定（冒出了 " +
+                                        record.unlock.added.join("、") + "），按新表先处理");
+                                }
+                                if (record.unlock.reason !== "unlocked") {
+                                    throw new Error("目标所在的一组控件一直锁着（等了 " +
+                                        (record.unlock.waitedMs / 1000).toFixed(1) + "s，" + record.unlock.reason + "），没有点");
+                                }
+                            }
                             var r = stageRect(o);
                             if (!r) throw new Error("目标没有有效包围盒，可能已被移出舞台");
                             var pt = step.offsetX !== undefined || step.offsetY !== undefined
@@ -2759,6 +3181,8 @@
                                         " 遮挡，未执行点击：先用 op=dismiss 关掉遮挡物再重试");
                                 }
                             }
+                            tapTarget = o;
+                            tapWasLocked = lockedAncestor(o);
                             await performGesture([pt], method, step.holdMs !== undefined ? +step.holdMs : 50, o);
                             record.point = pt;
                         }
@@ -2806,7 +3230,8 @@
                         }
                     } else if (op === "wait") {
                         if (step.until && hasCriteria(step.until)) {
-                            record.result = await handlers.waitFor(Object.assign({ timeoutMs: step.timeoutMs || 8000 }, step.until));
+                            record.result = await handlers.waitFor(Object.assign({}, step.until, {
+                                timeoutMs: Math.max(Math.min(step.timeoutMs || 8000, deadline - Date.now() - 3000), 200) }));
                             if (!record.result.matched) throw new Error("等待条件超时未满足");
                         } else {
                             await sleep(Math.min(Math.max(step.ms !== undefined ? +step.ms : 600, 0), 15000));
@@ -2820,6 +3245,35 @@
                             stableMs: step.stableMs !== undefined ? step.stableMs : p.stableMs,
                             quietMs: step.quietMs !== undefined ? step.quietMs : p.quietMs
                         });
+                    }
+                    // 点之前是开着的、点完整组被锁：游戏在播演出或等对手，等到能再操作再返回（turnMs=0 关掉）
+                    if (tapTarget && !tapWasLocked) {
+                        var turnCap = step.turnMs !== undefined ? +step.turnMs : p.turnMs !== undefined ? +p.turnMs : 15000;
+                        if (turnCap > 0) {
+                            turnCap = Math.max(Math.min(turnCap, 60000, deadline - Date.now()), 500);
+                            var grace = knownLockable(tapTarget) || +step.repeat > 1 ? 1500 : 0;
+                            var turn = await waitForTurn(tapTarget, turnCap, grace);
+                            if (turn) record.turn = turn;
+                            // 连出同一招：回合倒计时只有几秒，模型每回合决策一次根本赶不上。
+                            // 解锁后立刻再点，直到界面换了（结算）、冒出新的可选项（换宠栏）、点了不再上锁（PP 用完）或次数用完
+                            var times = Math.min(Math.max(+step.repeat || 1, 1), 30), done = 1;
+                            while (done < times && turn && turn.reason === "unlocked" && tapTarget.stage) {
+                                // 下一回合多半要五六秒，剩下的时间不够就先返回，别让整次调用超时白跑
+                                if (deadline - Date.now() < 8000) {
+                                    turn = { reason: "budget", waitedMs: 0 };
+                                    break;
+                                }
+                                var again = probePoint(tapTarget, true);
+                                if (!again) break;
+                                await performGesture([again.point], method, 50, tapTarget);
+                                done++;
+                                turn = await waitForTurn(tapTarget, Math.max(Math.min(turnCap, deadline - Date.now()), 500), 1500);
+                            }
+                            if (times > 1) {
+                                record.repeated = done;
+                                record.turn = turn || { reason: "no-lock", waitedMs: 0 };
+                            }
+                        }
                     }
                     if (step.expect && hasCriteria(step.expect)) {
                         var hitList = query(Object.assign({ visibleOnly: true }, step.expect));
@@ -2854,11 +3308,14 @@
             table.stopped = stopped;
             table.elapsedMs = Date.now() - started;
             var delta = stackDelta(sceneBefore, stackSnapshot());
-            table.changed = delta || (executed.some(function (r) { return r.settle && r.settle.changed; })
-                ? "面板栈没变，界面内容有变化" : "界面没有变化");
-            if (stopped === "done" && executed.length && executed.every(function (r) {
-                return r.settle && r.settle.changed === false;
-            })) {
+            var diff = rowDiff(rowsBefore, table._rowKeys);
+            var rowsChanged = diff.added.length > 0 || diff.removed.length > 0;
+            var settled = executed.some(function (r) { return r.settle && r.settle.changed; });
+            table.changed = delta || (rowsChanged ? "面板栈没变；" + describeRowDiff(diff)
+                : settled ? "面板栈没变，界面内容有变化" : "界面没有变化");
+            // 只有点击类操作才谈得上「点了没反应」；纯等待不该劝 agent 去怀疑目标
+            var clicked = executed.filter(function (r) { return r.op === "tap" || r.op === "text" || r.op === "recommended"; });
+            if (stopped === "done" && clicked.length && !delta && !rowsChanged && !settled) {
                 table.hint = "操作已执行但界面没有变化：确认目标是否正确，或用 op=wait 再等一次；仍无变化时用 egret_get_errors 排查";
             }
             var added = errorBuffer().slice(errorsBefore);
@@ -3083,6 +3540,14 @@
                     var bp = probePoint(back.o, false);
                     if (await attempt("back", back.o, bp ? bp.point : centerOf(back.rect))) {
                         return { ok: true, via: "back", panel: name, tried: tried };
+                    }
+                }
+                // 系统提示（一段话加一个「确认」）点遮罩关不掉，确认键又常是美术字、名字只叫 confirm。
+                // 面板里除了字只剩这一个 confirm 时它就是「知道了」；购买类弹窗总有取消或 ×，前面已经先点了
+                var sole = soleConfirmOf(panel);
+                if (sole && (!strict || sole._o !== strict.o)) {
+                    if (await attempt("confirm", sole._o, sole.point)) {
+                        return { ok: true, via: "confirm", panel: name, tried: tried };
                     }
                 }
                 var mp = maskPointOutside(panel);
