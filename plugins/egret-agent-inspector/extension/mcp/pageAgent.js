@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.6";
+    var VERSION = "1.7.7";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1853,7 +1853,15 @@
         return cls + ":" + nm;
     }
 
+    // 转场时整层界面（RootLayer、sceneLayer）也会整个锁一下。它们是所有控件的祖先，记成「会上锁的组」之后，
+    // 每次点击都要多等 1.5 秒宽限期看锁来不来（验收里锁类型表混进了 RootLayer:）。回合锁是技能栏这种局部的一组
+    function wholeScreen(q) {
+        var stage = getStage(), r = stageRect(q);
+        return !r || r.width * r.height >= stage.stageWidth * stage.stageHeight * 0.5;
+    }
+
     function noteLock(q, toggled) {
+        if (wholeScreen(q)) return;
         var k = lockKind(q);
         if (k) lockKinds[k] = Math.max(lockKinds[k] || 0, toggled ? 2 : 1);
     }
@@ -1862,7 +1870,7 @@
         var stage = getStage();
         entries.forEach(function (e) {
             var lock = lockedAncestor(e._o);
-            if (lock) {
+            if (lock && !wholeScreen(lock)) {
                 lockableSeen[hashOf(lock)] = true;
                 noteLock(lock, false);
             }
@@ -1892,7 +1900,8 @@
     function knownLockable(o) {
         var stage = getStage();
         for (var q = o && o.parent; q && q !== stage; q = q.parent) {
-            if (lockableSeen[hashOf(q)] || lockKinds[lockKind(q)]) return true;
+            // 只见过锁着、没见过解开的多半是真禁用（金币不够的购买组），不是回合锁
+            if (turnLock(q) && !wholeScreen(q)) return true;
         }
         return false;
     }
@@ -2051,11 +2060,19 @@
         return /TextField/i.test(cls) && o.type === "input";
     }
 
+    // 关闭 / 确定只从控件名或按钮字上认：「确定要返回基地吗？」是提示正文，不是确定键。
+    // 验收里一张提示框被标出两个 confirm，agent 把「返回基地」点成了取消
+    function captionRole(re) {
+        return function (blob, ids, o, label, tag) {
+            return re.test(tag) || (!!label && label.replace(/\s+/g, "").length <= 6 && re.test(label));
+        };
+    }
+
     var FAST_ROLES = [
         ["npc", /storyInteractObject|(^|[_-])npc(?:[_-]|$)/i],
         ["input", function (blob, ids, o) { return inputLike(o); }],
-        ["close", /close|关闭|關閉|quit|dismiss|(?:^|[\s_-])btn_no(?:$|[\s_-])/i],
-        ["confirm", /confirm|btn_yes|btn_ok|确定|確定|确认|確認|知道了|好的/i],
+        ["close", captionRole(/close|关闭|關閉|quit|dismiss|(?:^|[\s_-])btn_no(?:$|[\s_-])/i)],
+        ["confirm", captionRole(/confirm|btn_yes|btn_ok|确定|確定|确认|確認|知道了|好的/i)],
         // 只认实例名 / qaName / 文案，且要成词：类名里的 Return（SeerReturn2Component 是「老兵回归」）
         // 和 background 这类前缀都不算返回键
         ["back", function (blob, ids, o, label) {
@@ -2085,7 +2102,7 @@
         var idBlob = ids + " " + (label || "");
         for (var i = 0; i < FAST_ROLES.length; i++) {
             var match = FAST_ROLES[i][1];
-            if (typeof match === "function" ? match(blob, idBlob, o, label) : match.test(blob)) return FAST_ROLES[i][0];
+            if (typeof match === "function" ? match(blob, idBlob, o, label, tag) : match.test(blob)) return FAST_ROLES[i][0];
         }
         if (BUTTON_TAG.test(tag)) return "button";
         // 弹窗正文、健康游戏忠告这类文字常常也挂着监听，标成 button 会诱导 agent 去点它。
@@ -2715,7 +2732,12 @@
                 // 页签常被拆成「容器 + click_state + 背景图」好几行，占着差不多同一块地方：
                 // 这种只留一行，留标签信息量大的那个，一样就留外面那层（更大的点击目标）
                 if (kid._w * kid._h >= e._w * e._h * 0.5) {
-                    dropped[rowScore(kid) > rowScore(e) ? e.hash : kid.hash] = true;
+                    var sk = rowScore(kid), se = rowScore(e);
+                    // 外层只是委托里的壳（自己没监听、名字也不像控件），里面那个才叫得出是什么：
+                    // 战斗工具栏按 e.target 分发，ps_grp 里显示的是 petBtn，表里写 ps_grp 时 agent 认不出这是换宠键
+                    var shell = sk === se && !interactionListenersOf(e._o).length &&
+                        BUTTON_TAG.test(ownIds(kid._o)) && !BUTTON_TAG.test(ownIds(e._o));
+                    dropped[sk > se || shell ? e.hash : kid.hash] = true;
                     return;
                 }
                 if (kid.label === e.label) dropped[kid.hash] = true;
@@ -2769,6 +2791,15 @@
         entries = pickWithinLimit(entries, limit);
         entries.forEach(function (entry, i) { entry.i = i + 1; });
         if (!p.peek) lastEntries = entries;
+        // 系统提示框（一段话 + 确定 / 取消）点遮罩关不掉：表里有确定、取消、关闭键就不再推荐点遮罩，
+        // 否则 agent 每次都先点一下遮罩白花一轮
+        if (out.mode === "modal-backdrop-dismiss" && visibleEntries.some(function (e) {
+            return e.role === "confirm" || e.role === "close" || /cancel|取消/i.test(e.label || "");
+        })) {
+            out.mode = "normal";
+            delete out.recommendedTarget;
+            delete out.hint;
+        }
         // 默认只给「编号 + 标签 + 角色 + 状态」：按编号决策时 hash/point/size 是死重量，
         // 摆在眼前还会把模型引到 find/get_node 这些慢路径上去。detail=true 时才带回来。
         var detail = !!p.detail;
@@ -3592,7 +3623,10 @@
             var loadingCap = Math.min(Math.max(p.loadingMs !== undefined ? +p.loadingMs : 6000, 0), 30000);
             var loadingStart = Date.now();
             while (Date.now() - loadingStart < loadingCap) {
-                if (table.mode !== "transient" && table.mode !== "empty" && table.mode !== "blocked") break;
+                // 弹窗刚铺上遮罩、按钮还没加进来：表里一个能点的都没有，只剩「点遮罩」，这时交回去 agent 只会去点遮罩
+                var emptyModal = table.mode === "modal-backdrop-dismiss" && Date.now() - loadingStart < 1500 &&
+                    !(table.actions || []).some(function (a) { return !a.occluded; });
+                if (table.mode !== "transient" && table.mode !== "empty" && table.mode !== "blocked" && !emptyModal) break;
                 // blocked 多半是等不走的全屏接管层，短等确认它不是加载条就交回去
                 if (table.mode === "blocked" && Date.now() - loadingStart >= 1500) break;
                 await sleep(150);
