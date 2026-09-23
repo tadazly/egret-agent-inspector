@@ -892,11 +892,36 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     setTimeout(() => { cap = item("eui.Image", "cap_0", uiLayer, { x: 285, y: 30, width: 16, height: 17 }, { listener: true }); }, 100);
     setTimeout(() => { banner = item("eui.Label", "castName", uiLayer, { x: 350, y: 200, width: 60, height: 24 }, { listener: true, text: "冲顶" }); }, 150);
     setTimeout(() => remove(banner), 750);
-    setTimeout(() => { petPick = item("ui.PetPickItem", "pet2", uiLayer, { x: 400, y: 300, width: 70, height: 70 }, { listener: true, text: "等级:100" }); }, 1300);
-    setTimeout(() => { bar.touchChildren = true; }, 6000);
+    let petPickB;
+    setTimeout(() => {
+        petPick = item("ui.PetPickItem", "pet2", uiLayer, { x: 400, y: 300, width: 70, height: 70 }, { listener: true, text: "等级:57" });
+        petPickB = item("ui.PetPickItem", "pet4", uiLayer, { x: 480, y: 300, width: 70, height: 70 }, { listener: true, text: "等级:56" });
+    }, 1300);
+    const unlockLater = setTimeout(() => { bar.touchChildren = true; }, 6000);
     out.newControls = await t.waitForTurn(skill, 8000, 0);
+    // 提前停下后别让这个定时器在后面的用例里把技能栏解开
+    clearTimeout(unlockLater);
+    bar.touchChildren = true;
     remove(petPick);
+    remove(petPickB);
     remove(cap);
+
+    // 对手的招式名横幅：一段字加一个图标、停两秒。它不是要你做的决定，等回合要一直等到解锁
+    bar.touchChildren = false;
+    let castBg, castIcon;
+    setTimeout(() => {
+        castBg = item("ui.SkillTip", "bg_0", uiLayer, { x: 600, y: 120, width: 160, height: 40 }, { listener: true, text: "激励·铁碎阵" });
+        castIcon = item("eui.Image", "icon", uiLayer, { x: 560, y: 120, width: 40, height: 40 }, { listener: true });
+    }, 200);
+    setTimeout(() => { remove(castBg); remove(castIcon); }, 2400);
+    setTimeout(() => { bar.touchChildren = true; }, 3000);
+    out.bannerTurn = await t.waitForTurn(skill, 6000, 0);
+
+    // 淡出到几乎透明的对象：命中测试还点得中，但玩家看不见，不进表
+    const ghost = item("eui.Group", "ghostBtn", hud, { x: 300, y: 20, width: 60, height: 40 }, { listener: true, text: "看不见的" });
+    ghost.alpha = 0.03;
+    out.ghostListed = t.buildActionTable({ limit: 60 }).actions.some(a => a.label === "看不见的");
+    remove(ghost);
 
     // 点上去时还锁着：先等解锁
     bar.touchChildren = false;
@@ -905,10 +930,14 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
 
     // 技能栏一直锁着是因为游戏在等你换宠：先等解锁也得看见换宠栏，不能干等到倒计时替你选
     bar.touchChildren = false;
-    let petPick2;
-    setTimeout(() => { petPick2 = item("ui.PetPickItem", "pet3", uiLayer, { x: 480, y: 300, width: 70, height: 70 }, { listener: true, text: "等级:99" }); }, 300);
+    let petPick2, petPick3;
+    setTimeout(() => {
+        petPick2 = item("ui.PetPickItem", "pet3", uiLayer, { x: 480, y: 300, width: 70, height: 70 }, { listener: true, text: "等级:99" });
+        petPick3 = item("ui.PetPickItem", "pet5", uiLayer, { x: 560, y: 300, width: 70, height: 70 }, { listener: true, text: "等级:98" });
+    }, 300);
     out.unlockBlocked = await t.waitForUnlock(skill, bar, 5000);
     remove(petPick2);
+    remove(petPick3);
     bar.touchChildren = true;
 
     // 只给 text 的步骤是按文字找来点；带 hash 的 text 是填字，但只往输入框里填
@@ -980,9 +1009,17 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     def test_only_a_lasting_real_choice_interrupts_the_wait(self):
         turn = self.run_probe()["newControls"]
         self.assertEqual(turn["reason"], "new-controls")
-        self.assertEqual(turn["added"], ["等级:100"])
+        self.assertEqual(turn["added"], ["等级:57", "等级:56"])
         # 在解锁（6s）之前就停了，换宠倒计时还来得及
         self.assertLess(turn["waitedMs"], 3000)
+
+    def test_opponent_skill_banner_is_not_a_decision(self):
+        data = self.run_probe()
+        # 招式名横幅停了两秒也不能打断等回合：一直等到 3s 解锁
+        self.assertEqual(data["bannerTurn"]["reason"], "unlocked")
+        self.assertGreaterEqual(data["bannerTurn"]["waitedMs"], 2500)
+        # 几乎透明的对象玩家看不见，不进表
+        self.assertFalse(data["ghostListed"])
 
     def test_tap_on_a_locked_group_waits_for_unlock(self):
         unlock = self.run_probe()["unlock"]
@@ -990,7 +1027,7 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertGreaterEqual(unlock["waitedMs"], 300)
         blocked = self.run_probe()["unlockBlocked"]
         self.assertEqual(blocked["reason"], "new-controls")
-        self.assertEqual(blocked["added"], ["等级:99"])
+        self.assertEqual(blocked["added"], ["等级:99", "等级:98"])
         self.assertLess(blocked["waitedMs"], 3000)
 
     def test_text_is_only_typed_into_inputs(self):
@@ -1080,8 +1117,8 @@ class RenderTableTest(unittest.TestCase):
                      {"op": "tap", "target": {"label": "nibaba"}, "turn": {"reason": "unlocked", "waitedMs": 3032}}]}
         text = server.render_action_table(table)
         self.assertIn("先等上一回合解锁 1.5s", text)
-        self.assertIn("连出 2 次，停在：出现了新的可选项：等级:100", text)
-        self.assertIn("等回合 3.0s（可以再操作了）", text)
+        self.assertIn("连出 2 次，停在：游戏在等你先做别的决定：等级:100", text)
+        self.assertIn("等回合 3.0s（轮到你了，技能栏已解锁，直接出下一招）", text)
         # 快到桥接时限就先返回：说清楚没做完、接着怎么办，而不是整次调用超时什么都拿不回来
         budget = server.render_action_table({"marker": "m6", "actions": [], "stopped": "budget",
                                              "executed": [{"op": "tap", "repeated": 6,
