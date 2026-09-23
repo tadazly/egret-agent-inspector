@@ -395,7 +395,10 @@ def render_action_table(table):
     elif mode in ("guide-hole", "guide-continue", "dialogue-continue", "transient", "empty"):
         lines.append("动作 无（按 mode 走 recommended / advance / wait）")
     if table.get("recommendedTarget"):
-        lines.append("推荐 {\"op\":\"recommended\"}（%s）" % table["recommendedTarget"].get("reason"))
+        reason = table["recommendedTarget"].get("reason")
+        # 只能点遮罩的弹窗用 close：点完确认真关掉了，分阶段的面板（结算页先跳动画）还会再点一次
+        op = "close" if reason == "modal-backdrop-dismiss" else "recommended"
+        lines.append("推荐 {\"op\":\"%s\"}（%s）" % (op, reason))
     if table.get("transientOverlay"):
         lines.append("过场 %s：用 {\"op\":\"wait\",\"ms\":800} 短等" % table["transientOverlay"].get("reason"))
     for sc in table.get("scrollers") or []:
