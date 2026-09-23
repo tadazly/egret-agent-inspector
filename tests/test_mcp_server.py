@@ -1098,6 +1098,15 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     await t.handlers.act({ marker: dragTable.marker, steps: [{ i: srcRow.i, op: "drag", holdMs: 0, to: { i: slotRow.i } }],
         quietMs: 50, timeoutMs: 200, turnMs: 0 });
     out.droppedNoHold = dragState.dropped;
+    remove(skillSrc); remove(slot);
+
+    // 点进去之后列表是淡入的：交表那一刻关卡项几乎全透明，不能就这么交一张没有关卡的表回去
+    const level = item("ui.ChooseLevelItem", "levelItem_1", hud, { x: 460, y: 200, width: 280, height: 70 }, { listener: true, text: "1 米斯特瑞星" });
+    level.alpha = 0.03;
+    setTimeout(() => { level.alpha = 0.4; }, 250);
+    setTimeout(() => { level.alpha = 1; }, 450);
+    const fadedIn = await t.handlers.act({ steps: [{ op: "wait", ms: 10 }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.fadedInListed = fadedIn.actions.some(a => a.label === "1 米斯特瑞星");
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
@@ -1203,6 +1212,9 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertEqual(data["dragTo"]["label"], "突破")
         # 先按住那一段是必要的：不按住直接拖，长按才起步的拖动起不来
         self.assertIsNone(data["droppedNoHold"])
+
+    def test_act_waits_for_a_list_that_is_fading_in(self):
+        self.assertTrue(self.run_probe()["fadedInListed"])
 
     def test_later_step_waits_for_its_target_to_show_up(self):
         data = self.run_probe()
