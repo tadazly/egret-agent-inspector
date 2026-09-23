@@ -306,7 +306,9 @@ def render_action_table(table):
         turn = rec.get("turn")
         if isinstance(turn, dict):
             # 出招后整组按钮被锁：工具已经在这一次调用里等到能再操作了，不用再 observe / wait
-            why = {"unlocked": "可以再操作了", "panel": "界面换了", "new-controls": "出现了新的可选项",
+            # 「可以再操作了」太含糊：验收里 agent 看到它仍然去 observe、wait 各一轮才敢出下一招
+            why = {"unlocked": "轮到你了，技能栏已解锁，直接出下一招", "panel": "界面换了（结算或切换界面）",
+                   "blocked": "解锁后被盖住了，可能弹出了结算或提示", "new-controls": "游戏在等你先做别的决定",
                    "rebuilt": "界面重建了", "timeout": "等满仍未解锁",
                    "budget": "这次调用快到时限，先返回；接着再发一次同样的步骤",
                    "no-lock": "点了没上锁，可能次数用完或不在回合内"}.get(turn.get("reason"), turn.get("reason"))

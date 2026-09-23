@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.2";
+    var VERSION = "1.7.3";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1719,18 +1719,33 @@
 
     // 按对象比，不按标签比：演出里血量、换上场的精灵名会让同一个控件的标签一直变，那不是新选项；
     // 新冒出来的控件、原来被挡住现在露出来的控件才是
-    function outsideKeys(entries, lock, names) {
+    function outsideKeys(entries, lock, info) {
         return (entries || []).filter(function (e) {
             return e.role !== "text" && !e.occluded && !COUNTER_LABEL.test(e.label) && decisionLike(e) &&
                 !isSelfOrAncestor(lock, e._o);
         }).map(function (e) {
-            if (names) names[e.hash] = e.label;
+            if (info) {
+                var alpha = visualAlpha(e._o);
+                if (!(alpha >= 0)) alpha = 100;
+                info[e.hash] = { label: e.label, role: e.role, alpha: alpha,
+                    textual: e.from === "text" || e.from === "childText",
+                    // 位置、大小、透明度：横幅滑入淡出时一直在变，等你选的栏摆好就不动了
+                    sig: [round(e._x), round(e._y), round(e._w), round(e._h), alpha].join(",") };
+            }
             return String(e.hash);
         });
     }
 
-    function actionableOutside(lock, names) {
-        return outsideKeys(buildActionTable({ peek: true, limit: 60 })._entries, lock, names);
+    function actionableOutside(lock, info) {
+        return outsideKeys(buildActionTable({ peek: true, limit: 60 })._entries, lock, info);
+    }
+
+    // 冒出来的东西是不是「游戏在等你做决定」：换宠栏是一排带字的选项，提示框有确定 / 关闭；
+    // 对手出招时弹出的招式名横幅只有一段字加一个图标（「留情·即无情」「激励·铁碎阵」），验收里 agent 被引去点它
+    function looksLikeDecision(list) {
+        var textual = list.filter(function (x) { return x.textual; }).length;
+        var prompt = list.some(function (x) { return x.role === "confirm" || x.role === "close"; });
+        return textual >= 2 || prompt;
     }
 
     // 见过被锁住的控件组（技能栏）：游戏往往等服务端回包、点完一秒左右才上锁，
@@ -1740,16 +1755,44 @@
     // 锁上过又解开过的组才是「回合锁」；一直锁着的多半是真禁用，不值得等
     var lockToggled = {};
 
+    // 按 hash 记，新开一场战斗技能栏就是新对象，第一招又不等回合（验收里第一招出完 agent 只好自己 observe + wait）。
+    // 再按「类名:实例名」记一份，挂在 window 上，扩展重载、换场战斗都还认得：1 = 见过锁住，2 = 锁上过又解开过
+    var lockKinds = window.__egretInspectorLockKinds || (window.__egretInspectorLockKinds = {});
+
+    // 没名字的通用容器记下来会一竿子打翻所有 Group 里的点击，这种只按 hash 记
+    var GENERIC_CONTAINER = /^(Group|Component|Sprite|DisplayObjectContainer|UIContainer|GComponent|GGroup|Scroller|List)$/;
+
+    function lockKind(q) {
+        var cls = shortClass(q), nm = nameOf(q) || "";
+        if (GENERIC_CONTAINER.test(cls) && (!nm || /^(instance)?\d*$/.test(nm))) return null;
+        return cls + ":" + nm;
+    }
+
+    function noteLock(q, toggled) {
+        var k = lockKind(q);
+        if (k) lockKinds[k] = Math.max(lockKinds[k] || 0, toggled ? 2 : 1);
+    }
+
     function rememberLocks(entries) {
         var stage = getStage();
         entries.forEach(function (e) {
             var lock = lockedAncestor(e._o);
-            if (lock) lockableSeen[hashOf(lock)] = true;
+            if (lock) {
+                lockableSeen[hashOf(lock)] = true;
+                noteLock(lock, false);
+            }
             for (var q = e._o && e._o.parent; q && q !== stage; q = q.parent) {
                 var h = hashOf(q);
-                if (lockableSeen[h] && q.touchChildren !== false && q.enabled !== false) lockToggled[h] = true;
+                if (lockableSeen[h] && q.touchChildren !== false && q.enabled !== false) {
+                    lockToggled[h] = true;
+                    noteLock(q, true);
+                }
             }
         });
+    }
+
+    function turnLock(q) {
+        return lockToggled[hashOf(q)] || lockKinds[lockKind(q)] === 2;
     }
 
     // 点上去时整组还锁着：可能是上一回合的演出没播完（等它解开再点），
@@ -1764,7 +1807,7 @@
     function knownLockable(o) {
         var stage = getStage();
         for (var q = o && o.parent; q && q !== stage; q = q.parent) {
-            if (lockableSeen[hashOf(q)]) return true;
+            if (lockableSeen[hashOf(q)] || lockKinds[lockKind(q)]) return true;
         }
         return false;
     }
@@ -1781,6 +1824,7 @@
         }
         if (!lock) return null;
         lockableSeen[hashOf(lock)] = true;
+        noteLock(lock, false);
         // 锁住的那一块之外、此刻就能点的东西；之后多出来的（比如精灵倒下后的换宠栏）说明游戏在等你做别的决定
         return watchLock(o, lock, cap, actionableOutside(lock), topHash);
     }
@@ -1789,25 +1833,34 @@
         var start = Date.now(), polls = 0, reason = "timeout", added = null;
         // 出招名、伤害数字这类横幅一闪就没；等你做决定的东西（换宠栏）会一直摆着。持续 1s 都在才算；
         // 平时隔 400ms 看一次，冒出候选后每 200ms 盯一次，换宠倒计时只有十来秒，发现得越早越好
-        var firstSeen = {}, pending = false;
+        var firstSeen = {}, firstSig = {}, pending = false;
         while (Date.now() - start < cap) {
             await sleep(200);
             polls++;
             if (!o.stage) { reason = "rebuilt"; break; }
-            if (!lockedAncestor(o)) { reason = "unlocked"; lockToggled[hashOf(lock)] = true; break; }
+            if (!lockedAncestor(o)) {
+                reason = "unlocked";
+                lockToggled[hashOf(lock)] = true;
+                noteLock(lock, true);
+                break;
+            }
             var now = sceneInfo().top;
             if (!now || hashOf(now) !== topHash) { reason = "panel"; break; }
             if (pending || polls % 2 === 0) {
-                var names = {}, seen = {}, at = Date.now();
-                added = rowDiff(baseline, actionableOutside(lock, names)).added.filter(function (h) {
-                    seen[h] = firstSeen[h] || at;
-                    return at - seen[h] >= 1000;
+                var info = {}, seen = {}, sigs = {}, at = Date.now();
+                added = rowDiff(baseline, actionableOutside(lock, info)).added.filter(function (h) {
+                    // 位置或透明度一变就重新计时：还在动的是演出，不是摆好等你选的东西
+                    seen[h] = firstSeen[h] && firstSig[h] === info[h].sig ? firstSeen[h] : at;
+                    sigs[h] = info[h].sig;
+                    return at - seen[h] >= 1000 && info[h].alpha >= 60;
                 });
                 firstSeen = seen;
+                firstSig = sigs;
                 pending = Object.keys(seen).length > 0;
-                if (added.length) {
+                var picked = added.map(function (h) { return info[h]; });
+                if (added.length && looksLikeDecision(picked)) {
                     reason = "new-controls";
-                    added = added.slice(0, 4).map(function (h) { return names[h]; });
+                    added = picked.slice(0, 4).map(function (x) { return x.label; });
                     break;
                 }
             }
@@ -2213,6 +2266,8 @@
     // 「太空站」「战队」这种短名字和框外的标题都借不到，agent 只能去点那个点了没反应的标题。
     // 每段字只归最近的一个热区；借走之后，标题自己那一行从表里去掉。
     var CAPTION_MAX = 16;
+    // 专门用来接点击的透明热区的命名习惯
+    var HOTSPOT_NAME = /(?:^|[_\-\s])(?:rect|hit|hitarea|hotspot|hot|area|touch|click)\d*(?:$|\s)|hitArea/i;
 
     // 像标题的行：标签就是它自己的字、短、矮、自己没挂监听（被上层容器委托才进的表）。
     // 地图建筑下面「底板 + 文字」的「星际探索」就是这样，结构上和靠委托的按钮分不开，只能靠旁边有没有热区来判断
@@ -2241,11 +2296,23 @@
                 }
             }
         });
+        // 专门做点击用的热区（pve_rect、hitArea）和压在它上面的动画体、图片抢同一个名字时，名字归热区：
+        // 验收里「星际探索」被飞船的 Spine 本体 pve 借走，agent 点了没反应，真正响应的是 pve_rect
+        var hotspots = entries.filter(function (e) { return !e.occluded && HOTSPOT_NAME.test(ownIds(e._o)); });
+        function coveredByHotspot(e) {
+            if (HOTSPOT_NAME.test(ownIds(e._o))) return false;
+            return hotspots.some(function (h) {
+                var w = Math.min(e._x + e._w, h._x + h._w) - Math.max(e._x, h._x);
+                var hh = Math.min(e._y + e._h, h._y + h._h) - Math.max(e._y, h._y);
+                return w > 0 && hh > 0 && w * hh >= 0.3 * Math.min(e._w * e._h, h._w * h._h);
+            });
+        }
         var pairs = [];
         entries.forEach(function (e, ei) {
             // 被挡住的行默认不出现在表里：让它借走标题，标题就跟着一起消失了（飞船的 Spine 本体和它的热区抢「星际探索」）。
             // 只有类名、没有实例名的对象多是地图上走动的角色（跟随精灵 Pet、Nono），走到哪个建筑旁边就会抢走它的名字
             if (e.from === "text" || e.from === "childText" || e.from === "className" || e.occluded) return;
+            if (coveredByHotspot(e)) return;
             var area = e._w * e._h;
             if (!area || area > stageArea * 0.25) return;
             var bottom = e._y + e._h, centerX = e._x + e._w / 2;
@@ -2474,6 +2541,12 @@
             var o = item.o;
             var r = stageRect(o);
             if (!r || r.width < 4 || r.height < 4) return;
+            // Egret 命中测试不看透明度：淡出到几乎透明的横幅照样点得中、进得了表，玩家却看不见（验收里 agent 去点屏幕上没有的「激励·铁碎阵」）
+            var seenAlpha = visualAlpha(o);
+            if (seenAlpha >= 0 && seenAlpha < 10) {
+                offstage++;
+                return;
+            }
             var label = actionLabelOf(o);
             var entry = {
                 hash: hashOf(o),
@@ -3193,6 +3266,8 @@
             var deadline = started + Math.max(+p.budgetMs || 45000, 5000);
             var sceneBefore = stackSnapshot();
             var executed = [], stopped = "done";
+            // 每步出招时的顶层面板：收尾时拿来复核「解锁了」其实是不是已经结算换了界面
+            var turnTops = [];
             for (var n = 0; n < steps.length; n++) {
                 var step = steps[n] || {};
                 if (n > 0 && Date.now() > deadline - 3000) {
@@ -3243,7 +3318,7 @@
                             var preCap = Math.min(step.turnMs !== undefined ? +step.turnMs : p.turnMs !== undefined ? +p.turnMs : 15000,
                                 60000, deadline - Date.now() - 3000);
                             var preLock = lockedAncestor(o);
-                            if (preLock && preCap > 0 && (lockToggled[hashOf(preLock)] || +step.repeat > 1)) {
+                            if (preLock && preCap > 0 && (turnLock(preLock) || +step.repeat > 1)) {
                                 record.unlock = await waitForUnlock(o, preLock, preCap,
                                     fresh && lastTable && lastTable._entries);
                                 if (record.unlock.reason === "new-controls") {
@@ -3352,6 +3427,8 @@
                         if (turnCap > 0) {
                             turnCap = Math.max(Math.min(turnCap, 60000, deadline - Date.now()), 500);
                             var grace = knownLockable(tapTarget) || +step.repeat > 1 ? 1500 : 0;
+                            var topAtTap = sceneInfo().top, topAtTapHash = topAtTap && hashOf(topAtTap);
+                            turnTops[executed.length] = topAtTapHash;
                             var turn = await waitForTurn(tapTarget, turnCap, grace);
                             if (turn) record.turn = turn;
                             // 连出同一招：回合倒计时只有几秒，模型每回合决策一次根本赶不上。
@@ -3364,7 +3441,11 @@
                                     break;
                                 }
                                 var again = probePoint(tapTarget, true);
-                                if (!again) break;
+                                if (!again) {
+                                    // 解开了却点不到：多半是结算、提示盖上来了
+                                    turn = { reason: "blocked", waitedMs: 0 };
+                                    break;
+                                }
                                 await performGesture([again.point], method, 50, tapTarget);
                                 done++;
                                 turn = await waitForTurn(tapTarget, Math.max(Math.min(turnCap, deadline - Date.now()), 500), 1500);
@@ -3372,6 +3453,12 @@
                             if (times > 1) {
                                 record.repeated = done;
                                 record.turn = turn || { reason: "no-lock", waitedMs: 0 };
+                            }
+                            // 最后一击直接结算：锁跟着技能栏一起没了，看上去像「解锁了」。
+                            // 顶层换了就照实说界面换了，别让 agent 以为还能接着出招
+                            if (record.turn && (record.turn.reason === "unlocked" || record.turn.reason === "blocked")) {
+                                var topNow = sceneInfo().top;
+                                if (!tapTarget.stage || !topNow || hashOf(topNow) !== topAtTapHash) record.turn.reason = "panel";
                             }
                         }
                     }
@@ -3404,6 +3491,12 @@
             }
             var loadingMs = Date.now() - loadingStart;
             if (loadingMs > 300) table.waitedForLoadingMs = loadingMs;
+            executed.forEach(function (rec, k) {
+                if (!rec.turn || turnTops[k] === undefined) return;
+                if (rec.turn.reason !== "unlocked" && rec.turn.reason !== "blocked") return;
+                var topEnd = sceneInfo().top;
+                if (!topEnd || hashOf(topEnd) !== turnTops[k]) rec.turn.reason = "panel";
+            });
             table.executed = executed;
             table.stopped = stopped;
             table.elapsedMs = Date.now() - started;
