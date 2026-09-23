@@ -225,8 +225,14 @@ def route_step(step, rec):
     if rec.get("error") or rec.get("skipped") or not isinstance(step, dict):
         return None, None, None
     params = {k: v for k, v in step.items() if k not in ROUTE_LOCATORS}
-    if op in ("tap", "text", "swipe"):
+    if op in ("tap", "text", "swipe", "drag"):
         sel = dict((rec.get("target") or {}).get("sel") or {})
+        if op == "drag":
+            # 拖到哪也要换成稳定选择器：编号只在那一张表里有效
+            to = rec.get("to") or {}
+            if not to.get("sel") and "dx" not in (step.get("to") or {}) and "dy" not in (step.get("to") or {}):
+                return None, None, None
+            params["to"] = to.get("sel") or step.get("to")
         if op == "text":
             # 填字时 text 是要填的内容，不是查询条件
             if "text" in sel:
@@ -283,7 +289,9 @@ def render_action_table(table):
         target = rec.get("target") or {}
         label = target.get("label") or target.get("reason") or rec.get("text") or ""
         line = ("执行 %s %s" % (rec.get("op"), label)).strip()
-        if rec.get("drag"):
+        if rec.get("to"):
+            line += " → %s" % (rec["to"].get("label") or "")
+        elif rec.get("drag"):
             line += "（按住%s）" % DRAG_WORDS.get(rec["drag"], rec["drag"])
         if rec.get("error"):
             line += " → 失败：%s" % rec["error"]
@@ -650,6 +658,8 @@ TOOLS = {
         "回合倒计时往往只有几秒，每回合都靠 observe 决策会丢回合；"
         "动作表标「按住上滑」这类的控件要拖出去松手才生效（例如把卡片拖上场），按编号点它会自动按住滑出去；"
         "要自己指定方向时用 {\"op\":\"swipe\",\"i\":3,\"dir\":\"up\"}，dir 为 up/down/left/right；"
+        "把一个控件拖到另一个控件上（技能拖进技能栏、卡片拖进格子）用 {\"op\":\"drag\",\"i\":3,\"to\":{\"i\":7}}，"
+        "to 也可以是查询条件或 {\"dx\":-200,\"dy\":0}；默认先按住 700ms 再挪，长按才起步的拖动可用 holdMs 调；"
         "{\"op\":\"close\"} 关掉当前顶层面板：一次往返里依次试关闭键、返回键、遮罩，并确认面板真的消失，"
         "回报是哪条路子生效；打开一个界面看完就关的遍历用它，比 dismiss 更适合全屏面板；"
         "{\"op\":\"recommended\"} 点 observe 给出的 recommendedTarget（引导挖洞、只能点遮罩关闭的弹窗）；"

@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.7";
+    var VERSION = "1.7.8";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1085,6 +1085,17 @@
         return null;
     }
 
+    // 拖到目标上：先按住不动 holdMs（不少拖动要长按才起步：技能格按住 0.6 秒才开始拖），
+    // 再每 40ms 挪一步、分 14 步挪过去，到了停 150ms 再松手，让拖动代理跟得上、落点判定看得到最后的位置
+    function dragToPath(from, to, holdMs) {
+        var pts = [{ x: from.x, y: from.y }, { x: from.x, y: from.y, wait: holdMs }];
+        for (var i = 1; i <= 14; i++) {
+            pts.push({ x: round(from.x + (to.x - from.x) * i / 14), y: round(from.y + (to.y - from.y) * i / 14), wait: 40 });
+        }
+        pts.push({ x: to.x, y: to.y, wait: 150 });
+        return pts;
+    }
+
     // 从 pt 按住，拖出 owner 的边界再松手：多给 40px，免得正好落在边上
     function dragPath(pt, owner, dir) {
         var r = stageRect(owner) || { x: pt.x, y: pt.y, width: 0, height: 0 };
@@ -1714,15 +1725,17 @@
     }
 
     // 按 method 执行一次按下-(移动)-抬起；points 为舞台坐标序列
+    // 点上带 wait 时用它作为到这个点之前的停顿（拖动要先按住一会儿），否则总时长平均分
     async function performGesture(points, method, holdMs, target) {
         var first = points[0], last = points[points.length - 1];
         var stepDelay = points.length > 2 ? holdMs / (points.length - 1) : holdMs;
+        var delayAt = function (k) { return points[k].wait !== undefined ? points[k].wait : stepDelay; };
         if (method === "touch") {
             var th = touchHandler();
             if (!th) throw new Error("未找到 Egret TouchHandler，请改用 method=dom");
             th.onTouchBegin(first.x, first.y, TOUCH_ID);
             for (var i = 1; i < points.length; i++) {
-                await sleep(stepDelay);
+                await sleep(delayAt(i));
                 th.onTouchMove(points[i].x, points[i].y, TOUCH_ID);
             }
             if (points.length < 3) await sleep(stepDelay);
@@ -1733,7 +1746,7 @@
             if (useTouch) domTouch("touchstart", c.x, c.y);
             else domMouse("mousedown", c.x, c.y, 1);
             for (var j = 1; j < points.length; j++) {
-                await sleep(stepDelay);
+                await sleep(delayAt(j));
                 c = stageToClient(points[j].x, points[j].y);
                 if (useTouch) domTouch("touchmove", c.x, c.y);
                 else domMouse("mousemove", c.x, c.y, 1);
@@ -3409,7 +3422,7 @@
                         throw new Error("第 " + (n + 1) + " 步用了编号 i：编号只对第一步有效，第一步执行后界面变了、编号会重排。" +
                             "后面的步骤改用查询条件（{\"text\":\"表里显示的标签\"}、{\"qaName\":…}），或看完新表再发下一次 act");
                     }
-                    if (op === "tap" || op === "text" || op === "swipe") {
+                    if (op === "tap" || op === "text" || op === "swipe" || op === "drag") {
                         // 填字时 text 是要填的内容，不能拿它当查询条件去找目标
                         var findQuery = op === "text" ? Object.assign({}, step, { text: undefined }) : step, resolved = null;
                         for (var findStart = Date.now(); !resolved;) {
@@ -3492,7 +3505,25 @@
                             // 不让 agent 为「点了没反应」再花一轮，回合倒计时也等不起
                             var drag = dragTargetOf(o);
                             var dir = op === "swipe" ? step.dir || (drag && drag.dir) || "up" : drag && drag.dir;
-                            if (dir) {
+                            if (op === "drag") {
+                                // 拖到另一个控件上（把技能拖进技能栏、把卡片拖到格子里）：to 用同一张表的编号、查询条件或 dx/dy
+                                var to = step.to || {}, dst;
+                                if (to.dx !== undefined || to.dy !== undefined) {
+                                    dst = { x: round(pt.x + (+to.dx || 0)), y: round(pt.y + (+to.dy || 0)) };
+                                    record.to = { label: "dx=" + (+to.dx || 0) + ",dy=" + (+to.dy || 0) };
+                                } else {
+                                    if (!Object.keys(to).length) throw new Error("drag 需要 to：{\"i\":7}、查询条件或 {\"dx\":-200,\"dy\":0}");
+                                    var toRes = resolveFastTarget(to, fresh), tr = stageRect(toRes.o);
+                                    if (!tr) throw new Error("drag 的目标没有有效包围盒");
+                                    dst = { x: round(tr.x + tr.width / 2), y: round(tr.y + tr.height / 2) };
+                                    record.to = { label: toRes.entry ? toRes.entry.label : actionLabelOf(toRes.o).label };
+                                    var toSel = stableSelector(toRes.o);
+                                    if (toSel) record.to.sel = toSel;
+                                }
+                                await performGesture(dragToPath(pt, dst, step.holdMs !== undefined ? Math.max(+step.holdMs, 0) : 700),
+                                    method, 0, o);
+                                record.drag = "to";
+                            } else if (dir) {
                                 await performGesture(dragPath(pt, drag ? drag.owner : o, dir), method,
                                     step.holdMs !== undefined ? +step.holdMs : 300, o);
                                 record.drag = dir;
@@ -3552,7 +3583,7 @@
                             await sleep(Math.min(Math.max(step.ms !== undefined ? +step.ms : 600, 0), 15000));
                         }
                     } else {
-                        throw new Error("未知的 op：" + op + "（支持 tap/text/swipe/close/recommended/advance/dismiss/scroll/wait）");
+                        throw new Error("未知的 op：" + op + "（支持 tap/text/swipe/drag/close/recommended/advance/dismiss/scroll/wait）");
                     }
                     if (op !== "wait" || !step.until) {
                         record.settle = await settleAfter(before, {
@@ -3650,7 +3681,7 @@
             table.changed = delta || (rowsChanged ? "面板栈没变；" + describeRowDiff(diff)
                 : settled ? "面板栈没变，界面内容有变化" : "界面没有变化");
             // 只有点击类操作才谈得上「点了没反应」；纯等待不该劝 agent 去怀疑目标
-            var clicked = executed.filter(function (r) { return r.op === "tap" || r.op === "text" || r.op === "swipe" || r.op === "recommended"; });
+            var clicked = executed.filter(function (r) { return r.op === "tap" || r.op === "text" || r.op === "swipe" || r.op === "drag" || r.op === "recommended"; });
             if (stopped === "done" && clicked.length && !delta && !rowsChanged && !settled) {
                 table.hint = "操作已执行但界面没有变化：确认目标是否正确，或用 op=wait 再等一次；仍无变化时用 egret_get_errors 排查";
             }
