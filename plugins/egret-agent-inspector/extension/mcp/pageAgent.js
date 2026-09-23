@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.8";
+    var VERSION = "1.7.9";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -2651,7 +2651,7 @@
         }
 
         var probed = 0;
-        var entries = [], offstage = 0, indicators = 0, textOnly = [];
+        var entries = [], offstage = 0, indicators = 0, textOnly = [], faded = 0;
         owners.forEach(function (item) {
             var o = item.o;
             var r = stageRect(o);
@@ -2660,6 +2660,7 @@
             var seenAlpha = visualAlpha(o);
             if (seenAlpha >= 0 && seenAlpha < 10) {
                 offstage++;
+                faded++;
                 return;
             }
             var label = actionLabelOf(o);
@@ -2886,6 +2887,7 @@
                 return [e.hash, e.label, e.role, e.off ? 1 : 0, e.on ? 1 : 0, e.st || "", e.occluded ? 1 : 0].join(",");
             }).join(";")].join("#"));
         if (!p.peek) lastTable = out;
+        try { Object.defineProperty(out, "_faded", { value: faded, enumerable: false, configurable: true }); } catch (e) {}
         return hideRowKeys(out, rowKeys, visibleEntries);
     }
 
@@ -3664,6 +3666,15 @@
                 table = buildActionTable(tableArgs);
             }
             var loadingMs = Date.now() - loadingStart;
+            // 列表、弹窗还在淡入：控件几乎全透明时不进表，这时交回去 agent 看到的是一张缺了主角的表
+            // （点进星球后关卡列表淡入，整列关卡都不在表里，agent 只好在别处乱找）。透明的在变少就再等等；
+            // 一直不变的是本来就透明的东西，最多多花 200ms
+            for (var fadeWait = 0; table._faded > 0 && fadeWait < 4 && deadline - Date.now() > 2000; fadeWait++) {
+                var fadedBefore = table._faded;
+                await sleep(200);
+                table = buildActionTable(tableArgs);
+                if (table._faded >= fadedBefore) break;
+            }
             if (loadingMs > 300) table.waitedForLoadingMs = loadingMs;
             executed.forEach(function (rec, k) {
                 if (!rec.turn || turnTops[k] === undefined) return;
