@@ -440,6 +440,26 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
                     ext.task.cancel()
                     ext.writer.close()
 
+    async def test_reload_needs_a_tab_when_several_browsers_are_connected(self):
+        # 新起的 server 还没按 tabId 路由过：不带 tabId 的重载不知道落到谁身上，拒绝
+        chrome, edge = FakeExtension(), FakeExtension()
+        chrome.tabs, edge.tabs = [11], [22]
+        await chrome.connect()
+        await edge.connect()
+        try:
+            await self.call("egret_extension_status", {"waitSeconds": 2})
+            res, text = await self.call_text("egret_reload_extension", {})
+            self.assertTrue(res.get("isError"))
+            self.assertIn("带上你的 tabId", text)
+            self.assertNotIn(("reloadExtension", None), chrome.calls + edge.calls)
+            await self.call_text("egret_reload_extension", {"tabId": 22})
+            self.assertIn(("reloadExtension", None), edge.calls)
+            self.assertNotIn(("reloadExtension", None), chrome.calls)
+        finally:
+            for ext in (chrome, edge):
+                ext.task.cancel()
+                ext.writer.close()
+
     async def test_observe_and_act_use_the_action_table(self):
         ext = FakeExtension()
         await ext.connect()

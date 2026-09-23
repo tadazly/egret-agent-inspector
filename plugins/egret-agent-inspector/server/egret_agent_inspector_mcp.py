@@ -845,8 +845,10 @@ TOOLS = {
             "openPage": {"type": "boolean", "description": "是否打开扩展管理页，默认 true"}}},
         "installExtension", None),
     "egret_reload_extension": (
-        "让已连接的扩展从磁盘重新加载（更新扩展文件后使用），随后等待其重新连接。",
-        {"type": "object", "properties": {}},
+        "让已连接的扩展从磁盘重新加载（更新扩展文件后使用），随后等待其重新连接。"
+        "会断开这个浏览器里所有标签页的连接；页面没响应、超时时不要用。",
+        {"type": "object", "properties": {
+            "tabId": {"type": "integer", "description": "重载持有这个标签页的浏览器；连着好几个浏览器时必填"}}},
         "reloadExtension", None),
     "egret_run_steps": (
         "按顺序批量执行 E2E 步骤并汇总结果，默认遇到失败即停止并附失败截图。steps 每项为 {action, ...参数}，"
@@ -1577,7 +1579,16 @@ class McpServer:
                 return await loop.run_in_executor(None, browser_extension.open_url,
                                                   args.get("browser", "default"), args["url"])
             if bridge_method == "reloadExtension":
-                res = await self.bridge.request("reloadExtension", {}, timeout)
+                # 好几个浏览器都连着（别的 agent 各开一个 Edge、用户自己的 Chrome）时，没带 tabId、
+                # 这个 server 又没按 tabId 路由过，重载就落到最后连上来的那个浏览器：验收里测试 agent
+                # 碰到超时就重载，把别人正在跑的浏览器整个断开
+                live = self.bridge.live()
+                reload_tab = args.get("tabId")
+                if reload_tab is None and len(live) > 1 and self.bridge.preferred not in live:
+                    raise RuntimeError("连着 %d 个浏览器，不知道该重载哪一个（可能是别人正在用的）：带上你的 tabId 再调。"
+                                       "页面没响应、超时不是重载扩展能解决的，重载会断开这个浏览器里所有标签页。" % len(live))
+                res = await self.bridge.request("reloadExtension",
+                                                {"tabId": reload_tab} if reload_tab is not None else {}, timeout)
                 await asyncio.sleep(1)
                 status = await self.extension_status(15)
                 status["reloadedFrom"] = res.get("extensionVersion")
