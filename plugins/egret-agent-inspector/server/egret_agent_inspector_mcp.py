@@ -904,7 +904,7 @@ class ExtensionConnection:
         self.send_lock = asyncio.Lock()
         self.last_seen = time.time()
         self.pong = None
-        self.tabs = set()
+        self.tabs = None
 
     async def alive(self, timeout=2.0):
         """确认连接对端仍在工作：扩展重载后旧 service worker 的连接可能仍然打开但不再应答。"""
@@ -992,6 +992,7 @@ class Bridge:
     def __init__(self):
         self.connections = []
         self.preferred = None
+        self.started = time.time()
         self.port = None
         self.changed = asyncio.Event()
 
@@ -1008,16 +1009,26 @@ class Bridge:
 
     async def tabs_of(self, conn, params=None, timeout=5):
         tabs = await conn.request("listTabs", params or {"probe": False}, timeout)
-        conn.tabs = {t.get("tabId") for t in tabs or [] if isinstance(t, dict)}
-        return tabs or []
+        tabs = tabs if isinstance(tabs, list) else []
+        conn.tabs = {t.get("tabId") for t in tabs if isinstance(t, dict)}
+        return tabs
+
+    async def owner_of(self, tab_id, refresh):
+        for c in self.live():
+            if refresh(c):
+                try:
+                    await self.tabs_of(c)
+                except Exception:  # noqa: BLE001
+                    continue
+        return next((c for c in self.live() if c.tabs and tab_id in c.tabs), None)
 
     async def route(self, method, params, timeout):
         """好几个浏览器都装了扩展（比如 Chrome 和一个专给 agent 用的 Edge）时，每个都连上来，
         谁后连谁就成了 active。按 tabId 找到持有这个标签页的那个连接，listTabs 把各家的标签页合起来。"""
         live = self.live()
-        if len(live) < 2:
-            return None
         if method == "listTabs":
+            if len(live) < 2:
+                return None
             merged = []
             for c in live:
                 try:
@@ -1026,20 +1037,24 @@ class Bridge:
                     continue
             return {"merged": merged}
         tab_id = params.get("tabId") if isinstance(params, dict) else None
-        if tab_id is None:
+        if tab_id is None or not live:
             return None
         try:
             tab_id = int(tab_id)
         except (TypeError, ValueError):
             return None
-        owner = next((c for c in live if tab_id in c.tabs), None)
+        owner = next((c for c in live if c.tabs and tab_id in c.tabs), None)
         if owner is None:
-            for c in live:
-                try:
-                    await self.tabs_of(c)
-                except Exception:  # noqa: BLE001
-                    continue
-            owner = next((c for c in live if tab_id in c.tabs), None)
+            owner = await self.owner_of(tab_id, lambda c: True)
+        # 刚启动时别的浏览器可能还没连上来（扩展对备用端口的重连会退避到 30 秒）：等一会儿新连接
+        deadline = self.started + 45
+        while owner is None and time.time() < deadline and any(c.tabs for c in self.live()):
+            self.changed.clear()
+            try:
+                await asyncio.wait_for(self.changed.wait(), max(0.1, min(2.0, deadline - time.time())))
+            except asyncio.TimeoutError:
+                pass
+            owner = await self.owner_of(tab_id, lambda c: c.tabs is None)
         if owner is not None:
             # 没带 tabId 的后续请求（自动选标签页、新开窗口）也跟着这个浏览器走
             self.preferred = owner
