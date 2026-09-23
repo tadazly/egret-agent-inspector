@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.28";
+    var VERSION = "1.7.29";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -3055,8 +3055,10 @@
         var stageArea = stage.stageWidth * stage.stageHeight;
         var groups = {};
         entries.forEach(function (e) {
-            if (STANDALONE_ROLES[e.role] && realTextRow(e) && !COUNTER_LABEL.test(e.label)) return;
             var host = itemHostOf(e._o, stage);
+            // 列表里的页签（福利左侧「七日签到 / 每日领奖」）整项只有「选中它」一个动作，底图和两行字不该拆成三行
+            var listTab = e.role === "tab" && host && typeof host.itemIndex === "number";
+            if (STANDALONE_ROLES[e.role] && realTextRow(e) && !COUNTER_LABEL.test(e.label) && !listTab) return;
             if (!host) return;
             var hr = stageRect(host);
             if (!hr || hr.width * hr.height > stageArea * 0.2) return;
@@ -3072,6 +3074,7 @@
             // 列表项自己已经有一段真文字（背包格子「LV.57 闪光阿兹 无」）：留它，别再把悬浮详情里的字拼上去
             if (rep._o === g.host && realTextRow(rep)) {
                 if (rep.role === "text") rep.role = "item";
+                if (g.host.selected === true) rep.on = true;
                 g.members.forEach(function (e) { if (e !== rep) gone[e.hash] = true; });
                 return;
             }
@@ -3090,6 +3093,8 @@
                 rep.label = shortClass(g.host);
             }
             if (rep.role === "text") rep.role = "item";
+            // 选中态记在列表项上，不在零件上：不标出来 agent 会去点已经选中的页签，点了界面不变
+            if (g.host.selected === true) rep.on = true;
             g.members.forEach(function (e) { if (e !== rep) gone[e.hash] = true; });
         });
         return entries.filter(function (e) { return !gone[e.hash]; });
