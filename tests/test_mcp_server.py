@@ -834,9 +834,12 @@ const player = { stage };
 const stageReads = [];
 // 和 Egret 一样挂在原型上：for…in 遍历实例属性时碰不到，只有直接读才算
 const stageProto = {};
-["visible", "alpha"].forEach(k => Object.defineProperty(stageProto, k, { get() {
-    stageReads.push(k + " " + new Error().stack.split(String.fromCharCode(10))[2].trim()); return k === "alpha" ? 1 : true; } }));
-delete stage.visible; delete stage.alpha;
+// Egret 的 $markCannotUse：舞台上这些属性一读就警告
+const STAGE_CANNOT_USE = { alpha: 1, visible: true, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, touchEnabled: true,
+    cacheAsBitmap: false, scrollRect: null, filters: null, blendMode: null, matrix: null };
+Object.keys(STAGE_CANNOT_USE).forEach(k => Object.defineProperty(stageProto, k, { get() {
+    stageReads.push(k + " " + new Error().stack.split(String.fromCharCode(10))[2].trim()); return STAGE_CANNOT_USE[k]; } }));
+Object.keys(STAGE_CANNOT_USE).forEach(k => { delete stage[k]; });
 Object.setPrototypeOf(stage, stageProto);
 global.window = { addEventListener() {}, devicePixelRatio: 1, innerWidth: 800, innerHeight: 480,
     egret: { getQualifiedClassName(o) { return o.__class || "Object"; } } };
@@ -1181,7 +1184,7 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     window.MFC = {};
     out.projectSplan = t.buildActionTable({}).project || null;
     delete window.MFC;
-    out.stageReads = stageReads.slice(0, 5);
+    out.stageReads = Array.from(new Set(stageReads)).slice(0, 12);
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
