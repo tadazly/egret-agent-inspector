@@ -1180,6 +1180,16 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     out.closeResult = closed.executed[0].result;
     out.bagClosed = !bag.stage;
 
+    // 战斗胜利页分两段：第一下点遮罩只跳过动画，第二下才关
+    const endPanel = item("ui.BattleEndPopup", "battleEnd", uiLayer, { x: 0, y: 0, width: 800, height: 480 });
+    listenOn(endPanel);
+    let endTaps = 0;
+    endPanel.addEventListener("touchTap", function () { if (++endTaps >= 2) remove(endPanel); }, null);
+    item("eui.Group", "endContent", endPanel, { x: 200, y: 120, width: 400, height: 240 });
+    const endClosed = await t.handlers.act({ steps: [{ op: "close" }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.endClose = endClosed.executed[0].result;
+    out.endTaps = endTaps;
+
     // 只有页面有全局 MFC（Splan 项目）才标 project
     out.projectPlain = t.buildActionTable({}).project || null;
     window.MFC = {};
@@ -1304,6 +1314,12 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         data = self.run_probe()
         self.assertIsNone(data["projectPlain"])
         self.assertEqual(data["projectSplan"], "splan")
+
+    def test_close_taps_the_backdrop_again_for_a_staged_panel(self):
+        data = self.run_probe()
+        self.assertTrue(data["endClose"]["ok"], data["endClose"])
+        self.assertEqual(data["endClose"]["via"], "mask")
+        self.assertEqual(data["endTaps"], 2)
 
     def test_close_skips_a_layer_that_is_already_leaving(self):
         data = self.run_probe()
@@ -1660,6 +1676,10 @@ class RenderTableTest(unittest.TestCase):
         text = server.render_action_table(table)
         self.assertIn("mode guide-hole", text)
         self.assertIn("recommended", text)
+        # 只能点遮罩的弹窗推荐 close：它会确认真关掉了，分阶段的结算页还会再点一次
+        table = {"mode": "modal-backdrop-dismiss", "marker": "m1",
+                 "recommendedTarget": {"reason": "modal-backdrop-dismiss"}, "actions": []}
+        self.assertIn('推荐 {"op":"close"}（modal-backdrop-dismiss）', server.render_action_table(table))
 
 
 class ToolProfileTest(unittest.TestCase):

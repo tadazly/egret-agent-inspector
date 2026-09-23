@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.17";
+    var VERSION = "1.7.18";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -2650,7 +2650,7 @@
                     : "连续对白/引导：用 egret_act 的 op=advance 一次推完，不要逐次点击";
                 return rememberEmpty(p, out);
             }
-            out.hint = "没有识别到关闭控件：优先用动作表里的关闭/确定/领取按钮，都不行再用 egret_act 的 {op:\"recommended\"} 点遮罩";
+            out.hint = "没有识别到关闭控件：表里有关闭/确定按钮就点它，否则用 egret_act 的 {op:\"close\"}（点遮罩并确认关掉）";
         }
         if (transientOverlay) {
             out.mode = "transient";
@@ -4003,7 +4003,9 @@
                     }
                 }
                 var mp = maskPointOutside(panel);
-                if (mp && await attempt("mask", null, { x: mp.x, y: mp.y })) {
+                // 分阶段的面板（战斗胜利页）第一下只跳过动画，面板还在就再点一次
+                if (mp && (await attempt("mask", null, { x: mp.x, y: mp.y }) ||
+                        (sceneInfo().top === panel && await attempt("mask", null, { x: mp.x, y: mp.y })))) {
                     return { ok: true, via: "mask", panel: name, tried: tried };
                 }
                 if (tried.length) break;
