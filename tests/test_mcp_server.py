@@ -1107,6 +1107,27 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     setTimeout(() => { level.alpha = 1; }, 450);
     const fadedIn = await t.handlers.act({ steps: [{ op: "wait", ms: 10 }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
     out.fadedInListed = fadedIn.actions.some(a => a.label === "1 第一关");
+    remove(level);
+
+    // 从竖着滚的列表里往外拖：先横着挪出去，斜着拖的竖直分量会被列表当成滚动
+    const vlist = item("eui.Scroller", "skillScroller", hud, { x: 600, y: 60, width: 150, height: 200 }, { solid: false });
+    vlist.viewport = { contentHeight: 600, contentWidth: 150, scrollV: 0, scrollH: 0 };
+    vlist.width = 150; vlist.height = 200;
+    const listSkill = item("ui.SkillBar", "skillBar_9", vlist, { x: 610, y: 200, width: 120, height: 40 }, { text: "暴风" });
+    listenOn(listSkill);
+    const moves = [];
+    listSkill.addEventListener("touchBegin", function () {}, null);
+    listSkill.addEventListener("touchMove", function (e) { moves.push([e.stageX, e.stageY]); }, null);
+    const slot2 = item("ui.SkillCell", "skillCell_2", hud, { x: 420, y: 60, width: 90, height: 40 }, { text: "拍打" });
+    listenOn(slot2);
+    slot2.addEventListener("touchEnd", function () {}, slot2);
+    const t2 = t.buildActionTable({ limit: 60 });
+    const src2 = t2.actions.find(a => a.label === "暴风"), dst2 = t2.actions.find(a => a.label === "拍打");
+    await t.handlers.act({ marker: t2.marker, steps: [{ i: src2.i, op: "drag", holdMs: 0, to: { i: dst2.i } }],
+        quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    const firstMove = moves.find(m => m[0] !== 670 || m[1] !== 220);
+    out.dragFirstLeg = firstMove ? (firstMove[1] === 220 ? "horizontal" : "diagonal") : null;
+    out.dragEnd = moves[moves.length - 1];
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
@@ -1212,6 +1233,11 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertEqual(data["dragTo"]["label"], "突破")
         # 先按住那一段是必要的：不按住直接拖，长按才起步的拖动起不来
         self.assertIsNone(data["droppedNoHold"])
+
+    def test_drag_out_of_a_vertical_list_moves_sideways_first(self):
+        data = self.run_probe()
+        self.assertEqual(data["dragFirstLeg"], "horizontal")
+        self.assertEqual(data["dragEnd"], [465, 80])
 
     def test_act_waits_for_a_list_that_is_fading_in(self):
         self.assertTrue(self.run_probe()["fadedInListed"])
