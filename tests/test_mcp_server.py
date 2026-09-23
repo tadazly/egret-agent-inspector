@@ -1284,6 +1284,21 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     const guideStart = Date.now();
     await t.handlers.act({ steps: [{ op: "recommended" }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
     out.guideWait = { waited: Date.now() - guideStart >= 400, skillTaps };
+    // 点完引导目标，下一处引导要等新界面打开才挂出来：act 等它出来再交表，不交回一张没有遮罩的表
+    window.frame = { GuideController: { guideState: 1 } };
+    const nextBtn = item("eui.Button", "btn_next", splanRoot, { x: 500, y: 100, width: 80, height: 40 }, { listener: true });
+    skillBtn.addEventListener("touchTap", function () {
+        guidePanel.visible = false;
+        setTimeout(() => {
+            window.GuideMaskManager._instance._guideTapTarget = nextBtn;
+            guidePanel.visible = true;
+        }, 600);
+    }, null);
+    const nextGuide = await t.handlers.act({ steps: [{ op: "recommended" }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.nextGuide = { mode: nextGuide.mode,
+        target: !!(nextGuide.recommendedTarget && nextGuide.recommendedTarget.target.hash === nextBtn.hashCode) };
+    delete window.frame;
+    remove(nextBtn);
     delete window.GuideMaskManager;
     remove(guidePanel);
     remove(skillBtn);
@@ -1302,6 +1317,15 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     out.splanLabels = t.buildActionTable({ limit: 60 }).actions.map(a => a.label).filter(l => l === "进入游戏" || l === "跳过动画");
     remove(startBtn);
     remove(skipBtn);
+    // 战斗界面不能 close：返回键是暂停，退出直接判负；自动战斗键写明别点
+    const battlePanel = item("BattlePanel", null, splanRoot, { x: 0, y: 0, width: 800, height: 480 });
+    const autoBtn = item("eui.Image", "autoOn", battlePanel, { x: 700, y: 400, width: 50, height: 50 }, { listener: true });
+    autoBtn.qaName = "ToolBar__autoOn";
+    item("eui.Image", "pauseButton", battlePanel, { x: 10, y: 10, width: 40, height: 40 }, { listener: true });
+    out.battleClose = (await t.handlers.act({ steps: [{ op: "close" }], quietMs: 50, timeoutMs: 200, turnMs: 0 })).executed[0].result;
+    out.battleClose = { ok: out.battleClose.ok, stopped: out.battleClose.stopped, stillThere: !!battlePanel.stage };
+    out.autoLabel = t.buildActionTable({ limit: 60 }).actions.some(a => a.label === "自动战斗（别点）");
+    remove(battlePanel);
     remove(splanRoot);
     delete window.MFC;
 
@@ -1451,12 +1475,15 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         data = self.run_probe()
         self.assertTrue(data["guideTarget"])
         self.assertEqual(data["guideWait"], {"waited": True, "skillTaps": 2})
+        self.assertEqual(data["nextGuide"], {"mode": "guide-hole", "target": True})
 
     def test_splan_lost_session_and_fixed_labels(self):
         data = self.run_probe()
         self.assertEqual(data["session"]["reason"], "kicked")
         self.assertTrue(data["session"]["lost"])
         self.assertEqual(sorted(data["splanLabels"]), ["跳过动画", "进入游戏"])
+        self.assertEqual(data["battleClose"], {"ok": False, "stopped": "in-battle", "stillThere": True})
+        self.assertTrue(data["autoLabel"])
 
     def test_later_steps_resolve_numbers_against_the_table_the_agent_saw(self):
         data = self.run_probe()
@@ -1847,6 +1874,13 @@ class RenderTableTest(unittest.TestCase):
         table = {"mode": "modal-backdrop-dismiss", "marker": "m1",
                  "recommendedTarget": {"reason": "modal-backdrop-dismiss"}, "actions": []}
         self.assertIn('推荐 {"op":"close"}（modal-backdrop-dismiss）', server.render_action_table(table))
+        # 引导挖洞写出点的是谁，对白直接给 advance
+        table = {"mode": "guide-hole", "marker": "m2", "actions": [], "recommendedTarget": {
+            "reason": "guide-hole", "target": {"qaName": "ToolbarNew__btn_petBag", "className": "eui.Image"}}}
+        self.assertIn('推荐 {"op":"recommended"}（guide-hole，点 btn_petBag）', server.render_action_table(table))
+        table = {"mode": "dialogue-continue", "marker": "m3", "actions": [],
+                 "recommendedTarget": {"reason": "dialogue-continue", "target": {"className": "NoNoDialog"}}}
+        self.assertIn('推荐 {"op":"advance"}（dialogue-continue）', server.render_action_table(table))
 
 
 class ToolProfileTest(unittest.TestCase):

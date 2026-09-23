@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.21";
+    var VERSION = "1.7.22";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1410,13 +1410,16 @@
     }
 
     // 引导淡入、对白打字、引导步骤之间锁屏都只是过渡：等它落定再交表，省得 agent 对着半截状态决策
-    async function splanSettle(capMs) {
+    // afterGuideTap：刚点了引导目标，下一处引导要等新界面打开才挂出来。验收里 act 在它出来前就返回，
+    // agent 看到的是没有遮罩的背包，去点「关闭」，下一轮才发现又是引导
+    async function splanSettle(capMs, afterGuideTap) {
         if (!window.MFC) return 0;
         var start = Date.now();
         while (Date.now() - start < capMs) {
             var g = splanGuide(), nono = splanNoNo(), stage = getStage();
             var pending = (g && !g.ready) || (nono && !nono.typed && !nono.pass) ||
-                (!g && !nono && splanGuiding() && stage && stage.touchChildren === false);
+                (!g && !nono && splanGuiding() && ((stage && stage.touchChildren === false) ||
+                    (afterGuideTap && Date.now() - start < 1500)));
             if (!pending) break;
             await sleep(100);
         }
@@ -1483,7 +1486,9 @@
 
     // 图片字按钮在源码里的固定叫法，不用 OCR 猜
     var SPLAN_QA_LABELS = { NewLogin__btn_start: "进入游戏", NewLogin__btn_account: "切换账号",
-        SimpleAlert__cancel: "取消" };
+        SimpleAlert__cancel: "取消",
+        // 战斗：自动战斗开了以后只能干等；三星条件那块写着「战斗胜利」，agent 会当成已经结算
+        ToolBar__autoOn: "自动战斗（别点）", BattlePveStar__btnClose: "收起三星条件", BattlePveStar__btnOpen: "展开三星条件" };
 
     function splanFixedLabel(o) {
         if (!window.MFC) return null;
@@ -3645,8 +3650,11 @@
             var executed = [], stopped = "done";
             // 每步出招时的顶层面板：收尾时拿来复核「解锁了」其实是不是已经结算换了界面
             var turnTops = [];
+            // 最后一步点的是不是引导目标：是的话收尾时等下一处引导挂出来
+            var lastGuideTap = false;
             for (var n = 0; n < steps.length; n++) {
                 var step = steps[n] || {};
+                lastGuideTap = false;
                 if (n > 0 && Date.now() > deadline - 3000) {
                     stopped = "budget";
                     break;
@@ -3754,6 +3762,8 @@
                             }
                             tapTarget = o;
                             tapWasLocked = lockedAncestor(o);
+                            var guideNow = splanGuide();
+                            lastGuideTap = !!(guideNow && guideNow.target && reaches(guideNow.target, o));
                             // 拖出去才生效的控件（换宠卡）原地点一下什么都不发生：认得出方向就直接替它按住滑出去，
                             // 不让 agent 为「点了没反应」再花一轮，回合倒计时也等不起
                             var drag = dragTargetOf(o);
@@ -3799,6 +3809,7 @@
                             await sleep(200);
                         }
                         if (!rec) throw new Error("当前没有 recommendedTarget：重新 observe 后按动作表选目标");
+                        lastGuideTap = rec.reason === "guide-hole";
                         await performGesture([rec.stagePoint], method, 50, null);
                         record.target = { reason: rec.reason, stagePoint: rec.stagePoint,
                             label: rec.target && (rec.target.text || rec.target.qaName || rec.target.id || rec.target.className) };
@@ -3912,7 +3923,7 @@
             }
             // Splan 的引导淡入、对白打字、引导步骤间锁屏：落定再交表。验收里 act 在遮罩淡入前就返回，
             // agent 看到的是底下的面板，去点「关闭」，下一轮才发现是引导
-            await splanSettle(Math.max(0, Math.min(2500, deadline - Date.now() - 2000)));
+            await splanSettle(Math.max(0, Math.min(2500, deadline - Date.now() - 2000)), lastGuideTap);
             // 加载过场里没有可点目标，直接在这一次调用里等它过去，省掉一整轮往返
             var table = buildActionTable(tableArgs);
             var loadingCap = Math.min(Math.max(p.loadingMs !== undefined ? +p.loadingMs : 6000, 0), 30000);
@@ -4142,6 +4153,12 @@
             var hash = hashOf(panel);
             var name = className(panel) + (nameOf(panel) ? "#" + nameOf(panel) : "");
             var tried = [];
+            // Splan 战斗里没有「关掉」这回事：返回键是暂停，暂停框里的退出直接判负。
+            // 验收里 agent 把左边的三星条件当成结算，对着战斗界面 close
+            if (window.MFC && (/(^|\.)BattlePanel$/.test(className(panel)) || /^BattlePanel__/.test(nameOf(panel) || ""))) {
+                return { ok: false, stopped: "in-battle", panel: name,
+                    note: "战斗还没结束，没有点：「战斗胜利 / 30回合内取得胜利…」是三星条件不是结算，接着出招；结算页出来后再 close" };
+            }
 
             async function vanished() {
                 for (var w = 0; w < 10; w++) {

@@ -30,6 +30,6 @@ description: Splan 项目的回合制战斗规则（页面存在全局 MFC 对�
 **不要点**
 
 - `autoOn`（自动战斗）、`bagBtn` 展开后的道具和 `hpBtn`、`ppBtn`、`catchBtn`（点了立刻使用，占掉回合）、技能栏上方的「超频」。
-- `pauseButton`：弹出的暂停框里 `quitFight` 是退出战斗，直接判负；已经弹出就点 `continueFight`。战斗里不要用 `op=close`。
+- `pauseButton`：弹出的暂停框里 `quitFight` 是退出战斗，直接判负；已经弹出就点 `continueFight`。
 - 结算里的 `reI`「再战一次」、`refight`、`way_2`「购买高级胶囊」会扣电池或花钱。
 - 战斗中弹出剧情对白时倒计时暂停，用 `{"op":"advance"}` 推完再出招。

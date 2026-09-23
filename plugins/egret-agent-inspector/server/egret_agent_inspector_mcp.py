@@ -404,10 +404,20 @@ def render_action_table(table):
     elif mode in ("guide-hole", "guide-continue", "dialogue-continue", "transient", "empty"):
         lines.append("动作 无（按 mode 走 recommended / advance / wait）")
     if table.get("recommendedTarget"):
-        reason = table["recommendedTarget"].get("reason")
-        # 只能点遮罩的弹窗用 close：点完确认真关掉了，分阶段的面板（结算页先跳动画）还会再点一次
-        op = "close" if reason == "modal-backdrop-dismiss" else "recommended"
-        lines.append("推荐 {\"op\":\"%s\"}（%s）" % (op, reason))
+        rec = table["recommendedTarget"]
+        reason = rec.get("reason")
+        # 只能点遮罩的弹窗用 close：点完确认真关掉了，分阶段的面板（结算页先跳动画）还会再点一次；
+        # 对白和「点任意处继续」用 advance 一次推完
+        op = {"modal-backdrop-dismiss": "close", "dialogue-continue": "advance",
+              "guide-continue": "advance"}.get(reason, "recommended")
+        # 引导挖洞写出点的是什么：验收里 agent 每一步都先 format=json 再看一遍目标，白多一轮
+        target = rec.get("target") or {}
+        name = ""
+        if reason == "guide-hole":
+            text = " ".join(str(target.get("text") or "").split())
+            name = text if 0 < len(text) <= 12 else str(target.get("qaName") or "").split("__")[-1] or \
+                target.get("id") or target.get("name") or str(target.get("className") or "").split(".")[-1]
+        lines.append("推荐 {\"op\":\"%s\"}（%s%s）" % (op, reason, "，点 %s" % name if name else ""))
     if table.get("transientOverlay"):
         lines.append("过场 %s：用 {\"op\":\"wait\",\"ms\":800} 短等" % table["transientOverlay"].get("reason"))
     for sc in table.get("scrollers") or []:
@@ -751,7 +761,7 @@ TOOLS = {
         "先 probe 确认可用能力；openModule 会如实回报派发的事件名与载荷，不对时用 event/payload 覆盖。"
         "login 在登录页用 debug.js 的内网免密登录切换账号（account 指定账号，newAccount=true 用 agent+时间戳新号）。",
         obj({"action": {"type": "string", "enum": ["probe", "listModules", "openModule", "closeModule", "qa", "dispatch", "login"]},
-             "account": {"type": "string", "description": "login 的账号；不传就是上次切换的账号"},
+             "account": {"type": "string", "description": "login 的账号；不传就是这个标签页上次切换的账号"},
              "newAccount": {"type": "boolean", "description": "login 用 agent+秒级时间戳的新号（服务端自动建号）"},
              "module": {"type": "string", "description": "模块常量名或 id"},
              "filter": {"type": "string", "description": "listModules 的名称过滤"},

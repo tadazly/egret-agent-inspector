@@ -9,7 +9,7 @@ description: Splan 内网测试服切换账号、用新号从头跑新手流程�
 
 - 换到指定账号：`splan_call {"action":"login","account":"agent051"}`。
 - 用新号跑新手：`splan_call {"action":"login","newAccount":true}`，账号是 `agent` + 秒级时间戳，返回的 `account` 要写进报告。
-- 掉线重开后回到原来的号：`splan_call {"action":"login"}`，不传 account 就是上次切换的号。
+- 掉线重开后回到原来的号：`splan_call {"action":"login"}`，不传 account 就是这个标签页上次切换的号。
 - 返回 `ok` 就已进服，接着 `egret_observe`。新号先播入场动画，表上出现「跳过动画」就点它。
 
 报错时停下来告诉用户，不要自己绕：
