@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.14";
+    var VERSION = "1.7.15";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -270,7 +270,16 @@
         return false;
     }
 
+    // Egret 把舞台上的这些属性标成不可用（$markCannotUse），debug 版一读就打 Warning #1009
+    var STAGE_LOCKED = { alpha: 1, visible: 1, x: 1, y: 1, scaleX: 1, scaleY: 1, rotation: 1, touchEnabled: 1,
+        cacheAsBitmap: 1, scrollRect: 1, filters: 1, blendMode: 1, matrix: 1 };
+
+    function isStageObject(o) {
+        return !!o && !o.parent && o.stageWidth !== undefined;
+    }
+
     function effectiveTouchable(o) {
+        if (isStageObject(o)) return true;
         if (!o.touchEnabled) return false;
         var p = o.parent;
         while (p) {
@@ -409,7 +418,7 @@
         if (t !== null) info.text = t;
         var src = sourceOf(o);
         if (src) info.source = src;
-        info.visible = o === getStage() ? true : !!o.visible;
+        info.visible = isStageObject(o) || !!o.visible;
         info.onStageVisible = effectiveVisible(o);
         info.touchable = effectiveTouchable(o);
         ["enabled", "selected", "currentState"].forEach(function (k) {
@@ -610,6 +619,7 @@
     function readProps(o, keys, withDefaults) {
         var props = {};
         (withDefaults ? DEFAULT_PROPS.concat(keys) : keys).forEach(function (k) {
+            if (STAGE_LOCKED[k] && isStageObject(o)) return;
             var v;
             try {
                 v = o[k];
@@ -1480,7 +1490,8 @@
     // 事件委托的目标：自己开着 touchEnabled、有名字（skin part / name，代码里多半靠它判断点的是谁）、
     // 尺寸像个控件而不是背景
     function isDelegateTarget(o) {
-        if (!o || o.touchEnabled !== true) return false;
+        // 舞台的 touchEnabled 一读 debug 版 Egret 就打 Warning #1009
+        if (!o || isStageObject(o) || o.touchEnabled !== true) return false;
         var name = bindId(o) || nameOf(o);
         if (!name || /^(instance)?\d+$/i.test(name)) return false;
         // 只装着字的容器是标题（地图建筑下面的「星际探索」），不是被委托的按钮：
@@ -3155,7 +3166,8 @@
             var chain = [];
             var cur = o;
             while (cur && chain.length < 30) {
-                chain.push({ hash: hashOf(cur), className: className(cur), id: bindId(cur), name: cur.name || null, touchEnabled: !!cur.touchEnabled });
+                chain.push({ hash: hashOf(cur), className: className(cur), id: bindId(cur), name: cur.name || null,
+                    touchEnabled: isStageObject(cur) || !!cur.touchEnabled });
                 cur = cur.parent;
             }
             return { stagePoint: pt, target: o ? describe(o, { path: true }) : null, ancestors: chain.slice(1) };
