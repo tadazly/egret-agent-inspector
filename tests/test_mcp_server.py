@@ -1101,12 +1101,12 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     remove(skillSrc); remove(slot);
 
     // 点进去之后列表是淡入的：交表那一刻关卡项几乎全透明，不能就这么交一张没有关卡的表回去
-    const level = item("ui.ChooseLevelItem", "levelItem_1", hud, { x: 460, y: 200, width: 280, height: 70 }, { listener: true, text: "1 米斯特瑞星" });
+    const level = item("ui.ChooseLevelItem", "levelItem_1", hud, { x: 460, y: 200, width: 280, height: 70 }, { listener: true, text: "1 第一关" });
     level.alpha = 0.03;
     setTimeout(() => { level.alpha = 0.4; }, 250);
     setTimeout(() => { level.alpha = 1; }, 450);
     const fadedIn = await t.handlers.act({ steps: [{ op: "wait", ms: 10 }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
-    out.fadedInListed = fadedIn.actions.some(a => a.label === "1 米斯特瑞星");
+    out.fadedInListed = fadedIn.actions.some(a => a.label === "1 第一关");
     process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
 '''
