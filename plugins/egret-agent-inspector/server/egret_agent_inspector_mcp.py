@@ -167,8 +167,12 @@ def run_fast_ocr(image_data, candidates, scale):
             if decoded.get("error"):
                 raise RuntimeError(decoded["error"])
         else:
-            completed = subprocess.run(([binary, spec_path] if command is None else command + [spec_path]),
-                                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
+            try:
+                completed = subprocess.run(([binary, spec_path] if command is None else command + [spec_path]),
+                                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
+            except subprocess.TimeoutExpired:
+                # 原来把整条命令行拼进表里，几百字节全是路径
+                raise RuntimeError("本地 OCR 超时（5 秒）")
             if completed.returncode:
                 raise RuntimeError(completed.stderr.strip() or "本地 OCR 执行失败")
             decoded = json.loads(completed.stdout)
@@ -191,6 +195,7 @@ def run_fast_ocr(image_data, candidates, scale):
                 except OSError:
                     pass
 WEAK_LABEL_SOURCES = ("qaName", "id", "name", "source", "className")
+OCR_BACKOFF = 300
 
 
 def tidy_ocr_text(text):
@@ -1242,6 +1247,8 @@ class McpServer:
         self.scope = None
         # hash -> 识别出的文字（空串表示认过但没认出来），只在本进程内复用
         self.ocr_cache = {}
+        # 自动 OCR 失败后到这个时间点之前不再自动试
+        self.ocr_down_until = 0
         # tabId -> 页面代理的 bootId，用来发现页面重载
         self.page_boots = {}
         # tabId -> 执行过的步骤流水，用来发现「同一段路线第二次出现」
@@ -1475,6 +1482,11 @@ class McpServer:
                       if a.get("from") in weak and not a.get("occluded") and a.get("screenRect")
                       and a.get("role") not in ("close", "back") and not a.get("domCovered")
                       and not (reuse and str(a.get("hash")) in self.ocr_cache)][:limit]
+        # 本地 OCR 刚失败过（远程桌面断开后 Windows OCR 次次卡满 5 秒超时）：一段时间内不再自动试，
+        # 否则每次 observe / act 都白等 5 秒；显式 ocr=true 照试
+        if reuse and candidates and time.time() < self.ocr_down_until:
+            table["ocr"] = {"available": False, "filled": cached, "skipped": "backoff"}
+            return table
         if not candidates:
             # 认过没认出字的也会进缓存；这时说「没有弱标签」会误导人去怀疑动作表
             missed = any(a.get("from") in weak and self.ocr_cache.get(str(a.get("hash"))) == ""
@@ -1492,7 +1504,9 @@ class McpServer:
             loop = asyncio.get_running_loop()
             ocr = await loop.run_in_executor(None, run_fast_ocr, shot["data"], candidates, ratio)
         except Exception as e:  # noqa: BLE001
-            table["ocr"] = {"available": False, "error": str(e)}
+            self.ocr_down_until = time.time() + OCR_BACKOFF
+            table["ocr"] = {"available": False, "error": "%s（%d 分钟内不再自动 OCR，要认字传 ocr=true 或截图）"
+                            % (e, OCR_BACKOFF // 60)}
             return table
         texts = ocr.pop("texts", None) or {}
         # 认出来的和没认出来的都记下来，避免同一屏反复截图重认

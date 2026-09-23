@@ -292,6 +292,30 @@ class OcrLabelTest(unittest.TestCase):
         self.assertEqual(table["actions"][1]["label"], "开始")
         self.assertEqual(table["actions"][2]["from"], "source")
 
+    def test_auto_ocr_backs_off_after_a_failure(self):
+        server = load_server()
+        mcp = server.McpServer.__new__(server.McpServer)
+        mcp.ocr_cache, mcp.ocr_down_until = {}, 0
+        shots = []
+
+        async def invoke(name, args):
+            shots.append(name)
+            raise RuntimeError("本地 OCR 超时（5 秒）")
+        mcp.invoke = invoke
+
+        def table():
+            return {"actions": [{"hash": 5, "label": "btn_get", "from": "name", "role": "button",
+                                 "screenRect": {"x": 0, "y": 0, "width": 40, "height": 20}}]}
+        first = asyncio.run(mcp.enrich_table_with_ocr({}, table(), reuse=True))
+        self.assertIn("分钟内不再自动 OCR", first["ocr"]["error"])
+        # 远程桌面断开后每次都卡满超时：接下来自动触发的不再截图重试
+        second = asyncio.run(mcp.enrich_table_with_ocr({}, table(), reuse=True))
+        self.assertEqual(second["ocr"].get("skipped"), "backoff")
+        self.assertEqual(len(shots), 1)
+        # 显式 ocr=true 照试
+        asyncio.run(mcp.enrich_table_with_ocr({"ocr": True}, table(), reuse=False))
+        self.assertEqual(len(shots), 2)
+
     def test_ocr_spaces_are_squashed_and_garbage_is_kept_out(self):
         server = load_server()
         table = {"actions": [
