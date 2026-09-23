@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.9";
+    var VERSION = "1.7.10";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1087,13 +1087,35 @@
 
     // 拖到目标上：先按住不动 holdMs（不少拖动要长按才起步：技能格按住 0.6 秒才开始拖），
     // 再每 40ms 挪一步、分 14 步挪过去，到了停 150ms 再松手，让拖动代理跟得上、落点判定看得到最后的位置
-    function dragToPath(from, to, holdMs) {
+    // 起点在滚动列表里时（技能列表是竖着滚的），斜着拖的竖直分量会先够到列表的滚动阈值，
+    // 列表把这次触摸当成滚动、拖动还没起步就被取消（验收里第一次拖技能只把列表滚了一下）。
+    // 这时先沿着和滚动方向垂直的方向挪出去，再走另一段
+    function dragToPath(from, to, holdMs, axis) {
         var pts = [{ x: from.x, y: from.y }, { x: from.x, y: from.y, wait: holdMs }];
-        for (var i = 1; i <= 14; i++) {
-            pts.push({ x: round(from.x + (to.x - from.x) * i / 14), y: round(from.y + (to.y - from.y) * i / 14), wait: 40 });
-        }
+        var corner = axis === "v" ? { x: to.x, y: from.y } : axis === "h" ? { x: from.x, y: to.y } : null;
+        var legs = corner ? [[from, corner, 7], [corner, to, 7]] : [[from, to, 14]];
+        legs.forEach(function (leg) {
+            for (var i = 1; i <= leg[2]; i++) {
+                pts.push({ x: round(leg[0].x + (leg[1].x - leg[0].x) * i / leg[2]),
+                    y: round(leg[0].y + (leg[1].y - leg[0].y) * i / leg[2]), wait: 40 });
+            }
+        });
         pts.push({ x: to.x, y: to.y, wait: 150 });
         return pts;
+    }
+
+    // 往上找最近的滚动容器，看它往哪个方向滚：v 竖、h 横，不在滚动容器里是 null
+    function scrollAxisOf(o) {
+        for (var c = o, depth = 0; c && depth < 10; c = c.parent, depth++) {
+            var vp = c.viewport;
+            if (!vp) continue;
+            try {
+                if (vp.contentHeight - c.height > 1 && c.scrollPolicyV !== "off") return "v";
+                if (vp.contentWidth - c.width > 1 && c.scrollPolicyH !== "off") return "h";
+            } catch (e) {}
+            return null;
+        }
+        return null;
     }
 
     // 从 pt 按住，拖出 owner 的边界再松手：多给 40px，免得正好落在边上
@@ -3522,8 +3544,8 @@
                                     var toSel = stableSelector(toRes.o);
                                     if (toSel) record.to.sel = toSel;
                                 }
-                                await performGesture(dragToPath(pt, dst, step.holdMs !== undefined ? Math.max(+step.holdMs, 0) : 700),
-                                    method, 0, o);
+                                await performGesture(dragToPath(pt, dst, step.holdMs !== undefined ? Math.max(+step.holdMs, 0) : 700,
+                                    scrollAxisOf(o)), method, 0, o);
                                 record.drag = "to";
                             } else if (dir) {
                                 await performGesture(dragPath(pt, drag ? drag.owner : o, dir), method,
