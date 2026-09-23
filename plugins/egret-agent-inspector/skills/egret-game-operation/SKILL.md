@@ -40,7 +40,7 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 规则：
 
 - 用 `i` 编号必须带上 `marker`。界面已经变了会返回 `stale` 和新动作表且**不执行任何点击**，照新表重新选即可，这是设计好的行为，不是错误。
-- 路线已经确认时一次给多步：`{"steps": [{"op": "dismiss", "optional": true}, {"qaName": "MainPanel__btn_pve"}]}`。**`i` 编号只对第一步有效**，后续步骤用 `hash`/`qaName`/`id`/`text` 查询条件或 `op`。
+- 路线已经确认时一次给多步：`{"steps": [{"op": "dismiss", "optional": true}, {"qaName": "MainPanel__btn_pve"}]}`。各步的 `i` 都指当前这张表；要点前面步骤打开的新界面里的东西，用 `hash`/`qaName`/`id`/`text` 查询条件或 `op`。
 - 每步可加 `expect`（查询条件）校验结果，不满足就停在那一步；加 `optional` 则该步失败不影响后续。
 - `egret_act` 已经等过界面稳定，普通点击后不要再补等待。只有明确的长加载、网络等待才用 `{"op": "wait", "until": {...}, "timeoutMs": 15000}`。
 

@@ -186,6 +186,7 @@ class FakeExtension:
         self.calls = []
         self.page_params = []
         self.project = None
+        self.panel = None
 
     async def connect(self):
         self.reader, self.writer = await asyncio.open_connection("127.0.0.1", PORT)
@@ -252,6 +253,8 @@ class FakeExtension:
                               captureSize={"width": 100, "height": 100})
             if self.project:
                 result["project"] = self.project
+            if self.panel:
+                result["panel"] = self.panel
             if method == "act":
                 result.update(executed=[{"op": "tap"}], stopped="done", elapsedMs=12)
         elif method == "locate":
@@ -383,6 +386,12 @@ class McpServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(text.splitlines()[1].startswith("技能 这是 Splan 项目页面"), text)
             self.assertIn("splan-control", text)
             self.assertIn("splan-battle", text)
+            self.assertNotIn("splan-login", text)
+            # 登录页才提换号技能
+            ext.panel = {"className": "newLogin.NewLogin"}
+            _, text = await self.call_text("egret_observe", {})
+            self.assertIn("splan-login", text)
+            ext.panel = None
             _, text = await self.call_text("egret_act", {"marker": "m1", "steps": [{"i": 1}]})
             self.assertNotIn("splan-control", text)
             ext.project = None
@@ -1201,6 +1210,101 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
     delete window.MFC;
     out.stageReads = Array.from(new Set(stageReads)).slice(0, 12);
 
+    // 同一屏先点「随机」再点「确定」：各步的编号都指 agent 看到的那张表，第一步改了输入框的字也照点第二步
+    const nickBox = item("eui.EditableText", "nickInput", hud, { x: 300, y: 300, width: 150, height: 30 }, { text: "旧名字" });
+    const randBtn = item("eui.Button", "randomName", hud, { x: 460, y: 300, width: 40, height: 30 }, { text: "随机" });
+    const nickOk = item("eui.Button", "nickOk", hud, { x: 510, y: 300, width: 60, height: 30 }, { text: "起好了" });
+    listenOn(randBtn);
+    listenOn(nickOk);
+    const nickTaps = [];
+    randBtn.addEventListener("touchTap", function () { nickTaps.push("rand"); nickBox.text = "新名字" + nickTaps.length; }, null);
+    nickOk.addEventListener("touchTap", function () { nickTaps.push("ok"); }, null);
+    let nickTable = t.buildActionTable({ limit: 60 });
+    const rowOf = (tb, o) => tb._entries.filter(a => a.hash === o.hashCode)[0];
+    const bothNick = await t.handlers.act({ marker: nickTable.marker, steps: [{ i: rowOf(nickTable, randBtn).i }, { i: rowOf(nickTable, nickOk).i }],
+        quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.sameTableTaps = nickTaps.slice();
+    out.sameTableErrors = bothNick.executed.map(e => e.error || null);
+    // 第一步把第二步的目标关掉了：照实报「不在了」，不去点别的
+    randBtn.addEventListener("touchTap", function () { remove(nickOk); }, null);
+    nickTable = t.buildActionTable({ limit: 60 });
+    const goneNick = await t.handlers.act({ marker: nickTable.marker, steps: [{ i: rowOf(nickTable, randBtn).i }, { i: rowOf(nickTable, nickOk).i }],
+        quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.goneTaps = nickTaps.slice(2);
+    out.goneError = goneNick.executed[1] && goneNick.executed[1].error || null;
+    remove(nickBox);
+    remove(randBtn);
+
+    // ---- Splan（有全局 MFC）：直接读游戏的对白、说明层、引导、会话状态
+    const splanRoot = item("game.RootLayer", "rootLayer", stage, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
+    window.MFC = { rootLayer: splanRoot };
+    // NoNo 对白：逐字打出来，打完之前点了不算；打完点一下推进一条，三条推完就收起
+    const nono = item("NoNoDialog", null, splanRoot, { x: 0, y: 0, width: 800, height: 480 });
+    listenOn(nono);
+    Object.assign(nono, { step: 0, typeIndex: 0, m_dict: ["嘀嘀嘀，目标已完全清醒", "检测到你没有精灵伙伴", "滴···确认完毕！"],
+        mcMask: { alpha: 0.7 } });
+    nono.contents = nono.m_dict;
+    let earlyTaps = 0;
+    const typing = setInterval(() => { const line = nono.m_dict[nono.step]; if (line && nono.typeIndex < line.length) nono.typeIndex++; }, 40);
+    nono.addEventListener("touchTap", function () {
+        if (nono.typeIndex < nono.m_dict[nono.step].length) { earlyTaps++; return; }
+        nono.step++;
+        nono.typeIndex = 0;
+        if (nono.step >= nono.m_dict.length) remove(nono);
+    }, null);
+    window.NoNoManager = { _instance: { nonoDialog: nono } };
+    out.nonoMode = t.buildActionTable({}).mode;
+    const nonoAct = await t.handlers.act({ steps: [{ op: "advance" }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    clearInterval(typing);
+    out.nonoAdvance = { advanced: nonoAct.executed[0].result.advanced, gone: !nono.stage, earlyTaps };
+    delete window.NoNoManager;
+
+    // 新手战斗的说明层：rootLayer 上拉满全屏的 Rect 压着技能，点技能时先替它点掉
+    let skillTaps = 0;
+    const skillBtn = item("eui.Group", "skill_10006", splanRoot, { x: 300, y: 380, width: 120, height: 80 });
+    listenOn(skillBtn);
+    skillBtn.addEventListener("touchTap", function () { skillTaps++; }, null);
+    const introCover = item("eui.Rect", null, splanRoot, { x: 0, y: 0, width: 800, height: 480 });
+    introCover.alpha = 0.7;
+    listenOn(introCover);
+    introCover.addEventListener("touchTap", function () { remove(introCover); }, null);
+    out.coverMode = t.buildActionTable({}).mode;
+    const coverAct = await t.handlers.act({ steps: [{ hash: skillBtn.hashCode }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.coverTap = { cleared: coverAct.executed[0].cleared || null, error: coverAct.executed[0].error || null,
+        skillTaps, gone: !introCover.stage };
+
+    // 引导：目标直接读 _guideTapTarget；遮罩还在淡入时 recommended 等它落定再点
+    const guidePanel = item("guideMask.GuideMask", "GuideMask", splanRoot, { x: 0, y: 0, width: 800, height: 480 }, { solid: false });
+    guidePanel.bg = { touchEnabled: false };
+    window.GuideMaskManager = { _instance: { guidePanel, _guideTapTarget: skillBtn } };
+    const guideRec = t.buildActionTable({}).recommendedTarget;
+    out.guideTarget = guideRec && guideRec.reason === "guide-hole" && guideRec.target.hash === skillBtn.hashCode;
+    guidePanel.alpha = 0.4;
+    setTimeout(() => { guidePanel.alpha = 1; }, 500);
+    const guideStart = Date.now();
+    await t.handlers.act({ steps: [{ op: "recommended" }], quietMs: 50, timeoutMs: 200, turnMs: 0 });
+    out.guideWait = { waited: Date.now() - guideStart >= 400, skillTaps };
+    delete window.GuideMaskManager;
+    remove(guidePanel);
+    remove(skillBtn);
+
+    // 被踢下线：表上直接给出重开页面的提示
+    window.MFC.userInfo = {};
+    window.MFC.inGameState = 0;
+    out.session = t.buildActionTable({}).session || null;
+    delete window.MFC.userInfo;
+
+    // 图片字按钮的固定叫法：登录页的进入游戏、入场动画的跳过
+    const startBtn = item("eui.Image", "btn_start", splanRoot, { x: 360, y: 400, width: 80, height: 40 }, { listener: true });
+    startBtn.qaName = "NewLogin__btn_start";
+    const skipBtn = item("eui.Image", null, splanRoot, { x: 700, y: 20, width: 60, height: 30 }, { listener: true });
+    skipBtn.source = "resource/main/ui/common/new_seer_skipBtn.png";
+    out.splanLabels = t.buildActionTable({ limit: 60 }).actions.map(a => a.label).filter(l => l === "进入游戏" || l === "跳过动画");
+    remove(startBtn);
+    remove(skipBtn);
+    remove(splanRoot);
+    delete window.MFC;
+
     // 窗口被挡住时游戏不刷新：observe、act 直接拒绝，别交回一张只剩图层的表
     document.hidden = true;
     let hiddenTaps = 0;
@@ -1332,6 +1436,34 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertEqual(data["hiddenErrors"], ["页面在后台", "页面在后台"])
         self.assertEqual(data["hiddenTaps"], 0)
 
+
+    def test_splan_nono_dialog_advances_after_typing(self):
+        data = self.run_probe()
+        self.assertEqual(data["nonoMode"], "dialogue-continue")
+        self.assertEqual(data["nonoAdvance"], {"advanced": 3, "gone": True, "earlyTaps": 0})
+
+    def test_splan_fight_intro_cover_is_cleared_before_the_tap(self):
+        data = self.run_probe()
+        self.assertEqual(data["coverMode"], "guide-continue")
+        self.assertEqual(data["coverTap"], {"cleared": "新手战斗说明层", "error": None, "skillTaps": 1, "gone": True})
+
+    def test_splan_guide_target_and_fade_in_wait(self):
+        data = self.run_probe()
+        self.assertTrue(data["guideTarget"])
+        self.assertEqual(data["guideWait"], {"waited": True, "skillTaps": 2})
+
+    def test_splan_lost_session_and_fixed_labels(self):
+        data = self.run_probe()
+        self.assertEqual(data["session"]["reason"], "kicked")
+        self.assertTrue(data["session"]["lost"])
+        self.assertEqual(sorted(data["splanLabels"]), ["跳过动画", "进入游戏"])
+
+    def test_later_steps_resolve_numbers_against_the_table_the_agent_saw(self):
+        data = self.run_probe()
+        self.assertEqual(data["sameTableErrors"], [None, None])
+        self.assertEqual(data["sameTableTaps"], ["rand", "ok"])
+        self.assertEqual(data["goneTaps"], ["rand"])
+        self.assertIn("已不在显示列表里", data["goneError"])
     def test_only_pages_with_mfc_are_marked_splan(self):
         data = self.run_probe()
         self.assertIsNone(data["projectPlain"])
@@ -1682,6 +1814,17 @@ class RenderTableTest(unittest.TestCase):
         self.assertIn("执行 tap 等级:88（按住上滑）", text)
         self.assertIn("1 等级:88 item 按住上滑", text)
         self.assertIn("3 技能 button\n", text + "\n")
+
+    def test_lost_session_points_to_reload_and_cleared_cover_is_reported(self):
+        server = load_server()
+        text = server.render_action_table({"marker": "m10", "actions": [],
+            "session": {"lost": True, "reason": "alert", "text": "您已掉线，请重新登录", "url": "http://game.test/index.html"},
+            "executed": [{"op": "tap", "target": {"label": "抓"}, "cleared": "新手战斗说明层"}]})
+        self.assertIn('掉线 您已掉线，请重新登录：别点提示框，直接 egret_navigate {"url": "http://game.test/index.html"} 重开页面', text)
+        self.assertIn("执行 tap 抓（先点掉了新手战斗说明层）", text)
+        kicked = server.render_action_table({"marker": "m11", "actions": [],
+                                             "session": {"lost": True, "reason": "kicked", "url": "http://game.test/"}})
+        self.assertIn("掉线 被踢下线：", kicked)
 
     def test_close_failure_says_what_was_tried(self):
         server = load_server()

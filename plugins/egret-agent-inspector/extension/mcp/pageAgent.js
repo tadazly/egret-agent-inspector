@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.20";
+    var VERSION = "1.7.21";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -1348,8 +1348,154 @@
         return recommendationAt(panel, point, dialogue ? "dialogue-continue" : "guide-continue", preferred);
     }
 
+    // ---- Splan 项目（页面有全局 MFC）：直接读游戏自己的引导、对白、覆盖层状态，不靠遮挡关系去猜。
+    // 只读字段：GuideMaskManager / NoNoManager 的 getInstance() 首次调用会加载模块、改 stage.touchChildren
+    function splanStatic(name) {
+        if (!window.MFC) return null;
+        try {
+            var cls = window[name];
+            return cls && cls._instance || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // NoNo 对白：逐字打出来，打完之前点了没用；打完后点任意处推进一条。
+    // mcMask 透明的是带目标的对白（TalkAndClick），只能点引导高亮的目标
+    function splanNoNo() {
+        var mgr = splanStatic("NoNoManager");
+        var d = mgr && mgr.nonoDialog;
+        if (!d || !d.stage) return null;
+        try {
+            var line = d.m_dict && d.m_dict[d.step];
+            return { dialog: d, step: d.step, typed: !!(line && d.typeIndex >= line.length), pass: !!(d.mcMask && d.mcMask.alpha === 0) };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // 新手战斗的说明层（FightIntroAction）：直接挂在 rootLayer 上、拉满全屏的 eui.Rect，
+    // 宠物和血条被提到它上面，所以动作表不会整张被挡。点舞台任意处就关
+    function splanFightIntro() {
+        if (!window.MFC) return null;
+        var root = window.MFC.rootLayer, stage = getStage();
+        if (!root || !stage || !numChildren(root)) return null;
+        for (var i = numChildren(root) - 1; i >= 0; i--) {
+            var c = childAt(root, i);
+            if (!c || !/(^|\.)Rect$/.test(className(c)) || !c.visible || !c.touchEnabled || c.alpha < 0.3) continue;
+            var r = stageRect(c);
+            if (r && r.width >= stage.stageWidth * 0.9 && r.height >= stage.stageHeight * 0.9) return c;
+        }
+        return null;
+    }
+
+    // 引导：当前要点的对象挂在 GuideMaskManager._guideTapTarget 上；遮罩先等两帧再 400ms 淡入，
+    // 淡入期间全屏 bg 吞掉所有点击，要等 ready 再点
+    function splanGuide() {
+        var m = splanStatic("GuideMaskManager");
+        var gp = m && m.guidePanel;
+        if (!gp || !gp.stage || !gp.visible) return null;
+        var stage = getStage();
+        var target = m._guideTapTarget && m._guideTapTarget.stage && effectiveVisible(m._guideTapTarget) ? m._guideTapTarget : null;
+        return { panel: gp, target: target,
+            ready: gp.alpha === 1 && !(gp.bg && gp.bg.touchEnabled) && !!stage && stage.touchChildren !== false };
+    }
+
+    function splanGuiding() {
+        try {
+            return !!(window.MFC && window.frame && window.frame.GuideController && window.frame.GuideController.guideState === 1);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // 引导淡入、对白打字、引导步骤之间锁屏都只是过渡：等它落定再交表，省得 agent 对着半截状态决策
+    async function splanSettle(capMs) {
+        if (!window.MFC) return 0;
+        var start = Date.now();
+        while (Date.now() - start < capMs) {
+            var g = splanGuide(), nono = splanNoNo(), stage = getStage();
+            var pending = (g && !g.ready) || (nono && !nono.typed && !nono.pass) ||
+                (!g && !nono && splanGuiding() && stage && stage.touchChildren === false);
+            if (!pending) break;
+            await sleep(100);
+        }
+        return Date.now() - start;
+    }
+
+    function splanContinueTargetOf() {
+        if (!window.MFC) return null;
+        var stage = getStage();
+        if (!stage) return null;
+        var center = { x: stage.stageWidth / 2, y: stage.stageHeight / 2 };
+        var cover = splanFightIntro();
+        if (cover) return recommendationAt(cover, center, "guide-continue", cover);
+        var nono = splanNoNo();
+        if (nono && !nono.pass) {
+            var rec = recommendationAt(nono.dialog, center, "dialogue-continue", nono.dialog);
+            rec.splan = "nono";
+            return rec;
+        }
+        var g = splanGuide();
+        if (g && g.target) {
+            var r = stageRect(g.target);
+            if (!r || r.width < 2 || r.height < 2) return null;
+            var point = { x: round(r.x + r.width / 2), y: round(r.y + r.height / 2) };
+            // 目标中心不在洞里（只露出一角）时交给通用的挖洞判定去找能点的那一格
+            if (g.ready && !reaches(g.target, hitTest(point.x, point.y))) return null;
+            var hole = guideHoleRect(g.panel);
+            return {
+                reason: "guide-hole",
+                stagePoint: point,
+                screenPoint: stageToClient(point.x, point.y),
+                hole: hole ? { x: round(hole.x), y: round(hole.y), width: round(hole.width), height: round(hole.height) } : null,
+                target: project(describe(g.target, { center: true }), ["hash", "className", "id", "name", "qaName", "text", "source",
+                    "touchable", "enabled", "selected", "currentState"])
+            };
+        }
+        return null;
+    }
+
+    // 掉线 / 被踢：确认后游戏会自己重载，但提示框常被引导遮罩压住点不到（游戏缺陷），直接重开页面最快
+    function splanSession() {
+        if (!window.MFC) return null;
+        var text = null, url = typeof location !== "undefined" && location.href || null;
+        try {
+            var pm = window.MFC.popupMgr, list = pm && pm._popupList, top = list && list[list.length - 1];
+            if (top && window.alert && window.alert.SimpleAlert && top instanceof window.alert.SimpleAlert && top.stage) {
+                text = String(top._txt && top._txt.lastHtmlText || "").replace(/<[^>]+>/g, "").trim() || null;
+            }
+        } catch (e) {}
+        if (text && /掉线|已下线|连接已断开|重新登录|重新登陆|长时间未登录|重复登录|被踢/.test(text)) {
+            return { lost: true, reason: "alert", text: text.slice(0, 40), url: url };
+        }
+        try {
+            if (!window.MFC.userInfo) return null;
+            var S = window.GlobalSocket && window.GlobalSocket.PROTOCOL_SOCKET;
+            var reason = window.MFC.inGameState === 0 ? "kicked"
+                : S && S.connected === false && !S._reconnecting && S._reconnectTimes >= 6 ? "reconnect-gave-up"
+                : S && S.connected === false && S._socketClosedTime && Date.now() - S._socketClosedTime > 35000 ? "disconnected" : null;
+            return reason ? { lost: true, reason: reason, text: text, url: url } : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // 图片字按钮在源码里的固定叫法，不用 OCR 猜
+    var SPLAN_QA_LABELS = { NewLogin__btn_start: "进入游戏", NewLogin__btn_account: "切换账号",
+        SimpleAlert__cancel: "取消" };
+
+    function splanFixedLabel(o) {
+        if (!window.MFC) return null;
+        var qa = qaNameOf(o);
+        if (qa && SPLAN_QA_LABELS[qa]) return SPLAN_QA_LABELS[qa];
+        var src = sourceOf(o);
+        if (src && /new_seer_skipBtn/.test(src)) return "跳过动画";
+        return null;
+    }
+
     function continueTargetOf(panel) {
-        return guideTargetOf(panel) || passiveContinueTargetOf(panel);
+        return splanContinueTargetOf() || guideTargetOf(panel) || passiveContinueTargetOf(panel);
     }
 
     function continuationSignature(panel, recommendation) {
@@ -1359,7 +1505,9 @@
             var t = effectiveVisible(o) && textOf(o);
             if (t && texts.indexOf(t) < 0) texts.push(t);
         });
-        return [hashOf(panel), recommendation && recommendation.reason, texts.join("|")].join("::");
+        // NoNo 对白逐字打出，文字一直在变；推没推进看它自己的条数
+        var nono = recommendation && recommendation.splan === "nono" ? splanNoNo() : null;
+        return [hashOf(panel), recommendation && recommendation.reason, nono ? "nono" + nono.step : texts.join("|")].join("::");
     }
 
     function normalizeSemantic(value) {
@@ -2070,6 +2218,8 @@
     // 动作表标签：自身文案 > 子树文案 > qaName 部件名 > id > name > 图片资源名 > 短类名。
     // from 为 text/childText 时是人类可读文案；其余是弱标签，图片字要靠 OCR 补。
     function actionLabelOf(o) {
+        var fixed = splanFixedLabel(o);
+        if (fixed) return { label: fixed, from: "text" };
         var own = tidy(textOf(o));
         if (own) return { label: own, from: "text" };
         var texts = [], source = null, stack = [], scanned = 0;
@@ -2635,6 +2785,8 @@
         };
         // 后台标签页里 rAF 会被节流，加载和动画会看起来卡住：明确告诉调用方，而不是让它一直等
         if (document.hidden) out.warnings = ["页面在后台，浏览器会节流游戏动画与加载；请用户把浏览器窗口恢复到前台"];
+        var session = splanSession();
+        if (session) out.session = session;
         if (!root) {
             out.mode = "empty";
             out.marker = "empty";
@@ -3021,14 +3173,18 @@
         return { changed: changed, waitedMs: Date.now() - start };
     }
 
-    // 把动作表里的编号解析回真实对象：编号只有在指纹仍然成立时才可用
-    function resolveFastTarget(step, fresh) {
+    // 把动作表里的编号解析回真实对象：编号只有在指纹仍然成立时才可用。
+    // seen 是 agent 做决策时看到的那张表：一次 act 里所有步骤的编号都按它解析
+    function resolveFastTarget(step, fresh, seen) {
         if (step.i !== undefined && step.i !== null) {
             if (!fresh) throw new Error("动作表已过期，编号不再有效：按返回的新动作表重新决策");
-            var entry = lastEntries.filter(function (a) { return a.i === +step.i; })[0];
+            var entry = (seen || lastEntries).filter(function (a) { return a.i === +step.i; })[0];
             if (!entry) throw new Error("动作表里没有编号 " + step.i);
-            var o = byHash(entry.hash);
-            if (!o) throw new Error("编号 " + step.i + "（" + entry.label + "）对应的对象已不在显示列表里");
+            var o = null;
+            try { o = byHash(entry.hash); } catch (e) {}
+            if (!o || (seen && !effectiveVisible(o))) {
+                throw new Error("编号 " + step.i + "（" + entry.label + "）对应的对象已不在显示列表里");
+            }
             return { o: o, entry: entry };
         }
         var target;
@@ -3483,6 +3639,9 @@
             // 快到点就停手先返回，已经做了什么照实报，agent 接着再发一次同样的步骤即可
             var deadline = started + Math.max(+p.budgetMs || 45000, 5000);
             var sceneBefore = stackSnapshot();
+            // 同一次 act 里各步的编号都指 agent 看到的那张表（[{"i":3},{"i":4}]：先点随机名字再点确定）。
+            // 执行中途有的步骤会重扫动作表，不能拿那时的 lastEntries 解析
+            var seenEntries = lastEntries;
             var executed = [], stopped = "done";
             // 每步出招时的顶层面板：收尾时拿来复核「解锁了」其实是不是已经结算换了界面
             var turnTops = [];
@@ -3502,18 +3661,12 @@
                 try { record.from = panelKey(sceneInfo().top); } catch (e) {}
                 var tapTarget = null, tapWasLocked = null;
                 try {
-                    if (n > 0 && step.i !== undefined && step.i !== null) {
-                        // 验收里 agent 反复写 [{"i":10},{"i":26},{"i":4}]：以为后面几张表的编号能提前用上。
-                        // 原来只报「动作表已过期」，它看不出错在哪，下一次还这么写
-                        throw new Error("第 " + (n + 1) + " 步用了编号 i：编号只对第一步有效，第一步执行后界面变了、编号会重排。" +
-                            "后面的步骤改用查询条件（{\"text\":\"表里显示的标签\"}、{\"qaName\":…}），或看完新表再发下一次 act");
-                    }
                     if (op === "tap" || op === "text" || op === "swipe" || op === "drag") {
                         // 填字时 text 是要填的内容，不能拿它当查询条件去找目标
                         var findQuery = op === "text" ? Object.assign({}, step, { text: undefined }) : step, resolved = null;
                         for (var findStart = Date.now(); !resolved;) {
                             try {
-                                resolved = resolveFastTarget(findQuery, fresh);
+                                resolved = resolveFastTarget(findQuery, fresh, seenEntries);
                             } catch (err) {
                                 // 多步里后面的目标常常还没出来：点完「挑战」要先进战斗、技能栏滑进来才点得到。
                                 // 验收里照发的路线就这样一进战斗就报「找不到」。后面的步骤等它最多 3 秒再判
@@ -3549,7 +3702,7 @@
                             var preLock = lockedAncestor(o);
                             if (preLock && preCap > 0 && (turnLock(preLock) || +step.repeat > 1)) {
                                 record.unlock = await waitForUnlock(o, preLock, preCap,
-                                    fresh && lastTable && lastTable._entries);
+                                    n === 0 && fresh && lastTable && lastTable._entries);
                                 if (record.unlock.reason === "new-controls") {
                                     throw new Error("没有点：它所在的一组控件锁着，游戏在等你先做别的决定（冒出了 " +
                                         record.unlock.added.join("、") + "），按新表先处理");
@@ -3569,8 +3722,22 @@
                             // 刚点开的下拉框、弹窗还在入场动画里，目标会被正在滑入的底图挡一下：
                             // 等它落定再判「被遮挡」，别让 agent 为一段动画多花一轮
                             for (var occStart = Date.now(); !reaches(o, hit) && !probePoint(o, true) &&
-                                Date.now() - occStart < 1200 && !step.force;) {
+                                Date.now() - occStart < 1200 && !step.force && !splanFightIntro();) {
                                 await sleep(100);
+                                r = stageRect(o) || r;
+                                if (step.offsetX === undefined && step.offsetY === undefined) {
+                                    pt = { x: round(r.x + r.width / 2), y: round(r.y + r.height / 2) };
+                                }
+                                hit = hitTest(pt.x, pt.y);
+                            }
+                            // 新手战斗的说明层压着技能栏：它点任意处就关，替 agent 先点掉再点目标，省一轮
+                            var introCover = !reaches(o, hit) && splanFightIntro();
+                            if (introCover && hit && isSelfOrAncestor(introCover, hit)) {
+                                var stageNow = getStage();
+                                await performGesture([{ x: round(stageNow.stageWidth / 2), y: round(stageNow.stageHeight / 2) }], method, 50, null);
+                                await sleep(300);
+                                await splanSettle(Math.min(2500, deadline - Date.now() - 3000));
+                                record.cleared = "新手战斗说明层";
                                 r = stageRect(o) || r;
                                 if (step.offsetX === undefined && step.offsetY === undefined) {
                                     pt = { x: round(r.x + r.width / 2), y: round(r.y + r.height / 2) };
@@ -3599,7 +3766,7 @@
                                     record.to = { label: "dx=" + (+to.dx || 0) + ",dy=" + (+to.dy || 0) };
                                 } else {
                                     if (!Object.keys(to).length) throw new Error("drag 需要 to：{\"i\":7}、查询条件或 {\"dx\":-200,\"dy\":0}");
-                                    var toRes = resolveFastTarget(to, fresh), tr = stageRect(toRes.o);
+                                    var toRes = resolveFastTarget(to, fresh, seenEntries), tr = stageRect(toRes.o);
                                     if (!tr) throw new Error("drag 的目标没有有效包围盒");
                                     dst = { x: round(tr.x + tr.width / 2), y: round(tr.y + tr.height / 2) };
                                     record.to = { label: toRes.entry ? toRes.entry.label : actionLabelOf(toRes.o).label };
@@ -3620,7 +3787,17 @@
                         }
                     } else if (op === "recommended") {
                         // 与 observe 用同一套判定，保证 agent 看到的 recommendedTarget 就是这里点的那个
-                        var rec = buildActionTable(tableArgs).recommendedTarget;
+                        // 连发 [{"op":"recommended"},{"op":"recommended"}] 时下一处引导要等上一步的界面打开、遮罩淡入才出现：
+                        // 验收里第二步总是报「没有 recommendedTarget」，白白多一轮
+                        var rec = null;
+                        for (var recStart = Date.now(); ;) {
+                            await splanSettle(Math.min(2500, deadline - Date.now() - 3000));
+                            rec = buildActionTable(Object.assign({}, tableArgs, { peek: true })).recommendedTarget;
+                            // 后面的步骤是照着引导连发的：途中冒出来的弹窗 agent 没见过，不替它点遮罩关掉
+                            if (rec && n > 0 && rec.reason === "modal-backdrop-dismiss") rec = null;
+                            if (rec || Date.now() - recStart > 2000 || deadline - Date.now() < 4000) break;
+                            await sleep(200);
+                        }
                         if (!rec) throw new Error("当前没有 recommendedTarget：重新 observe 后按动作表选目标");
                         await performGesture([rec.stagePoint], method, 50, null);
                         record.target = { reason: rec.reason, stagePoint: rec.stagePoint,
@@ -3639,7 +3816,7 @@
                         if (!record.result.ok && !step.optional) stopped = "close-failed";
                     } else if (op === "scroll") {
                         var scroller = step.i !== undefined || hasCriteria(step)
-                            ? resolveFastTarget(step, fresh).o
+                            ? resolveFastTarget(step, fresh, seenEntries).o
                             : byHash((lastTable && lastTable.scrollers && lastTable.scrollers[0] || {}).hash);
                         if (!scroller) throw new Error("没有可滚动的目标：传 i/hash，或先 observe 看 scrollers");
                         record.target = { hash: hashOf(scroller), label: actionLabelOf(scroller).label };
@@ -3731,10 +3908,11 @@
                     else stopped = "error";
                 }
                 executed.push(record);
-                // 编号来自上一次快照；执行完第一步后界面已变，后续步骤必须用查询条件或 op 定位
-                fresh = false;
                 if (stopped !== "done") break;
             }
+            // Splan 的引导淡入、对白打字、引导步骤间锁屏：落定再交表。验收里 act 在遮罩淡入前就返回，
+            // agent 看到的是底下的面板，去点「关闭」，下一轮才发现是引导
+            await splanSettle(Math.max(0, Math.min(2500, deadline - Date.now() - 2000)));
             // 加载过场里没有可点目标，直接在这一次调用里等它过去，省掉一整轮往返
             var table = buildActionTable(tableArgs);
             var loadingCap = Math.min(Math.max(p.loadingMs !== undefined ? +p.loadingMs : 6000, 0), 30000);
@@ -3821,6 +3999,15 @@
                 } else if (panelHash !== chainPanelHash || target.reason !== chainReason) {
                     stopped = "continuation-changed";
                     break;
+                }
+                // NoNo 对白没打完字时点了不算数（监听还没挂上），验收里 advance 因此「推进 0 次」
+                if (target.splan === "nono") {
+                    for (var typeStart = Date.now(); Date.now() - typeStart < 4000;) {
+                        var nonoNow = splanNoNo();
+                        if (!nonoNow || nonoNow.typed || nonoNow.pass) break;
+                        await sleep(80);
+                    }
+                    await sleep(60);
                 }
                 var before = continuationSignature(beforeScene.top, target);
                 var clickedAt = Date.now();
@@ -4164,6 +4351,7 @@
                     debugFlag: W.DEBUG === true,
                     debugUi: !!W.debugUI,
                     testCommand: typeof W.cs_test_cmd === "function" && !!(W.MFC.online && W.MFC.online.send),
+                    login: typeof W.debugLogin === "function",
                     commonCommands: ["addItem", "addCoin", "addEnergy", "setAttr", "processTask"]
                 };
             }
@@ -4259,6 +4447,23 @@
             if (action === "dispatch") {
                 if (!p.event) throw new Error("需要提供 event");
                 return { via: dispatch(p.event, p.payload), event: p.event };
+            }
+
+            if (action === "login") {
+                // 内网免密切换账号，走 config/debug.js 的 debugLogin：只能在登录界面用，不存在的账号服务端自动建号
+                var loginFn = W.debugLogin;
+                if (typeof loginFn !== "function") {
+                    throw new Error("页面的 config/debug.js 里没有 debugLogin（内网免密切换账号），需要先更新 debug.js");
+                }
+                var loginCall = p.newAccount ? loginFn.newAccount(p.prefix) : loginFn(p.account);
+                var loginRes = await Promise.race([loginCall, sleep(50000).then(function () {
+                    return { ok: false, pending: true, hint: "50 秒还没进服，稍后 egret_observe 看看停在哪" };
+                })]);
+                // 进服回调之后游戏数据才开始拉，等 userInfo 就位再交回去，agent 下一步直接 observe
+                if (loginRes && loginRes.ok) {
+                    for (var loginAt = Date.now(); !W.MFC.userInfo && Date.now() - loginAt < 8000;) await sleep(200);
+                }
+                return loginRes;
             }
 
             if (action === "testCommand") {
