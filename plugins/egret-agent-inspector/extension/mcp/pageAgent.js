@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.10";
+    var VERSION = "1.7.11";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -2489,6 +2489,12 @@
     // 全屏 HUD（主城工具栏）只在四周摆按钮，中间是透明的，点下去落在地图上。按面积它是「全屏面板」，
     // 当成模态就把地图上的入口（星际探索的飞船、各种建筑）整个挡在动作表外面，agent 只能去点地图上的文字标签。
     // 在中间区域打一片点：大多数点穿过它落到下层、且下层不是遮罩，它就不是模态。
+    // 占住大半个舞台、点不穿的才算模态面板；主城 HUD 这种四周摆按钮、中间透明的不算
+    function isModalPanel(o) {
+        var stage = getStage(), r = o && stageRect(o);
+        return !!(r && r.width * r.height >= stage.stageWidth * stage.stageHeight * 0.6) && !passesThrough(o, r);
+    }
+
     function passesThrough(panel, r) {
         // 取样只在面板和舞台的交集里：滚动列表的内容能把面板包围盒撑到几百万像素宽（星际探索面板实测 7864355px），
         // 按比例取的点全落在舞台外，命中的是 stage 本身，会被误算成「穿透」
@@ -2555,9 +2561,7 @@
         var scoped = p.rootHash !== undefined && p.rootHash !== null;
         // 顶层「面板」可能只是一块浮动提示；这种时候把整个舞台都收进动作表，
         // 否则地图上的 NPC、入口这些真正的目标会被漏掉。占住大半个舞台的才当模态处理。
-        var topRect = si.top && stageRect(si.top);
-        var stageArea = stage.stageWidth * stage.stageHeight;
-        var modal = !!(topRect && topRect.width * topRect.height >= stageArea * 0.6) && !passesThrough(si.top, topRect);
+        var modal = isModalPanel(si.top);
         var root = scoped ? byHash(p.rootHash) : (modal ? si.top : stage);
         // 整个舞台进表时（主城：HUD + 地图）三十行装不下：按阅读顺序截，屏幕最下面那排工具栏（背包、商店、任务）
         // 整排被挤掉，agent 找背包花了十一次调用。没指定行数时给到上限
@@ -3924,6 +3928,13 @@
                     await sleep(250);
                     var settled = sceneInfo().top;
                     if (!settled || hashOf(settled) !== hash) {
+                        // 一下都没点它就自己没了：是上一层的退场动画、特效层（EffectContainer），不是要关的界面。
+                        // 下面露出来的是模态面板就接着关它；主城 HUD 不算，免得把 HUD 当面板去点
+                        if (!tried.length && !p.handedOver && settled && isModalPanel(settled)) {
+                            var next = await handlers.closeTop(Object.assign({}, p, { handedOver: true }));
+                            next.passed = name;
+                            return next;
+                        }
                         return { ok: true, via: "gone", panel: name, tried: tried };
                     }
                     panel = settled;
