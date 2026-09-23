@@ -466,7 +466,7 @@ INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游�
 - act 返回里出现「路线」一行，说明这一步和之前走过的路线一样，后面给的就是上次紧接着的步骤；情况一样就照着一次发完，不一样（目标换了、弹窗不同）再按表决策。
 - 回合制战斗：点技能后 act 会等到下一回合能操作再返回；同一招要连着出时给 repeat，停下时看它说停在哪（换宠栏、结算、时限）。
 - 列表屏上只显示几条。要计数、筛选、挑目标时先用 egret_evaluate 的 $items(hash, it => …) 读全量数据，再用 op=scroll 的 toIndex 滚过去点；不要一屏屏滚着数。读数据可以，调业务方法改状态不行。
-- 动作表和 OCR 都定不下来，或要看布局、颜色、半透明遮罩、战斗画面时用 egret_screenshot；游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，视觉兜底该用就用。
+- 动作表和 OCR 都定不下来，或要看布局、颜色、半透明遮罩时用 egret_screenshot（回合制战斗里 act 已报回合状态和血量文字，不用截图）；游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，视觉兜底该用就用。
 - 目标不在动作表里（在别的子树、需要语义消歧）用 egret_locate；已知稳定标识用 egret_find。显示对象以 hash 标识，id 是组件在代码/EXML 中绑定的属性名；stageRect 是舞台坐标，screenRect 是页面视口 CSS 像素坐标。
 - 操作后界面没有预期变化时用 egret_get_errors 看页面报错；想知道某个控件背后是哪段代码用 egret_inspect_code。
 - 页面是 Splan 项目（splan_call probe 返回 MFC: true）时，动手前先读相关技能：通用操作和换技能在 splan-control，打战斗（进 PVE、出招、换精灵、结算）在 splan-battle，照做比自己摸索快。
