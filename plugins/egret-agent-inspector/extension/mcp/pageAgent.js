@@ -1,8 +1,11 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.4.7";
-    var BOOT_ID = Math.random().toString(36).slice(2, 10);
+    var VERSION = "1.4.13";
+    // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
+    // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
+    var BOOT_ID = window.__egretInspectorBootId ||
+        (window.__egretInspectorBootId = Math.random().toString(36).slice(2, 10));
     if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
@@ -718,6 +721,24 @@
 
     // 弹窗里的关闭控件：命名五花八门，按关键字 + 体积 + 靠右上角的程度打分。
     // allowBack 只给 op=close 这种明确要关掉当前面板的场景用，dismiss 保持严格，免得误点场景里的返回。
+    function closeScore(o, pr, allowBack) {
+        var r = stageRect(o);
+        if (!r || r.width < 10 || r.height < 10) return null;
+        if (r.width * r.height > pr.width * pr.height * 0.35) return null;
+        var tag = [bindId(o), qaNameOf(o), nameOf(o), sourceOf(o)].filter(Boolean).join(" ");
+        var t = textOf(o);
+        var score = 0;
+        if (CLOSE_RE.test(tag)) score += 10;
+        else if (allowBack && BACK_RE.test(tag)) score += 7;
+        if (t && CLOSE_TEXTS.indexOf(String(t).trim()) >= 0) score += 8;
+        else if (allowBack && t && BACK_TEXTS.indexOf(String(t).trim()) >= 0) score += 6;
+        if (!score) return null;
+        if (effectiveTouchable(o)) score += 2;
+        // 同分时取更靠右上、体积更小的，通常就是那个 X
+        score += (r.x - pr.x) / Math.max(pr.width, 1) - (r.y - pr.y) / Math.max(pr.height, 1);
+        return { o: o, score: score, rect: r };
+    }
+
     function findCloseControl(panel, allowBack) {
         var pr = stageRect(panel);
         if (!pr) return null;
@@ -725,21 +746,26 @@
         walk(panel, function (o) {
             if (o === panel) return;
             if (!o.visible || o.alpha === 0) return false;
-            var r = stageRect(o);
-            if (!r || r.width < 10 || r.height < 10) return;
-            if (r.width * r.height > pr.width * pr.height * 0.35) return;
-            var tag = [bindId(o), qaNameOf(o), nameOf(o), sourceOf(o)].filter(Boolean).join(" ");
-            var t = textOf(o);
-            var score = 0;
-            if (CLOSE_RE.test(tag)) score += 10;
-            else if (allowBack && BACK_RE.test(tag)) score += 7;
-            if (t && CLOSE_TEXTS.indexOf(String(t).trim()) >= 0) score += 8;
-            else if (allowBack && t && BACK_TEXTS.indexOf(String(t).trim()) >= 0) score += 6;
-            if (!score) return;
-            if (effectiveTouchable(o)) score += 2;
-            // 同分时取更靠右上、体积更小的，通常就是那个 X
-            score += (r.x - pr.x) / Math.max(pr.width, 1) - (r.y - pr.y) / Math.max(pr.height, 1);
-            if (!best || score > best.score) best = { o: o, score: score, rect: r };
+            var s = closeScore(o, pr, allowBack);
+            if (s && (!best || s.score > best.score)) best = s;
+        });
+        if (best) return best;
+        // FairyGUI 这类面板的父链上夹着 visible=false 的容器，遍历在那里被剪断，关闭键整个漏掉；
+        // 动作表靠网格命中扫描能看到它。这里按同一套办法在四边和角上补扫，
+        // 否则动作表第一行明明是 close，dismiss / close 和 mode 判断却说「没有关闭控件」。
+        var seen = {};
+        [0.03, 0.06, 0.1, 0.5, 0.9, 0.94, 0.97].forEach(function (fx) {
+            [0.03, 0.06, 0.1, 0.15, 0.22, 0.5, 0.88, 0.94].forEach(function (fy) {
+                var hit = hitTest(round(pr.x + pr.width * fx), round(pr.y + pr.height * fy));
+                for (var o = hit, hops = 0; o && o !== panel && hops < 6; o = o.parent, hops++) {
+                    var key = String(hashOf(o));
+                    if (seen[key]) break;
+                    seen[key] = true;
+                    if (!isSelfOrAncestor(panel, o)) continue;
+                    var s = closeScore(o, pr, allowBack);
+                    if (s && (!best || s.score > best.score)) best = s;
+                }
+            });
         });
         return best;
     }
@@ -1621,12 +1647,17 @@
         return { label: shortClass(o), from: "className" };
     }
 
+    var BACK_ROLE_RE = /(?:^|[\s_.\-])(?:back|return)(?:$|[\s_.\-])|返回/i;
+    var BACK_ROLE_CAMEL = /[a-z](?:Back|Return)(?:$|[A-Z_\s])/;
+
     var FAST_ROLES = [
         ["npc", /storyInteractObject|(^|[_-])npc(?:[_-]|$)/i],
         ["input", /inputText|textInput|editText|textField/i],
         ["close", /close|关闭|關閉|quit|dismiss|(?:^|[\s_-])btn_no(?:$|[\s_-])/i],
         ["confirm", /confirm|btn_yes|btn_ok|确定|確定|确认|確認|知道了|好的/i],
-        ["back", /back|return|返回/i],
+        // 只认实例名 / qaName / 文案，且要成词：类名里的 Return（SeerReturn2Component 是「老兵回归」）
+        // 和 background 这类前缀都不算返回键
+        ["back", function (blob, ids) { return BACK_ROLE_RE.test(ids) || BACK_ROLE_CAMEL.test(ids); }],
         ["tab", /tab|toggle|switch|radio|check/i],
         ["item", /item|cell|slot|card|grid|list/i]
     ];
@@ -1644,9 +1675,14 @@
     var BUTTON_TAG = /button|btn|tab|close|confirm|item|cell/i;
 
     function actionRoleOf(o, label, from) {
-        var tag = className(o) + " " + (nameOf(o) || "") + " " + (bindId(o) || "") + " " + (qaNameOf(o) || "");
+        var ids = (nameOf(o) || "") + " " + (bindId(o) || "") + " " + (qaNameOf(o) || "");
+        var tag = className(o) + " " + ids;
         var blob = tag + " " + (label || "");
-        for (var i = 0; i < FAST_ROLES.length; i++) if (FAST_ROLES[i][1].test(blob)) return FAST_ROLES[i][0];
+        var idBlob = ids + " " + (label || "");
+        for (var i = 0; i < FAST_ROLES.length; i++) {
+            var match = FAST_ROLES[i][1];
+            if (typeof match === "function" ? match(blob, idBlob) : match.test(blob)) return FAST_ROLES[i][0];
+        }
         if (BUTTON_TAG.test(tag)) return "button";
         // 弹窗正文、健康游戏忠告这类文字常常也挂着监听，标成 button 会诱导 agent 去点它。
         // 只看界面上真实的文案：qaName/资源名这类弱标签再长也不是正文。
@@ -1697,6 +1733,116 @@
             si.top.currentState || "", panelTexts(si.top, 400).join("|")].join("#"));
     }
 
+    // 列表条目的字段名：只挑标量。名字、等级、数量这类一眼能用来筛选的排最前，
+    // 其次是各种 xxxId，其它字段垫后——否则 modelId、featureId 会把 nick、level 挤出前几位
+    var FIELD_NAME = /^(name|nick|nickname|title|label|text|desc|level|lv|star|count|num|price|cost|type|state|status|quality|rank)$|name$|level$/i;
+    var FIELD_ID = /id$/i;
+
+    function fieldRank(k) {
+        return FIELD_NAME.test(k) ? 2 : FIELD_ID.test(k) ? 1 : 0;
+    }
+
+    function scalarFields(item, max) {
+        if (!item || typeof item !== "object") return [];
+        var keys = [];
+        for (var k in item) {
+            if (k.charAt(0) === "_" || k.charAt(0) === "$") continue;
+            var v;
+            try { v = item[k]; } catch (e) { continue; }
+            var t = typeof v;
+            if (t === "string" || t === "number" || t === "boolean") keys.push(k);
+        }
+        keys.sort(function (a, b) { return fieldRank(b) - fieldRank(a); });
+        return keys.slice(0, max);
+    }
+
+    // Scroller / List / DataGroup 都可以：返回真正持有 dataProvider 的那一层
+    function listOf(target) {
+        var o = typeof target === "number" || typeof target === "string" ? byHash(+target) : target;
+        if (!o) return null;
+        if (o.dataProvider && typeof o.dataProvider.getItemAt === "function") return o;
+        var vp = o.viewport;
+        if (vp && vp.dataProvider && typeof vp.dataProvider.getItemAt === "function") return vp;
+        return null;
+    }
+
+    // 读列表背后的全量数据：滚动一屏只看得到几条，靠它去数、去找目标既慢又会漏
+    function itemsOf(target, where, opts) {
+        var list = listOf(target);
+        if (!list) throw new Error("$items 需要 eui.List / DataGroup，或包着它的 Scroller（传 hash 或对象）");
+        opts = opts || {};
+        var dp = list.dataProvider;
+        var total = +dp.length || 0;
+        var limit = Math.min(Math.max(opts.limit !== undefined ? +opts.limit : 30, 1), 500);
+        var fields = opts.fields || scalarFields(total ? dp.getItemAt(0) : null, 6);
+        var pred = null;
+        if (typeof where === "function") pred = where;
+        else if (where && typeof where === "object") {
+            pred = function (it) {
+                return !!it && Object.keys(where).every(function (k) { return it[k] === where[k]; });
+            };
+        }
+        var rows = [], matched = 0;
+        for (var i = 0; i < total; i++) {
+            var it = dp.getItemAt(i);
+            if (pred) {
+                var ok = false;
+                try { ok = !!pred(it, i); } catch (e) {}
+                if (!ok) continue;
+            }
+            matched++;
+            if (rows.length >= limit) continue;
+            var row = { index: i };
+            if (it !== null && typeof it === "object") {
+                fields.forEach(function (f) {
+                    try { row[f] = it[f]; } catch (e) {}
+                });
+            } else {
+                row.value = it;
+            }
+            rows.push(row);
+        }
+        var result = { list: hashOf(list), total: total, matched: matched, fields: fields, rows: rows };
+        if (matched > rows.length) result.truncated = true;
+        return result;
+    }
+
+    // 把列表滚到第 index 条：先按比例跳，再用可见渲染器的 itemIndex 校正
+    async function scrollToIndex(scroller, index) {
+        var list = listOf(scroller);
+        var vp = scroller.viewport || list;
+        if (!list || !vp) throw new Error("toIndex 需要一个带 dataProvider 的列表");
+        var total = +list.dataProvider.length || 0;
+        if (!total) throw new Error("列表是空的");
+        index = Math.min(Math.max(Math.round(+index) || 0, 0), total - 1);
+        var viewH = scroller.height || vp.height || 0;
+        function maxScroll() { return Math.max((vp.contentHeight || 0) - viewH, 0); }
+        function visibleRange() {
+            var lo = Infinity, hi = -Infinity;
+            for (var c = 0; c < numChildren(vp); c++) {
+                var r = childAt(vp, c);
+                if (!r || !r.visible || typeof r.itemIndex !== "number" || r.itemIndex < 0) continue;
+                // 虚拟布局会多留几个渲染器在视口外，按坐标筛掉
+                if (r.y + (r.height || 0) <= vp.scrollV || r.y >= vp.scrollV + viewH) continue;
+                lo = Math.min(lo, r.itemIndex);
+                hi = Math.max(hi, r.itemIndex);
+            }
+            return lo <= hi ? { lo: lo, hi: hi } : null;
+        }
+        vp.scrollV = round(maxScroll() * index / Math.max(total - 1, 1));
+        for (var pass = 0; pass < 4; pass++) {
+            if (typeof vp.validateNow === "function") vp.validateNow();
+            await sleep(60);
+            var range = visibleRange();
+            if (!range || (index >= range.lo && index <= range.hi)) break;
+            var span = Math.max(range.hi - range.lo + 1, 1);
+            var pitch = viewH / span;
+            var delta = index < range.lo ? (index - range.lo) * pitch : (index - range.hi) * pitch;
+            vp.scrollV = round(Math.min(Math.max(vp.scrollV + delta, 0), maxScroll()));
+        }
+        return { index: index, total: total, visible: visibleRange() };
+    }
+
     function scrollersIn(root) {
         var out = [];
         walk(root, function (o) {
@@ -1714,9 +1860,35 @@
                 if (vp.scrollH > 1) entry.canLeft = true;
                 if (vp.contentWidth - o.width > 1 && vp.scrollH < vp.contentWidth - o.width - 1) entry.canRight = true;
             } catch (e) {}
+            // 列表背后有多少条、每条有哪些字段：模型看到这个才会想到去读数据，而不是滚着数
+            try {
+                var list = listOf(o);
+                if (list && list.dataProvider.length) {
+                    entry.items = +list.dataProvider.length;
+                    entry.list = hashOf(list);
+                    entry.fields = scalarFields(list.dataProvider.getItemAt(0), 6);
+                }
+            } catch (e) {}
             out.push(entry);
         });
         return out;
+    }
+
+    // 超出 limit 时按重要性挑，而不是按阅读顺序切：列表项上的小字标签（role text）一个面板能有几十条，
+    // 按顺序切会把真正的按钮挤出表外（经验舱的「快速升级」曾排到第 51 位，默认 30 行根本轮不到）。
+    // 挑完仍按阅读顺序排回去，编号照旧从上到下。
+    var TRUNCATE_RANK = { close: 0, back: 0, confirm: 0, input: 1, button: 2, tab: 2, npc: 2, item: 3, text: 4 };
+
+    function pickWithinLimit(entries, limit) {
+        if (entries.length <= limit) return entries;
+        var ranked = entries.map(function (e, at) {
+            var rank = TRUNCATE_RANK[e.role] !== undefined ? TRUNCATE_RANK[e.role] : 2;
+            return { at: at, rank: rank + (e.occluded ? 10 : 0) };
+        });
+        ranked.sort(function (a, b) { return a.rank - b.rank || a.at - b.at; });
+        var chosen = {};
+        ranked.slice(0, limit).forEach(function (x) { chosen[x.at] = true; });
+        return entries.filter(function (e, at) { return chosen[at]; });
     }
 
     function panelBrief(o, stage) {
@@ -1995,7 +2167,7 @@
         out.omitted = Math.max(0, entries.length - limit) + collapsed + offstage + indicators;
         if (collapsed) out.collapsed = collapsed;
         if (occludedHidden) out.occludedHidden = occludedHidden;
-        entries = entries.slice(0, limit);
+        entries = pickWithinLimit(entries, limit);
         entries.forEach(function (entry, i) { entry.i = i + 1; });
         lastEntries = entries;
         // 默认只给「编号 + 标签 + 角色 + 状态」：按编号决策时 hash/point/size 是死重量，
@@ -2073,14 +2245,14 @@
         return out;
     }
 
-    function panelTag(o) {
+    function stackEntryLabel(o) {
         var name = qaNameOf(o) || bindId(o) || nameOf(o);
         return tidy(name, 24) || shortClass(o);
     }
 
     function stackSnapshot() {
         try {
-            return (sceneInfo().stack || []).map(function (o) { return { hash: hashOf(o), tag: panelTag(o) }; });
+            return (sceneInfo().stack || []).map(function (o) { return { hash: hashOf(o), tag: stackEntryLabel(o) }; });
         } catch (e) {
             return null;
         }
@@ -2614,19 +2786,24 @@
                             ? resolveFastTarget(step, fresh).o
                             : byHash((lastTable && lastTable.scrollers && lastTable.scrollers[0] || {}).hash);
                         if (!scroller) throw new Error("没有可滚动的目标：传 i/hash，或先 observe 看 scrollers");
-                        var sr = stageRect(scroller);
-                        if (!sr) throw new Error("滚动目标没有有效包围盒");
-                        var dy = step.dy !== undefined ? +step.dy : (step.dx !== undefined ? 0 : -Math.round(sr.height * 0.6));
-                        var dx = step.dx !== undefined ? +step.dx : 0;
-                        var from = { x: round(sr.x + sr.width / 2), y: round(sr.y + sr.height / 2) };
-                        var points = [];
-                        var stepsCount = 10;
-                        for (var si2 = 0; si2 <= stepsCount; si2++) {
-                            points.push({ x: round(from.x + dx * si2 / stepsCount), y: round(from.y + dy * si2 / stepsCount) });
-                        }
-                        await performGesture(points, method === "event" ? "touch" : method, 300, scroller);
                         record.target = { hash: hashOf(scroller), label: actionLabelOf(scroller).label };
-                        record.delta = [dx, dy];
+                        if (step.toIndex !== undefined) {
+                            // 读过数据、知道目标是第几条时直接定位，不用一屏一屏拖着找
+                            record.result = await scrollToIndex(scroller, step.toIndex);
+                        } else {
+                            var sr = stageRect(scroller);
+                            if (!sr) throw new Error("滚动目标没有有效包围盒");
+                            var dy = step.dy !== undefined ? +step.dy : (step.dx !== undefined ? 0 : -Math.round(sr.height * 0.6));
+                            var dx = step.dx !== undefined ? +step.dx : 0;
+                            var from = { x: round(sr.x + sr.width / 2), y: round(sr.y + sr.height / 2) };
+                            var points = [];
+                            var stepsCount = 10;
+                            for (var si2 = 0; si2 <= stepsCount; si2++) {
+                                points.push({ x: round(from.x + dx * si2 / stepsCount), y: round(from.y + dy * si2 / stepsCount) });
+                            }
+                            await performGesture(points, method === "event" ? "touch" : method, 300, scroller);
+                            record.delta = [dx, dy];
+                        }
                     } else if (op === "wait") {
                         if (step.until && hasCriteria(step.until)) {
                             record.result = await handlers.waitFor(Object.assign({ timeoutMs: step.timeoutMs || 8000 }, step.until));
@@ -2885,8 +3062,8 @@
 
             // 连着关几层时，下面那层可能还在铺开，这一瞬间找不到任何控件。
             // 只在一个都没找到时等一下重来，找到过控件就不重试，免得重复点。
-            for (var round = 0; round < 2; round++) {
-                if (round) {
+            for (var sweep = 0; sweep < 2; sweep++) {
+                if (sweep) {
                     await sleep(250);
                     var settled = sceneInfo().top;
                     if (!settled || hashOf(settled) !== hash) {
@@ -3193,7 +3370,9 @@
                 },
                 $describe: function (o) {
                     return describe(o, { path: true });
-                }
+                },
+                // $items(列表或 Scroller 的 hash, 可选筛选函数或 {字段: 值}, 可选 {fields, limit})
+                $items: itemsOf
             };
             var names = Object.keys(helpers);
             var args = names.map(function (k) {
