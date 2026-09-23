@@ -1336,6 +1336,47 @@ const input = item("eui.EditableText", "nameInput", hud, { x: 20, y: 60, width: 
         self.assertEqual(data["inputText"], "abc")
 
 
+class ScrollToIndexTest(unittest.TestCase):
+    """op=scroll 的 toIndex：目标项要整项露出来，不能只露一条边。"""
+
+    def test_last_item_is_fully_revealed_when_content_height_was_estimated(self):
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node is required")
+        script = r"""const fs = require("fs");
+let source = fs.readFileSync(process.argv[1], "utf8");
+source = source.replace("\n    installErrorHooks();",
+    "\n    window.__pageAgentTest = { scrollToIndex };\n    installErrorHooks();");
+const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480, parent: null, children: [],
+    get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; } };
+global.window = { addEventListener() {}, devicePixelRatio: 1, innerWidth: 800, innerHeight: 480,
+    egret: { getQualifiedClassName(o) { return o.__class || "Object"; } } };
+global.document = { documentElement: { clientLeft: 0, clientTop: 0 },
+    querySelector(s) { return s === ".egret-player" ? { "egret-player": { stage } } : null; } };
+require("vm").runInThisContext(source, { filename: process.argv[1] });
+// 13 个技能、每项 73 高、间距 79，视口 335 高：虚拟布局起初把内容高估成 970，校验一次才是真的 1021
+const renderers = Array.from({ length: 13 }, (_, i) => ({ itemIndex: i, y: i * 79, height: 73, visible: true }));
+const vp = { __class: "eui.List", scrollV: 0, contentHeight: 970, dataProvider: { length: 13, getItemAt(i) { return { skillId: i }; } },
+    children: renderers, get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; },
+    validateNow() { this.contentHeight = 1021; } };
+const scroller = { __class: "eui.Scroller", height: 335, viewport: vp, parent: stage, children: [vp],
+    get numChildren() { return 1; }, getChildAt() { return vp; } };
+vp.parent = scroller;
+(async () => {
+    const res = await window.__pageAgentTest.scrollToIndex(scroller, 12);
+    process.stdout.write(JSON.stringify({ scrollV: vp.scrollV, visible: res.visible }));
+})().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
+"""
+        result = subprocess.run([node, "-e", script, str(PAGE_AGENT)], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=10)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+        data = json.loads(result.stdout)
+        # 最后一项 948–1021 要整项落在 [scrollV, scrollV + 335] 里：只能滚到底 686
+        self.assertEqual(data["scrollV"], 686)
+        self.assertEqual(data["visible"]["hi"], 12)
+
+
 class RenderTableTest(unittest.TestCase):
     def test_renders_one_line_per_action(self):
         server = load_server()
