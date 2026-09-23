@@ -433,10 +433,15 @@ def render_action_table(table):
             if result.get("ok") and result.get("via") == "gone":
                 line += " → %s 自己退场了" % (result.get("panel") or "")
             elif result.get("ok"):
-                via = {"outer": "外层模块的关闭/返回键", "shell": "下层外壳的返回键"}.get(result.get("via"), result.get("via"))
+                via = {"outer": "外层模块的关闭/返回键", "shell": "下层外壳的返回键",
+                       "late": "关闭键（退场慢，多等了一下）"}.get(result.get("via"), result.get("via"))
                 line += " → 点 %s 关掉了 %s" % (via, result.get("panel") or "")
             else:
                 line += " → 没关掉（%s）：%s" % (result.get("stopped"), result.get("note") or "")
+                tried = [t for t in result.get("tried") or [] if isinstance(t, dict)]
+                if tried:
+                    line += "；点过 " + "、".join("%s %s" % (t.get("via"), t.get("control") or "(%s,%s)" % (
+                        (t.get("point") or {}).get("x"), (t.get("point") or {}).get("y"))) for t in tried)
             if result.get("passed"):
                 line += "（%s 是上一层正在退场，跳过）" % result["passed"]
         lines.append(line)

@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.46";
+    var VERSION = "1.7.47";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -4698,7 +4698,20 @@
                     var settledAt = moved && probePoint(o, false);
                     if (settledAt) point = settledAt.point;
                 }
-                var entry = { via: via, point: { x: round(point.x), y: round(point.y) } };
+                var entry = { via: via };
+                // 点不到它（上面还压着一层正在退场或透明的东西）：等它让开，最多 1.5s；还挡着就记下是谁挡的
+                if (o && !reaches(o, hitTest(point.x, point.y))) {
+                    for (var bw = Date.now(), free = null; !free && Date.now() - bw < 1500;) {
+                        await sleep(150);
+                        free = probePoint(o, false);
+                    }
+                    if (free) point = free.point;
+                    else {
+                        var cover = hitTest(point.x, point.y);
+                        entry.blocked = cover ? className(cover) + (nameOf(cover) ? "#" + nameOf(cover) : "") : "?";
+                    }
+                }
+                entry.point = { x: round(point.x), y: round(point.y) };
                 if (o) entry.control = bindId(o) || qaNameOf(o) || nameOf(o) || sourceOf(o) || className(o);
                 await performGesture([point], method, 50, o || null);
                 entry.ok = await vanished();
@@ -4783,8 +4796,11 @@
                 return { ok: false, stopped: "no-control", panel: name, tried: tried,
                     note: "面板里找不到关闭/返回控件，内容区外也没有可点遮罩：截图看看它是怎么关的" };
             }
+            // 退场动画比 vanished 等得久（新手走完连着开礼包模块、主线程在解资源）：再看一眼
+            if (await vanished()) return { ok: true, via: "late", panel: name, tried: tried };
+            var blockers = tried.filter(function (t) { return t.blocked; }).map(function (t) { return t.control + " 被 " + t.blocked + " 挡住"; });
             return { ok: false, stopped: "stuck", panel: name, tried: tried,
-                note: "关闭/返回/遮罩都点过了，面板仍在最上层" };
+                note: "关闭/返回/遮罩都点过了，面板仍在最上层" + (blockers.length ? "（" + blockers.join("，") + "）" : "") };
         },
 
         runtimeStats: function () {

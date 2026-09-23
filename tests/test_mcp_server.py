@@ -2060,11 +2060,13 @@ class RenderTableTest(unittest.TestCase):
         server = load_server()
         table = {"mode": "normal", "marker": "m3",
                  "executed": [{"op": "close", "result": {"ok": False, "stopped": "stuck",
-                                                         "note": "关闭/返回/遮罩都点过了，面板仍在最上层"}}],
+                                                         "note": "关闭/返回/遮罩都点过了，面板仍在最上层",
+                                                         "tried": [{"via": "outer", "control": "imgBackiCan", "ok": False},
+                                                                   {"via": "mask", "point": {"x": 400, "y": 470}, "ok": False}]}}],
                  "actions": []}
         text = server.render_action_table(table)
         self.assertIn("没关掉（stuck）", text)
-        self.assertIn("面板仍在最上层", text)
+        self.assertIn("面板仍在最上层；点过 outer imgBackiCan、mask (400,470)", text)
 
     def test_mode_without_actions_points_at_the_only_legal_op(self):
         server = load_server()
