@@ -1,6 +1,6 @@
 # 更新日志
 
-## 未发布
+## 5.0.2
 
 - 修复 WorkBuddy 中 MCP server 起不来（找不到 `./scripts/start_mcp.js`）：WorkBuddy 改用插件自带的启动器，与 Claude Code 一致；Codex 的 MCP 配置改名为 `.codex-mcp.json`，不再被其他客户端加载。
 
