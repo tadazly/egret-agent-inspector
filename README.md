@@ -42,10 +42,14 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | `egret-e2e-test` | 编写、运行和报告 E2E 用例 |
 | `egret-bug-hunt` | 探索式操作游戏，发现报错、异常界面和无响应交互 |
 | `egret-session-recovery` | 浏览器闪退后恢复验收现场；重复闪退时采样运行态指标 |
-| `splan-control` | Splan 项目专属：模块事件直达界面、qaName 定位、连关强弹（页面有全局 `MFC` 时适用） |
+| `splan-control` | Splan 项目专属：模块事件直达界面、qaName 定位、连关强弹、换技能（页面有全局 `MFC` 时适用） |
+| `splan-battle` | Splan 项目专属：回合制战斗规则，进 PVE、出招、换精灵、倒下后的回合、结算与不能点的消耗按钮 |
+| `splan-login` | Splan 项目专属：登录页用 debug.js 内网免密登录切换账号、用新号跑新手流程 |
 | `splan-test` | Splan 项目专属：生成并运行用例、自主探索找 bug、沉淀笔记 |
 
 ## MCP 工具
+
+工具面默认是 `core` 档位：完全能被 `egret_act` / `egret_observe` 顶掉的工具（`egret_tap`、`egret_advance`、`egret_dismiss_popups`、`egret_wait_for`、`egret_get_tree`、`egret_get_node`、`egret_hit_test`、`egret_status`、`egret_set_props`）不出现在工具列表里，避免模型放着主循环不用去挨个试。用环境变量 `EGRET_MCP_PROFILE` 切换：`minimal` 只留主循环和连接类工具（适合小模型长流程），`full` 列出全部。
 
 | 类别 | 工具 |
 | --- | --- |
@@ -58,11 +62,15 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | 测试 | `egret_run_steps`：批量执行步骤并断言，失败时附截图，并报告运行期间的页面错误 |
 | 项目专属 | `splan_call`：模块与 QA 能力；`splan_test_command`：仅明确授权且加载 `debug.js` 时执行测试命令 |
 
-日常操作只用 `egret_observe` → `egret_act` 两个工具：看带编号的动作表，按编号执行，执行结果里直接带回新的动作表，不必每点一次再单独查询和等待。动作表用语义指纹判断界面是否还是决策时那一页，界面变了会返回 `stale: true` 和新表且不执行点击。引导挖洞、对白推进、加载过场和只能点遮罩关闭的弹窗都由 `mode` 指明唯一合法动作。
+日常操作只用 `egret_observe` → `egret_act` 两个工具：看带编号的动作表，按编号执行，执行结果里直接带回新的动作表，不必每点一次再单独查询和等待。动作表是一行一个动作的紧凑文本（编号、标签、role、状态），`egret_act` 的返回还会用一行「变化」说明这一步把界面改成了什么样。动作表用语义指纹判断界面是否还是决策时那一页，界面变了会返回 `stale` 和新表且不执行点击。引导挖洞、对白推进、加载过场和只能点遮罩关闭的弹窗都由 `mode` 指明唯一合法动作。
 
-图片字按钮在动作表里是弱标签，给 `egret_observe` 传 `ocr: true` 会在同一次调用里批量本地 OCR 补上真实文案（不上传图片）；结构化信息和 OCR 都定不下来时再截图做视觉确认——游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，这层兜底一直保留。
+被遮挡、点在舞台外和与子按钮重复的条目默认不占编号，只报数量；`limit` 只决定显示几行，不影响扫描范围。需要 `hash`、坐标和完整字段时传 `format: "json"`。
 
-查询类工具限制返回规模；`egret_locate` 只有在唯一高置信匹配时才返回可直接点击的目标；`egret_wait_for` 支持带明确目标的 `changed/anyOf`，`egret_screenshot` 默认压缩并可用 `rect` 只截局部。
+图片字按钮在动作表里标成 `*` 弱标签，整屏都是弱标签时会自动批量本地 OCR 补上真实文案（不上传图片），也可以用 `ocr` 显式开关。OCR 在本机跑：macOS 用 Vision；Windows 用系统自带的 Windows ML 跑 PaddleOCR 的 PP-OCRv4 mobile 识别模型（约 10MB，首次使用时下载到 `~/.egret-agent-inspector/ocr`，下载不了就退回 Windows.Media.Ocr），可用环境变量 `EGRET_OCR_BACKEND=native` 只用系统引擎、`EGRET_OCR_MODEL` 指定手动下载的模型；结构化信息和 OCR 都定不下来时再截图做视觉确认——游戏里图片按钮和可交互的非按钮对象（NPC 模型）很多，这层兜底一直保留。
+
+识别模型 `ch_PP-OCRv4_rec_mobile.onnx`（10,857,958 字节，SHA-256 `48fc40f2…3683b`）是 PaddleOCR 官方 PP-OCRv4 模型由 RapidAI 转成的 ONNX，许可证 Apache-2.0；下载地址依次为 ModelScope 上按版本 tag 固定的 `www.modelscope.cn/models/RapidAI/RapidOCR`（`v3.9.2`）和本仓库 GitHub Release `ocr-model-v1` 的镜像附件。下载在 server 启动时的后台预热里进行，不阻塞动作表：常驻进程就绪前、没有网络或下载失败时，Windows 自动用 Windows.Media.Ocr，动作表的 `ocr` 行会写出实际用的引擎（`ppocr` / `winocr`）。缓存目录可随时删除（下次启动重新下载）；模型升级时 server 里的文件名、大小和哈希一起变，旧文件不会被误用。
+
+查询类工具限制返回规模；`egret_locate` 只有在唯一高置信匹配时才返回可直接点击的目标；等待用 `egret_act` 的 `{"op": "wait", "until": {...}}`（`full` 档位下也可以直接用 `egret_wait_for`），`egret_screenshot` 默认压缩并可用 `rect` 只截局部。
 
 组件可按 `id`（代码/EXML 中绑定的属性名）、`qaName`、`text`、`className`、`name` 或图片 `source` 定位。
 `qaName` 为 `宿主短类名__部件名`（如 `SignPanel__btn_sign`）：组件自身写了 qaName 时直接使用，否则由绑定关系推导，因此正式构建中同样可用。

@@ -1,5 +1,24 @@
 # 更新日志
 
+## 5.1.0
+
+- 动作表改成一行一个动作的紧凑文本，默认只列能点到的控件，同样内容省两三倍 token；需要 `hash`、坐标等完整字段时传 `format: "json"`。
+- 收窄默认工具面：`egret_tap`、`egret_advance`、`egret_dismiss_popups`、`egret_wait_for`、`egret_get_tree`、`egret_get_node`、`egret_hit_test`、`egret_status`、`egret_set_props` 的功能都已并入 `egret_act` / `egret_observe`，默认不再出现在工具列表里（`egret_run_steps` 回放不受影响），需要时设环境变量 `EGRET_MCP_PROFILE=full` 恢复。
+- `egret_act` 的返回多一行「变化」，说明这一步打开、关掉了哪些面板，多了、少了哪些控件。
+- `egret_act` 新增 `op=close`（依次试关闭键、返回键、遮罩，并确认界面真的关掉；`all: true` 一路关回地图界面）、`op=guide`（跟着新手引导一路点）和 `op=drag`（把一个控件拖到另一个控件上）。
+- 回合制战斗一次调用打完一回合：出招后等到下一回合能操作再返回，`repeat` 连出同一招，停下时说明停在哪。
+- 长列表：动作表写出列表共几条、有哪些字段，`egret_evaluate` 新增 `$items()` 一次读出全量数据，`op=scroll` 的 `toIndex` 把目标整项滚进视口。
+- 路线复用：同一界面上走过的步骤再次出现时，`egret_act` 直接给出上次接着走的步骤，可以一次发完。
+- 本地 OCR：整屏都是图片字时自动补一次；Windows 改用系统自带的 Windows ML 跑 PP-OCRv4 识别模型（首次使用时下载约 11MB 并校验），标注集命中率从 19% 提到 77%、每屏耗时减半，系统不支持时（如 Windows 10）退回系统 OCR。
+- 控件识别更准：只有碰撞盒的控件、淡入中的列表、弹窗上的图片字按钮、委托点击的子控件不再漏掉，返回键、确定键和地图入口不再错标或借错名字；`egret_locate` 认得背包、商店、邮件等中文说法。
+- 页面重载、扩展重载、浏览器掉线时，工具会说明之前的编号还能不能用；标签页在后台时先切到前台重试；装了扩展的浏览器有好几个时，按 `tabId` 找到持有这个标签页的那个。
+- `egret_navigate` 新增 `newWindow`（在新窗口打开，多个 agent 并行时各占一个窗口），`egret_reload_extension` 新增 `tabId`（只重载持有这个标签页的浏览器）。
+- Splan 项目：`splan_call` 新增 `login`（内网免密切换账号，`newAccount` 建新号）；动作表显示新手进度和引导在等的操作，新手对白、引导遮罩、战斗说明层、掉线提示直接读游戏状态处理，走完新手的工具调用从一百多次降到二三十次。
+- Splan 技能：新增 `splan-login`、`splan-battle`；`splan-control` 补上底栏和快捷入口、常用固定操作，以及调试时一次关掉所有界面的接口（模拟真实用户交互时禁用）。
+- 测试账号登记：登录和新手进度自动记进本机 `egret_notes`（`kind: "account"`），用完补一句现状，下次按条件挑干净的号，不必每次重跑新手。
+- 点击后界面没变化时的空等从 1200ms 降到 600ms、加载过场轮询从 300ms 降到 150ms；目标正在入场或被退场层挡住时先等它就位再点。
+- 必填参数缺失时直接报出缺的参数名，不再静默返回空结果。
+
 ## 5.0.2
 
 - 修复 WorkBuddy 中 MCP server 起不来（找不到 `./scripts/start_mcp.js`）：WorkBuddy 改用插件自带的启动器，与 Claude Code 一致；Codex 的 MCP 配置改名为 `.codex-mcp.json`，不再被其他客户端加载。

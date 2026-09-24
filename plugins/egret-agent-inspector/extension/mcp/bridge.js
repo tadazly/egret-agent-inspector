@@ -1,6 +1,6 @@
 // Egret Agent Inspector MCP 桥接：运行在扩展 service worker 中，作为 WebSocket 客户端连接本机 MCP server，
 // 把 MCP 工具请求转发到目标标签页（在页面 MAIN world 中执行 mcp/pageAgent.js）。
-const AGENT_VERSION = "1.2.1";
+const AGENT_VERSION = "1.7.62";
 const AGENT_FILE = "mcp/pageAgent.js";
 const BASE_PORT = 17800;
 // Codex 会为并行任务分别启动 MCP 进程；预留足够端口，避免多个任务同时使用插件时耗尽 bridge。
@@ -294,7 +294,33 @@ async function handleRequest(method, params) {
         }
         case "navigate": {
             let tab;
-            if (params.newTab) {
+            if (params.newWindow) {
+                // 多个 agent 并行：同一窗口里不在前台的标签页被当成后台，游戏停止渲染。
+                // 新窗口铺在右半边、原窗口收到左半边，两边都露着，都算前台。给了 tabId 就把那个标签页挪过去
+                const moving = params.tabId !== undefined && params.tabId !== null ? await chrome.tabs.get(+params.tabId) : null;
+                const focused = await chrome.windows.getLastFocused().catch(() => null);
+                const others = (await chrome.windows.getAll({ windowTypes: ["normal"] })).filter((w) => !moving || w.id !== moving.windowId);
+                const base = focused && (!moving || focused.id !== moving.windowId) ? focused : others[0] || focused;
+                const opts = { focused: true, type: "normal" };
+                if (moving) opts.tabId = moving.id;
+                else opts.url = params.url;
+                if (base && base.width && base.height) {
+                    // 顺着长边对半分：连着分几次后窗口窄过高，横屏游戏会切成竖屏布局
+                    const wide = base.width / 2 >= base.height;
+                    const w = wide ? Math.round(base.width / 2) : base.width;
+                    const h = wide ? base.height : Math.round(base.height / 2);
+                    Object.assign(opts, { left: base.left + (wide ? w : 0), top: base.top + (wide ? 0 : h), width: w, height: h });
+                    // 原窗口收到左（上）半边：两个窗口重叠时，前置一个就把另一个盖住，那边的游戏又停了
+                    await chrome.windows.update(base.id, { state: "normal" }).catch(() => {});
+                    await chrome.windows.update(base.id, { left: base.left, top: base.top, width: w, height: h }).catch(() => {});
+                }
+                // 算出来的位置仍可能大半在屏幕外（屏幕比窗口记录的小、原窗口本来就靠边），浏览器直接拒绝：不给位置重试
+                const win = await chrome.windows.create(opts).catch(() => {
+                    for (const k of ["left", "top", "width", "height"]) delete opts[k];
+                    return chrome.windows.create(opts);
+                });
+                tab = moving ? await chrome.tabs.update(moving.id, { url: params.url, active: true }) : win.tabs[0];
+            } else if (params.newTab) {
                 tab = await chrome.tabs.create({ url: params.url, active: true });
             } else {
                 const target = params.tabId !== undefined && params.tabId !== null ? await chrome.tabs.get(+params.tabId) :
@@ -340,10 +366,27 @@ async function handleRequest(method, params) {
                     const result = await runInPage(tab.id, frameId, params.method, params.params || {});
                     return { tabId: tab.id, frameId, result };
                 }
+                // 页面在后台：先把标签页切到前台、窗口还原并前置，等游戏恢复渲染再试一次。
+                // 无人值守的验收里窗口常被别的程序盖住，agent 只能停下来等人
+                if (/页面在后台/.test(String(e && e.message))) {
+                    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+                    const win = await chrome.windows.get(tab.windowId).catch(() => null);
+                    await chrome.windows.update(tab.windowId, win && win.state === "minimized"
+                        ? { state: "normal", focused: true } : { focused: true }).catch(() => {});
+                    await new Promise((r) => setTimeout(r, 800));
+                    const result = await runInPage(tab.id, frameId, params.method, params.params || {});
+                    return { tabId: tab.id, frameId, result };
+                }
                 throw e;
             }
         }
         case "reloadExtension": {
+            // 好几个浏览器连着同一个 server 时，没点名标签页的重载会落到最后连上来的那个（常常是别的会话的 Edge），
+            // 把人家正在跑的验收打断，扩展重载后还可能半天连不回来。只认点名了本浏览器标签页的，或 server 说只连着这一个的
+            if (!params.sole) {
+                const own = params.tabId !== undefined && params.tabId !== null ? await chrome.tabs.get(+params.tabId).catch(() => null) : null;
+                if (!own) throw new Error("没有重载：请求没有点名这个浏览器里的标签页。连着好几个浏览器时带上 tabId 再重载");
+            }
             // 未打包扩展会从磁盘重新读取文件，用于插件更新后生效
             setTimeout(() => chrome.runtime.reload(), 300);
             return { reloading: true, extensionVersion: chrome.runtime.getManifest().version };

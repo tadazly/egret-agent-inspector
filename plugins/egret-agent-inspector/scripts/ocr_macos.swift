@@ -84,7 +84,8 @@ if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--daemon" {
         }
     }
 } else if CommandLine.arguments.count == 2 {
-    try writeLine(recognize(specPath: CommandLine.arguments[1], accurate: false))
+    // fast 模式几乎认不出中文（标注集命中率 <1%），一次性调用也走 accurate
+    try writeLine(recognize(specPath: CommandLine.arguments[1], accurate: true))
 } else {
     fputs("usage: ocr_macos <spec.json>|--daemon\n", stderr)
     exit(2)
