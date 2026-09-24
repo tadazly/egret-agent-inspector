@@ -1,5 +1,5 @@
 @echo off
-rem MCP launcher for the Claude Code plugin on Windows: run the server with a Python 3.8+.
+rem MCP launcher for the Claude Code and WorkBuddy plugin on Windows: run the server with a Python 3.8+.
 rem Same candidates and version check as scripts/start_mcp.js: EGRET_PYTHON, python, py -3, python3.
 rem The python / python3 stubs under WindowsApps fail the version check and are skipped.
 rem Keep this file ASCII-only with CRLF: cmd.exe parses it in the console code page.

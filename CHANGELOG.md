@@ -1,5 +1,9 @@
 # 更新日志
 
+## 未发布
+
+- 修复 WorkBuddy 中 MCP server 起不来（找不到 `./scripts/start_mcp.js`）：WorkBuddy 改用插件自带的启动器，与 Claude Code 一致；Codex 的 MCP 配置改名为 `.codex-mcp.json`，不再被其他客户端加载。
+
 ## 5.0.1
 
 - 修复 macOS 上 Claude Code 插件的 MCP server 起不来（`ENOENT: Executable not found in $PATH`）：改用插件自带的启动器按平台挑选 Python 3.8+，与 Codex 一致，也可用 `EGRET_PYTHON` 指定。

@@ -4,7 +4,7 @@
 
 ## 安装
 
-需要 Chromium 浏览器（Chrome、Edge、Brave）、Node.js 和 Python 3.8+。Codex 启动器会在 Windows 选择 `python` / `py -3`，在 macOS/Linux 选择 `python3` / `python`；Claude Code 用插件自带的启动器 `bin/egret-mcp`（Windows 为 `egret-mcp.cmd`）按同样顺序挑选 Python 3.8+。两端都可用 `EGRET_PYTHON` 指定解释器。
+需要 Chromium 浏览器（Chrome、Edge、Brave）、Node.js 和 Python 3.8+。Codex 启动器会在 Windows 选择 `python` / `py -3`，在 macOS/Linux 选择 `python3` / `python`；Claude Code 与 WorkBuddy 用插件自带的启动器 `bin/egret-mcp`（Windows 为 `egret-mcp.cmd`）按同样顺序挑选 Python 3.8+。都可用 `EGRET_PYTHON` 指定解释器。
 
 ### Claude Code
 

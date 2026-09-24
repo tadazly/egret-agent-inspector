@@ -1,5 +1,5 @@
 #!/bin/sh
-# Claude Code 插件的 MCP 启动器（macOS / Linux）：挑一个 Python 3.8+ 运行 server。
+# Claude Code 与 WorkBuddy 插件的 MCP 启动器（macOS / Linux）：挑一个 Python 3.8+ 运行 server。
 # 候选顺序、版本检查和 EGRET_PYTHON 与 scripts/start_mcp.js 保持一致。
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
 server="$root/server/egret_agent_inspector_mcp.py"

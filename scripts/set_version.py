@@ -11,6 +11,7 @@ FILES = [
     PLUGIN / "extension" / "manifest.json",
     PLUGIN / ".codex-plugin" / "plugin.json",
     PLUGIN / ".claude-plugin" / "plugin.json",
+    PLUGIN / ".codebuddy-plugin" / "plugin.json",
     ROOT / ".claude-plugin" / "marketplace.json",
 ]
 PANEL = PLUGIN / "extension" / "ipt" / "panel" / "index.html"

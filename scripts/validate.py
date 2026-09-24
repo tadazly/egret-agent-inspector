@@ -30,6 +30,7 @@ def versions():
         "extension/manifest.json": load(PLUGIN / "extension" / "manifest.json", errors).get("version"),
         ".codex-plugin/plugin.json": load(PLUGIN / ".codex-plugin" / "plugin.json", errors).get("version"),
         ".claude-plugin/plugin.json": load(PLUGIN / ".claude-plugin" / "plugin.json", errors).get("version"),
+        ".codebuddy-plugin/plugin.json": load(PLUGIN / ".codebuddy-plugin" / "plugin.json", errors).get("version"),
     }
     market = load(ROOT / ".claude-plugin" / "marketplace.json", errors)
     result[".claude-plugin/marketplace.json"] = next(
@@ -48,36 +49,48 @@ def check_codex(errors):
     prompts = ui.get("defaultPrompt", [])
     if not prompts or len(prompts) > 3 or any(len(p) > 128 for p in prompts):
         errors.append(".codex-plugin/plugin.json: defaultPrompt must have 1-3 entries of <=128 chars")
-    if manifest.get("mcpServers") != "./.mcp.json":
-        errors.append(".codex-plugin/plugin.json: mcpServers must reference ./.mcp.json")
-    mcp = load(PLUGIN / ".mcp.json", errors)
+    # Codex 专用配置不能叫 .mcp.json：WorkBuddy 会把插件根目录的 .mcp.json 和 mcp/*.json 合并进来并覆盖
+    # 清单里的同名 server，而它在用户工作区启动 server，./scripts/start_mcp.js 这类相对路径就找不到了
+    if manifest.get("mcpServers") != "./.codex-mcp.json":
+        errors.append(".codex-plugin/plugin.json: mcpServers must reference ./.codex-mcp.json")
+    for path in [PLUGIN / ".mcp.json", *sorted((PLUGIN / "mcp").glob("*.json"))]:
+        if path.is_file():
+            errors.append(f"{path.relative_to(PLUGIN).as_posix()}: Claude Code and WorkBuddy also load it; keep Codex MCP config in .codex-mcp.json")
+    mcp = load(PLUGIN / ".codex-mcp.json", errors)
     server = mcp.get("mcpServers", {}).get(NAME, {})
     if not server:
-        errors.append(f".mcp.json: mcpServers.{NAME} is required")
+        errors.append(f".codex-mcp.json: mcpServers.{NAME} is required")
     elif server.get("command") != "node" or server.get("args") != ["./scripts/start_mcp.js"]:
-        errors.append(f".mcp.json: mcpServers.{NAME} must use the cross-platform Node launcher")
+        errors.append(f".codex-mcp.json: mcpServers.{NAME} must use the cross-platform Node launcher")
     for arg in server.get("args", []):
         if arg.startswith("./") and not (PLUGIN / arg).is_file():
-            errors.append(f".mcp.json: missing {arg}")
+            errors.append(f".codex-mcp.json: missing {arg}")
     market = load(ROOT / ".agents" / "plugins" / "marketplace.json", errors)
     entry = next((p for p in market.get("plugins", []) if p.get("name") == NAME), None)
     if not entry or entry.get("source", {}).get("path") != f"./plugins/{NAME}":
         errors.append(".agents/plugins/marketplace.json: plugin entry missing or wrong path")
 
 
-def check_claude(errors):
-    manifest = load(PLUGIN / ".claude-plugin" / "plugin.json", errors)
+def check_launcher_manifest(directory, root_var, errors):
+    """Claude Code 与 WorkBuddy 的清单都要用 bin/ 下的启动器启动 MCP server。"""
+    manifest = load(PLUGIN / directory / "plugin.json", errors)
     if manifest.get("name") != NAME:
-        errors.append(".claude-plugin/plugin.json: name mismatch")
+        errors.append(f"{directory}/plugin.json: name mismatch")
+    # 插件 MCP 配置不分平台：命令名写死哪个解释器都有平台起不来（macOS 没有 python，
+    # Windows 的 python3 常是商店占位程序），交给 bin/ 下的启动器按平台挑 Python
+    command = f"${{{root_var}}}/bin/egret-mcp"
+    server = manifest.get("mcpServers", {}).get(NAME, {})
+    if server.get("command") != command or server.get("args"):
+        errors.append(f"{directory}/plugin.json: MCP command must be {command} without args")
+    return manifest
+
+
+def check_claude(errors):
+    check_launcher_manifest(".claude-plugin", "CLAUDE_PLUGIN_ROOT", errors)
     market = load(ROOT / ".claude-plugin" / "marketplace.json", errors)
     entry = next((p for p in market.get("plugins", []) if p.get("name") == NAME), None)
     if not entry or entry.get("source") != f"./plugins/{NAME}":
         errors.append(".claude-plugin/marketplace.json: plugin entry missing or wrong source")
-    # Claude 的插件 MCP 配置不分平台：命令名写死哪个解释器都有平台起不来（macOS 没有 python，
-    # Windows 的 python3 常是商店占位程序），交给 bin/ 下的启动器按平台挑 Python
-    server = manifest.get("mcpServers", {}).get(NAME, {})
-    if server.get("command") != "${CLAUDE_PLUGIN_ROOT}/bin/egret-mcp" or server.get("args"):
-        errors.append(".claude-plugin/plugin.json: MCP command must be ${CLAUDE_PLUGIN_ROOT}/bin/egret-mcp without args")
     sh, cmd = PLUGIN / "bin" / "egret-mcp", PLUGIN / "bin" / "egret-mcp.cmd"
     sh_bytes = sh.read_bytes() if sh.is_file() else b""
     if not sh_bytes.startswith(b"#!/bin/sh\n") or b"\r" in sh_bytes:
@@ -89,6 +102,13 @@ def check_claude(errors):
     cmd_bytes = cmd.read_bytes() if cmd.is_file() else b""
     if not cmd_bytes.isascii() or b"\r\n" not in cmd_bytes or b"\n" in cmd_bytes.replace(b"\r\n", b""):
         errors.append("bin/egret-mcp.cmd: must be ASCII with CRLF line endings (cmd.exe reads it in the console code page)")
+
+
+def check_codebuddy(errors):
+    # WorkBuddy 优先读 .codebuddy-plugin/，有它就不再看 .claude-plugin/
+    manifest = check_launcher_manifest(".codebuddy-plugin", "CODEBUDDY_PLUGIN_ROOT", errors)
+    if manifest.get("skills") != "./skills":
+        errors.append(".codebuddy-plugin/plugin.json: skills must be ./skills")
 
 
 def check_skills(errors):
@@ -163,6 +183,7 @@ def main():
         errors.append("versions must be identical semver: " + json.dumps(found))
     check_codex(errors)
     check_claude(errors)
+    check_codebuddy(errors)
     check_skills(errors)
     check_python(errors)
     check_node(errors)
