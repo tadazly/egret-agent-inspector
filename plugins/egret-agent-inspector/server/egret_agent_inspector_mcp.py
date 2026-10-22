@@ -5,8 +5,8 @@ stdio MCP server，仅依赖 Python 3.8+ 标准库。在 127.0.0.1 上开启 Web
 由浏览器中的 Egret Agent Inspector 扩展主动连接，把工具请求转发到游戏页面执行。
 
 环境变量：
-  EGRET_MCP_PORT          起始端口，默认 17800（扩展会依次尝试 17800-17815）
-  EGRET_MCP_PORT_COUNT    端口数量，默认 16
+  EGRET_MCP_PORT          起始端口，默认 17800（扩展会依次尝试 17800-17863）
+  EGRET_MCP_PORT_COUNT    端口数量，默认 64
   EGRET_MCP_TIMEOUT       单次请求超时秒数，默认 30
   EGRET_MCP_CONNECT_WAIT  扩展未连接时等待其连接的秒数，默认 20
   EGRET_NOTES_DIR         探索笔记目录，默认 ~/.egret-agent-inspector/notes
@@ -670,7 +670,7 @@ def render_action_table(table):
 
 SUPPORTED_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 BASE_PORT = int(os.environ.get("EGRET_MCP_PORT", "17800"))
-PORT_COUNT = int(os.environ.get("EGRET_MCP_PORT_COUNT", "16"))
+PORT_COUNT = int(os.environ.get("EGRET_MCP_PORT_COUNT", "64"))
 REQUEST_TIMEOUT = float(os.environ.get("EGRET_MCP_TIMEOUT", "30"))
 CONNECT_WAIT = float(os.environ.get("EGRET_MCP_CONNECT_WAIT", "20"))
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"

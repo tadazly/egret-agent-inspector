@@ -4,7 +4,7 @@ const AGENT_VERSION = "1.7.62";
 const AGENT_FILE = "mcp/pageAgent.js";
 const BASE_PORT = 17800;
 // Codex 会为并行任务分别启动 MCP 进程；预留足够端口，避免多个任务同时使用插件时耗尽 bridge。
-const PORT_COUNT = 16;
+const PORT_COUNT = 64;
 const FAST_RETRY_DELAY = 2000;
 const MAX_RETRY_DELAY = 30000;
 
