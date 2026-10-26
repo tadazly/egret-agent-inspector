@@ -24,6 +24,7 @@ import itertools
 import json
 import os
 import re
+import secrets
 import shutil
 import struct
 import subprocess
@@ -681,7 +682,7 @@ HIDDEN_IN_CORE = ("egret_tap", "egret_advance", "egret_dismiss_popups", "egret_w
                   "egret_get_tree", "egret_get_node", "egret_hit_test", "egret_status", "egret_set_props")
 MINIMAL_TOOLS = ("egret_observe", "egret_act", "egret_screenshot", "egret_get_errors",
                  "egret_extension_status", "egret_install_extension", "egret_reload_extension",
-                 "egret_list_tabs", "egret_navigate")
+                 "egret_list_tabs", "egret_navigate", "egret_close_tab")
 TOOL_PROFILE = (os.environ.get("EGRET_MCP_PROFILE") or "core").strip().lower()
 
 
@@ -711,8 +712,9 @@ INSTRUCTIONS = """Egret Agent Inspector：读取并操作浏览器中 Egret 游�
 - 页面是 Splan 项目（splan_call probe 返回 MFC: true）时，动手前先读相关技能：通用操作和换技能在 splan-control，打战斗（进 PVE、出招、换精灵、结算）在 splan-battle，照做比自己摸索快。
 - 探索开始前先用 egret_notes 查已有笔记，踩坑、确认入口或测出动画耗时后写回。已确认的流程用 egret_run_steps 复跑。
 - 首次使用或工具提示扩展未连接时，先调用 egret_extension_status；未连接则按 egret-install-extension skill 安装扩展。
+- Egret 页面操作继续使用 Inspector。任务收尾只关闭本任务创建且已确认身份的页签：用 egret_close_tab 显式传 tabId 和 connectionId（取自本次 list_tabs 或 navigate 返回），检查 verified=true、absent=true；工具会回读确认。不要用 egret_evaluate 的 window.close() 或其变体兜底，也不要关闭其他任务页签。
 - splan_test_command 仅在用户本轮明确授权且 probe 确认加载 debug.js 时使用。
-- 未指定 tabId 时自动选用最近使用或当前激活的含 Egret 游戏的标签页。"""
+- 页面操作未指定 tabId 时自动选用最近使用或当前激活的含 Egret 游戏的标签页；egret_close_tab 必须明确指定目标。"""
 
 
 def log(*args):
@@ -768,6 +770,14 @@ TOOLS = {
                            "多个 agent 并行各占一个窗口：同一窗口里不在前台的标签页游戏会停止渲染"},
              "timeoutMs": {"type": "integer", "description": "等待加载完成的超时，默认 30000"}}, ["url"]),
         "navigate", None),
+    "egret_close_tab": (
+        "关闭明确指定的本任务浏览器页签，并在同一扩展连接回读确认消失。必须提供本次 list_tabs 或 navigate 返回的 tabId 和 connectionId；"
+        "目标已不存在时幂等成功，断连或确认失败时报错。窗口仅剩目标页时先保留一个空白页，避免退出浏览器。",
+        {"type": "object", "properties": {
+            "tabId": {"type": "integer", "minimum": 0, "description": "必填，明确指定要关闭的页签 id"},
+            "connectionId": {"type": "string", "minLength": 1, "description": "必填，该页签所属的实时扩展连接 id；重连后须重新获取"}},
+         "required": ["tabId", "connectionId"], "additionalProperties": False},
+        "closeTab", None),
     "egret_status": (
         "获取页面中 Egret 引擎状态：引擎版本、舞台尺寸、canvas 在页面中的位置、显示对象数量等。",
         obj({}), "page", "status"),
@@ -1135,6 +1145,7 @@ class ExtensionConnection:
         self.reader = reader
         self.writer = writer
         self.info = info
+        self.connection_id = secrets.token_hex(16)
         self.pending = {}
         self.ids = itertools.count(1)
         self.closed = False
@@ -1248,12 +1259,17 @@ class Bridge:
     def live(self):
         return [c for c in self.connections if c.ready and not c.closed]
 
-    async def tabs_of(self, conn, params=None, timeout=5):
+    async def tabs_of(self, conn, params=None, timeout=5, strict=False):
         tabs = await conn.request("listTabs", params or {"probe": False}, timeout)
+        if strict and (not isinstance(tabs, list) or any(
+                not isinstance(t, dict) or type(t.get("tabId")) is not int or t["tabId"] < 0 for t in tabs)):
+            raise RuntimeError("标签页回读格式无效，无法确认目标是否已关闭")
         tabs = tabs if isinstance(tabs, list) else []
         conn.tabs = {t.get("tabId") for t in tabs if isinstance(t, dict)}
         self.seen_tabs |= conn.tabs
-        return tabs
+        return [dict(t, connectionId=conn.connection_id, browser=conn.info.get("browser"),
+                     extensionId=conn.info.get("extensionId"), capabilities=conn.info.get("capabilities", []))
+                for t in tabs if isinstance(t, dict)]
 
     async def owner_of(self, tab_id, refresh):
         for c in self.live():
@@ -1269,8 +1285,8 @@ class Bridge:
         谁后连谁就成了 active。按 tabId 找到持有这个标签页的那个连接，listTabs 把各家的标签页合起来。"""
         live = self.live()
         if method == "listTabs":
-            if len(live) < 2:
-                return None
+            if len(live) == 1:
+                return {"merged": await self.tabs_of(live[0], params, timeout)}
             merged = []
             for c in live:
                 try:
@@ -1304,6 +1320,35 @@ class Bridge:
             # 没带 tabId 的后续请求（自动选标签页、新开窗口）也跟着这个浏览器走
             self.preferred = owner
         return {"conn": owner} if owner is not None else None
+
+    async def close_tab(self, params, timeout):
+        tab_id, connection_id = params.get("tabId"), params.get("connectionId")
+        # 关闭操作不经过 active/preferred，也不重试到另一个连接；不同浏览器的 tabId 可能相同。
+        if type(tab_id) is not int or tab_id < 0 or not isinstance(connection_id, str) or not connection_id.strip():
+            raise ValueError("egret_close_tab 必须显式提供非负整数 tabId 和实时 connectionId")
+        conn = next((c for c in self.live() if c.connection_id == connection_id), None)
+        if conn is None:
+            raise RuntimeError("指定的扩展连接已断开或不存在，无法确认关闭；重新 list_tabs 核对本任务页签身份后再操作")
+        if "closeTab" not in conn.info.get("capabilities", []):
+            raise RuntimeError("目标扩展尚不支持 closeTab，请加载候选扩展并重新获取 connectionId")
+        identity = {"tabId": tab_id, "connectionId": connection_id,
+                    "browser": conn.info.get("browser"), "extensionId": conn.info.get("extensionId")}
+        try:
+            result = await conn.request("closeTab", {"tabId": tab_id}, timeout)
+            if not isinstance(result, dict) or type(result.get("tabId")) is not int or result["tabId"] != tab_id:
+                raise RuntimeError("扩展关闭回执无效或目标不匹配")
+            if result.get("ok") is not True:
+                return dict(result, **identity, ok=False, verified=False, serverVerified=False)
+            if (result.get("status") not in ("closed", "alreadyAbsent")
+                    or result.get("verified") is not True or result.get("absent") is not True):
+                raise RuntimeError("扩展未提供有效的目标消失确认")
+            tabs = await self.tabs_of(conn, timeout=timeout, strict=True)
+            if any(t["tabId"] == tab_id for t in tabs):
+                return dict(result, **identity, ok=False, status="stillOpen", verified=False, absent=False, serverVerified=False)
+            return dict(result, **identity, serverVerified=True)
+        except Exception as e:  # noqa: BLE001
+            return dict(identity, ok=False, status="unconfirmed", verified=False, absent=None, serverVerified=False,
+                        error="无法确认关闭结果：%s" % (str(e) or type(e).__name__))
 
     async def start(self):
         for port in range(BASE_PORT, BASE_PORT + PORT_COUNT):
@@ -1399,6 +1444,8 @@ class Bridge:
                 conn.on_message(data.decode("utf-8", "replace"))
 
     async def request(self, method, params, timeout=REQUEST_TIMEOUT):
+        if method == "closeTab":
+            return await self.close_tab(params, timeout)
         if self.port is None:
             raise RuntimeError("MCP server 未能监听端口 %d-%d（都被占用），无法连接浏览器扩展" % (BASE_PORT, BASE_PORT + PORT_COUNT - 1))
         conn = self.active
@@ -1420,7 +1467,11 @@ class Bridge:
             return routed["merged"]
         if routed and routed.get("conn") is not None:
             conn = routed["conn"]
-        return await conn.request(method, params, timeout)
+        result = await conn.request(method, params, timeout)
+        if method == "navigate" and isinstance(result, dict):
+            result = dict(result, connectionId=conn.connection_id, browser=conn.info.get("browser"),
+                          extensionId=conn.info.get("extensionId"))
+        return result
 
     async def wait_connected(self, seconds):
         loop = asyncio.get_running_loop()
@@ -1568,6 +1619,9 @@ class McpServer:
                     {"type": "image", "data": res["data"], "mimeType": res["mimeType"]},
                     {"type": "text", "text": json.dumps(note, ensure_ascii=False)},
                 ]}
+            if name == "egret_close_tab":
+                return {"isError": res.get("ok") is not True,
+                        "content": [{"type": "text", "text": json.dumps(res, ensure_ascii=False)}]}
             return {"content": [{"type": "text", "text": json.dumps(res, ensure_ascii=False)}]}
         except Exception as e:  # noqa: BLE001
             text = str(e)
@@ -1996,7 +2050,9 @@ class McpServer:
             return status
         info = conn.info
         status.update(connected=True, browser=info.get("browser"), extensionVersion=info.get("extensionVersion"),
-                      extensionId=info.get("extensionId"), connections=len([c for c in self.bridge.connections if c.ready and not c.closed]))
+                      extensionId=info.get("extensionId"), connectionId=conn.connection_id,
+                      capabilities=info.get("capabilities", []),
+                      connections=len([c for c in self.bridge.connections if c.ready and not c.closed]))
         status["outdated"] = info.get("extensionVersion") != SERVER_VERSION
         return status
 

@@ -54,7 +54,7 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 | 类别 | 工具 |
 | --- | --- |
 | 主循环 | `egret_observe`（带编号的动作表 + 语义指纹）、`egret_act`（按编号执行并返回执行后的新动作表） |
-| 连接 | `egret_extension_status`、`egret_install_extension`、`egret_reload_extension`、`egret_reopen_browser`、`egret_list_tabs`、`egret_navigate` |
+| 连接 | `egret_extension_status`、`egret_install_extension`、`egret_reload_extension`、`egret_reopen_browser`、`egret_list_tabs`、`egret_navigate`、`egret_close_tab` |
 | 查询 | `egret_locate`（自然语言语义定位与消歧）、`egret_status`、`egret_runtime_stats`、`egret_get_tree`、`egret_find`、`egret_get_node`、`egret_hit_test` |
 | 操作 | `egret_tap`、`egret_advance`、`egret_drag`、`egret_dismiss_popups`、`egret_set_props`、`egret_wait_for`、`egret_evaluate`、`egret_screenshot` |
 | 排错 | `egret_get_errors`：页面未捕获异常、Promise 拒绝、资源加载失败和 console.error/warn；`egret_inspect_code`：控件背后的事件回调与源码片段 |
@@ -74,6 +74,8 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 
 组件可按 `id`（代码/EXML 中绑定的属性名）、`qaName`、`text`、`className`、`name` 或图片 `source` 定位。
 `qaName` 为 `宿主短类名__部件名`（如 `SignPanel__btn_sign`）：组件自身写了 qaName 时直接使用，否则由绑定关系推导，因此正式构建中同样可用。
+
+任务页签收尾使用 `egret_close_tab`，显式传入本次 `egret_list_tabs` 或 `egret_navigate` 返回的 `tabId` 和 `connectionId`。连接重建后须重新列出并核对页签身份；不同浏览器相同的 `tabId` 通过连接区分。只有回执 `ok=true`、`verified=true`、`absent=true`、`serverVerified=true` 才确认关闭，`status=alreadyAbsent` 表示目标原已不存在。关闭窗口最后一页会留下 `about:blank`，回执包含 `keptOpenTabId`。确认失败或断连按未确认处理，不再尝试 `window.close()` 及其变体。
 
 ## DevTools 面板
 

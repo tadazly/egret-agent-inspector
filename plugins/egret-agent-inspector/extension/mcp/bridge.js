@@ -74,6 +74,7 @@ async function connect(port) {
             extensionVersion: chrome.runtime.getManifest().version,
             agentVersion: AGENT_VERSION,
             extensionId: chrome.runtime.id,
+            capabilities: ["closeTab"],
             browser: browserName(),
             userAgent: navigator.userAgent
         }));
@@ -291,6 +292,45 @@ async function handleRequest(method, params) {
                 item.lastUsed = t.id === lastTabId;
                 return item;
             }));
+        }
+        case "closeTab": {
+            const tabId = params.tabId;
+            if (!Number.isSafeInteger(tabId) || tabId < 0) throw new Error("closeTab 必须显式指定非负整数 tabId");
+            // query 成功且没有目标才表示已不存在，不能把 tabs.get 的任意异常当成已关闭。
+            const tabs = await chrome.tabs.query({});
+            const tab = tabs.find((t) => t.id === tabId);
+            const receipt = { tabId, ok: true, status: "alreadyAbsent", verified: true, absent: true };
+            if (!tab) {
+                frameCache.delete(tabId);
+                if (lastTabId === tabId) lastTabId = null;
+                return receipt;
+            }
+            Object.assign(receipt, { windowId: tab.windowId, url: tab.url, title: tab.title });
+            try {
+                // 保留窗口和扩展连接；不关闭其他页签，也不借助 chrome.windows.remove。
+                const siblings = await chrome.tabs.query({ windowId: tab.windowId });
+                if (!siblings.some((t) => t.id !== tabId)) {
+                    const keeper = await chrome.tabs.create({ windowId: tab.windowId, url: "about:blank", active: false });
+                    receipt.keptOpenTabId = keeper.id;
+                    const current = await chrome.tabs.query({ windowId: tab.windowId });
+                    if (!current.some((t) => t.id === keeper.id && t.id !== tabId)) throw new Error("无法确认保留空白页，未关闭目标");
+                }
+                await chrome.tabs.remove(tabId);
+            } catch (e) {
+                return { ...receipt, ok: false, status: "error", verified: false, absent: null, error: String(e.message || e) };
+            }
+            try {
+                const remaining = await chrome.tabs.query({});
+                if (remaining.some((t) => t.id === tabId)) {
+                    return { ...receipt, ok: false, status: "stillOpen", verified: false, absent: false, error: "关闭后目标页签仍在" };
+                }
+                frameCache.delete(tabId);
+                if (lastTabId === tabId) lastTabId = null;
+                return { ...receipt, status: "closed" };
+            } catch (e) {
+                return { ...receipt, ok: false, status: "unconfirmed", verified: false, absent: null,
+                    error: "已请求关闭，但回读失败：" + String(e.message || e) };
+            }
         }
         case "navigate": {
             let tab;

@@ -9,6 +9,7 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 
 - 首次使用或工具报告扩展未连接时，先按 `egret-install-extension` skill 处理。
 - 用 `egret_list_tabs` 确认目标标签页；需要打开页面时用 `egret_navigate`。游戏仍在加载时 `egret_observe` 会返回 `mode: transient`，短等后再看。
+- Egret 页面操作继续使用 Inspector。记录本任务创建页签的 `tabId` 和 `connectionId`；收尾用 `egret_close_tab {"tabId": <目标>, "connectionId": "<该页签的实时连接>"}`，以 `ok=true`、`verified=true`、`absent=true`、`serverVerified=true` 为关闭确认。工具会实际回读；`alreadyAbsent` 为幂等成功。断连或确认失败时如实报告未确认，不用 `window.close()` 或其变体兜底，不关闭其他任务或用户页签。重连后重新 `egret_list_tabs` 核对身份再取连接；窗口最后一页关闭后会保留空白页。
 
 ## 主循环：observe → act
 
