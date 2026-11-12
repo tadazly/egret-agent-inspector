@@ -1,7 +1,7 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
 (function () {
-    var VERSION = "1.7.62";
+    var VERSION = "1.7.63";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
@@ -3532,6 +3532,13 @@
         var detail = !!p.detail;
         out.actions = entries.map(function (e) {
             var row = { i: e.i, label: e.label, role: e.role };
+            if (e.role === "input") {
+                // 当前值（如 qa）不能说明输入框用途；紧凑表也保留字段名与占位提示。
+                var field = tidy(bindId(e._o) || nameOf(e._o) || qaNameOf(e._o));
+                var prompt = tidy(e._o.prompt);
+                if (field) row.field = field;
+                if (prompt) row.prompt = prompt;
+            }
             if (e.off) row.off = true;
             if (e.on) row.on = true;
             if (e.st) row.st = e.st;

@@ -877,6 +877,65 @@ process.stdout.write(JSON.stringify({
                                 encoding="utf-8", errors="replace", timeout=10, check=True)
         return json.loads(result.stdout)
 
+    def test_input_rows_preserve_field_prompt_and_occlusion(self):
+        script = r'''const fs = require("fs"), vm = require("vm");
+let source = fs.readFileSync(process.argv[1], "utf8");
+source = source.replace("\n    installErrorHooks();",
+    "\n    window.__inputTest = { buildActionTable };\n    installErrorHooks();");
+const stage = { __class: "egret.Stage", hashCode: 1, stageWidth: 800, stageHeight: 480,
+    visible: true, alpha: 1, touchEnabled: true, touchChildren: true, children: [],
+    get numChildren() { return this.children.length; }, getChildAt(i) { return this.children[i]; } };
+global.window = { addEventListener() {}, devicePixelRatio: 1,
+    egret: { getQualifiedClassName(o) { return o.__class || "Object"; } } };
+global.document = { querySelector(s) { return s === ".egret-player" ? { "egret-player": { stage } } : null; } };
+vm.runInThisContext(source);
+const painted = [];
+function item(cls, name, x, text, prompt) {
+    const box = { x, y: 30, width: 120, height: 25 };
+    const o = { __class: cls, hashCode: painted.length + 10, name, text, prompt,
+        parent: stage, stage, visible: true, alpha: 1, touchEnabled: true, children: [], numChildren: 0,
+        getTransformedBounds() { return box; },
+        $EventDispatcher_props_: { 1: { touchTap: [{ listener() {} }] } } };
+    stage.children.push(o); painted.push({ o, box }); return o;
+}
+stage.$touchHandler = { findTarget(x, y) {
+    for (let i = painted.length - 1; i >= 0; i--) {
+        const { o, box: b } = painted[i];
+        if (x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height) return o;
+    }
+    return stage;
+} };
+stage.selfUrl = item("eui.EditableText", "", 20, "qa", "自选服务器");
+stage.txt_account = item("eui.EditableText", "", 160, ":D23", "账号/手机号/米米号");
+item("eui.EditableText", "", 300, "备注", "备注内容");
+item("eui.EditableText", "nickname", 440, "昵称", "");
+const table = p => window.__inputTest.buildActionTable(p);
+const result = { compact: table({}).actions, detail: table({ detail: true }).actions };
+item("eui.Image", "accountCover", 160, "", "");
+result.covered = table({}); result.withOccluded = table({ occluded: true });
+process.stdout.write(JSON.stringify(result));
+'''
+        result = subprocess.run([shutil.which("node"), "-e", script, str(PAGE_AGENT)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=10, check=True)
+        data = json.loads(result.stdout)
+        for key in ("compact", "detail"):
+            rows = {row["label"]: row for row in data[key]}
+            self.assertEqual(rows["qa"]["field"], "selfUrl")
+            self.assertEqual(rows["qa"]["prompt"], "自选服务器")
+            self.assertEqual(rows[":D23"]["field"], "txt_account")
+            self.assertEqual(rows[":D23"]["prompt"], "账号/手机号/米米号")
+            self.assertEqual(rows["备注"]["prompt"], "备注内容")
+            self.assertNotIn("field", rows["备注"])
+            self.assertEqual(rows["昵称"]["field"], "nickname")
+            self.assertNotIn("prompt", rows["昵称"])
+        self.assertNotIn(":D23", [row["label"] for row in data["covered"]["actions"]])
+        hidden = next(row for row in data["withOccluded"]["actions"] if row["label"] == ":D23")
+        self.assertTrue(hidden["occluded"])
+        self.assertEqual(hidden["field"], "txt_account")
+        cover = next(row for row in data["covered"]["actions"] if row["label"] == "accountCover")
+        self.assertNotIn("field", cover)
+        self.assertNotIn("prompt", cover)
+
     def test_small_limit_keeps_top_panel_actions(self):
         data = self.run_probe()
         # 60 个地图装饰格子在弹窗下面：扫描预算必须留得住顶层弹窗的确定按钮
@@ -1905,6 +1964,20 @@ vp.parent = scroller;
 
 
 class RenderTableTest(unittest.TestCase):
+    def test_input_fields_distinguish_server_from_account(self):
+        server = load_server()
+        text = server.render_action_table({"marker": "login", "actions": [
+            {"i": 1, "label": "qa", "role": "input", "field": "selfUrl", "prompt": "自选服务器"},
+            {"i": 2, "label": ":D23", "role": "input", "field": "txt_account", "prompt": "账号/手机号/米米号"},
+            {"i": 3, "label": "备注", "role": "input", "prompt": '输入 "备注"\n内容'},
+            {"i": 4, "label": "旧输入框", "role": "input"},
+            {"i": 5, "label": "登录", "role": "button"}]})
+        self.assertIn('1 qa input field=selfUrl prompt="自选服务器"', text.splitlines())
+        self.assertIn('2 :D23 input field=txt_account prompt="账号/手机号/米米号"', text.splitlines())
+        self.assertIn('3 备注 input prompt=' + json.dumps('输入 "备注"\n内容', ensure_ascii=False), text.splitlines())
+        self.assertIn("4 旧输入框 input", text.splitlines())
+        self.assertIn("5 登录 button", text.splitlines())
+
     def test_renders_one_line_per_action(self):
         server = load_server()
         table = {"panel": {"name": "newLogin.NewLogin"}, "mode": "normal", "marker": "abc123",

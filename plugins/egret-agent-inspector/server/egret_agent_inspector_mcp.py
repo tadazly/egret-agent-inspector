@@ -591,6 +591,11 @@ def render_action_table(table):
         lines.append("动作 %d 条%s" % (len(actions), ("（%s）" % "，".join(extra)) if extra else ""))
         for a in actions:
             flags = []
+            if a.get("role") == "input":
+                if a.get("field"):
+                    flags.append("field=%s" % a["field"])
+                if a.get("prompt"):
+                    flags.append("prompt=%s" % json.dumps(a["prompt"], ensure_ascii=False))
             if a.get("off"):
                 flags.append("禁用")
             if a.get("on"):
