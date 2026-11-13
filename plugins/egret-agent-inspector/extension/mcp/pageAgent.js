@@ -1,16 +1,32 @@
 // Egret Agent Inspector MCP 页面代理：由扩展通过 chrome.scripting.executeScript 注入到页面 MAIN world，
 // 为 MCP 工具提供显示对象查询、点击、等待等能力。所有返回值均为可 JSON 序列化的普通对象。
-(function () {
-    var VERSION = "1.7.63";
+(function (createErrorHooks) {
+    var VERSION = "1.7.68";
     // 标识「这一次页面加载」：扩展重载会重新注入页面代理，但游戏对象和 hash 都还在，不能算重载；
     // 挂在 window 上，重新注入沿用，只有页面真的重载才换新的
     var BOOT_ID = window.__egretInspectorBootId ||
         (window.__egretInspectorBootId = Math.random().toString(36).slice(2, 10));
-    if (window.__egretInspectorMcp && window.__egretInspectorMcp.version === VERSION) return;
+    var previousAgent = window.__egretInspectorMcp;
+    if (previousAgent && previousAgent.version === VERSION && !previousAgent.disposed) return;
+    var requiresReload = !!(previousAgent && previousAgent.requiresReload);
+    var previousDisposal = null;
+    if (previousAgent) {
+        if (typeof previousAgent.dispose === "function") previousDisposal = previousAgent.dispose();
+        else requiresReload = true; // 旧匿名钩子没有句柄，只有刷新才能完整移除。
+    }
+    previousAgent = null; // 不让新代理形成持有历代代理的链。
+
+    var disposed = false;
+    var api = null;
+    var errorHooks = null;
+    var pendingSleeps = new Set();
 
     var BIND_IGNORE = { parent: 1, stage: 1, skin: 1, hostComponent: 1, owner: 1, root: 1 };
     var TOUCH_ID = 1001;
     var hashCache = new Map();
+    var HASH_CACHE_LIMIT = 20000;
+    var weakHashCache = typeof WeakRef === "function";
+    var hashCacheSweepAt = 0;
     var bindCache = null;
     var bindCacheTime = 0;
 
@@ -73,6 +89,7 @@
     }
 
     function findBindKey(host, target) {
+        if (disposed) return null;
         var now = Date.now();
         if (!bindCache || now - bindCacheTime > 1000) {
             bindCache = new Map();
@@ -145,59 +162,15 @@
 
     // ---- 运行期错误收集：让 agent 能发现操作过程中出现的异常、资源缺失和报错日志 ----
     // 缓冲区挂在 window 上，页面代理重新注入后仍然保留；只记录注入之后发生的错误
-    var ERROR_LIMIT = 200;
-
     function errorBuffer() {
         if (!window.__egretInspectorErrors) window.__egretInspectorErrors = [];
         return window.__egretInspectorErrors;
     }
 
-    function pushError(type, message, stack) {
-        var buf = errorBuffer();
-        var text = String(message === undefined || message === null ? "" : message).slice(0, 500);
-        var last = buf[buf.length - 1];
-        if (last && last.type === type && last.message === text) {
-            last.count++;
-            last.lastAt = Date.now();
-            return;
-        }
-        buf.push({ type: type, message: text, at: Date.now(), lastAt: Date.now(), count: 1,
-            stack: stack ? String(stack).slice(0, 800) : null });
-        while (buf.length > ERROR_LIMIT) buf.shift();
-    }
-
-    function formatArg(v) {
-        if (v instanceof Error) return v.message;
-        if (v === null || v === undefined || typeof v !== "object") return String(v);
-        try {
-            return JSON.stringify(serialize(v, 1)).slice(0, 200);
-        } catch (e) {
-            return Object.prototype.toString.call(v);
-        }
-    }
-
     function installErrorHooks() {
-        if (window.__egretInspectorErrorHooks) return;
-        window.__egretInspectorErrorHooks = Date.now();
-        window.addEventListener("error", function (e) {
-            var t = e && e.target;
-            if (t && t !== window && (t.src || t.href)) pushError("resource", "资源加载失败：" + (t.src || t.href));
-            else pushError("error", e && e.message || "未捕获异常", e && e.error && e.error.stack);
-        }, true);
-        window.addEventListener("unhandledrejection", function (e) {
-            var r = e && e.reason;
-            pushError("unhandledrejection", r && r.message || r, r && r.stack);
-        });
-        ["error", "warn"].forEach(function (level) {
-            var orig = console[level];
-            if (typeof orig !== "function") return;
-            console[level] = function () {
-                try {
-                    pushError("console." + level, Array.prototype.map.call(arguments, formatArg).join(" "));
-                } catch (e) {}
-                return orig.apply(console, arguments);
-            };
-        });
+        // 工厂定义在本代理作用域之外，长期错误监听不能反向持有显示对象缓存。
+        errorHooks = createErrorHooks(window, console);
+        requiresReload = requiresReload || errorHooks.requiresReload;
     }
 
     function textOf(o) {
@@ -452,13 +425,42 @@
 
     // topFirst 为真时按「最上层子节点优先」遍历：显示列表里后加入的子节点画在上面，
     // 有扫描预算上限时必须先走它们，否则预算会被背景和地图吃光，顶层弹窗的按钮一个都收不到。
+    function cachedObject(key) {
+        var entry = hashCache.get(key);
+        return entry && weakHashCache ? entry.deref() : entry;
+    }
+
+    function cacheObject(o, hash) {
+        if (disposed) return;
+        var key = String(hash);
+        if (cachedObject(key) === o) return;
+        if (!hashCache.has(key) && hashCache.size >= HASH_CACHE_LIMIT) {
+            hashCache.delete(hashCache.keys().next().value);
+        }
+        hashCache.set(key, weakHashCache ? new WeakRef(o) : o);
+    }
+
+    function sweepHashCache() {
+        var now = Date.now();
+        if (now - hashCacheSweepAt < 1000) return;
+        hashCacheSweepAt = now;
+        var stage = getStage();
+        hashCache.forEach(function (_entry, key) {
+            var o = cachedObject(key);
+            if (!o || (o !== stage && !o.stage)) hashCache.delete(key);
+        });
+    }
+
     function walk(root, fn, topFirst) {
+        if (disposed) return;
+        // 查询缓存不能延长已关闭面板的生命周期；旧浏览器也定期移除离场对象。
+        sweepHashCache();
         var stack = [root];
         while (stack.length) {
             var o = stack.pop();
             if (!o) continue;
             var h = hashOf(o);
-            if (h !== undefined) hashCache.set(String(h), o);
+            if (h !== undefined) cacheObject(o, h);
             if (fn(o) === false) continue;
             var n = numChildren(o);
             if (topFirst) for (var k = 0; k < n; k++) stack.push(childAt(o, k));
@@ -469,8 +471,9 @@
     function byHash(hash) {
         var stage = requireStage();
         var key = String(hash);
-        var cached = hashCache.get(key);
+        var cached = cachedObject(key);
         if (cached && (cached === stage || cached.stage)) return cached;
+        hashCache.delete(key);
         var found = null;
         walk(stage, function (o) {
             if (found) return false;
@@ -2236,8 +2239,14 @@
     }
 
     function sleep(ms) {
-        return new Promise(function (r) {
-            setTimeout(r, ms);
+        return new Promise(function (resolve, reject) {
+            if (disposed) return reject(new Error("页面代理已卸载，请重新注入"));
+            var pending = { timer: null, reject: reject };
+            pending.timer = setTimeout(function () {
+                pendingSleeps.delete(pending);
+                resolve();
+            }, ms);
+            pendingSleeps.add(pending);
         });
     }
 
@@ -5031,6 +5040,9 @@
                 stats.egret = { displayObjects: total, visibleObjects: visible,
                     interactionOwners: listenerOwners, interactionListeners: interactionListeners };
             } else stats.egret = null;
+            stats.inspectorCache = { entries: hashCache.size, limit: HASH_CACHE_LIMIT, weakReferences: weakHashCache };
+            stats.agentLifecycle = { requiresReload: requiresReload, pendingSleeps: pendingSleeps.size,
+                errorHooks: errorHooks.status(), previousDisposal: previousDisposal };
             return stats;
         },
 
@@ -5318,9 +5330,38 @@
 
     installErrorHooks();
 
-    window.__egretInspectorMcp = {
+    function disposeAgent() {
+        if (disposed) return { version: VERSION, alreadyDisposed: true };
+        disposed = true;
+        var result = { version: VERSION, clearedCacheEntries: hashCache.size,
+            clearedEntries: lastEntries.length, cancelledSleeps: pendingSleeps.size };
+        hashCache.clear();
+        if (bindCache) bindCache.clear();
+        bindCache = null;
+        lastTable = null;
+        lastEntries.length = 0;
+        lastEntries = [];
+        dragCache = null;
+        lockableSeen = {};
+        lockToggled = {};
+        pendingSleeps.forEach(function (pending) {
+            clearTimeout(pending.timer);
+            pending.reject(new Error("页面代理已卸载，请重新注入"));
+        });
+        pendingSleeps.clear();
+        result.errorHooks = errorHooks.dispose();
+        api.disposed = true;
+        if (window.__egretInspectorMcp === api) delete window.__egretInspectorMcp;
+        return result;
+    }
+
+    api = window.__egretInspectorMcp = {
         version: VERSION,
+        disposed: false,
+        requiresReload: requiresReload,
+        dispose: disposeAgent,
         call: async function (method, params) {
+            if (disposed) return { ok: false, error: "页面代理已卸载，请重新注入" };
             var h = handlers[method];
             if (!h) return { ok: false, error: "未知的页面方法：" + method };
             try {
@@ -5330,4 +5371,99 @@
             }
         }
     };
-})();
+})(function createErrorHooks(global, logger) {
+    // 此工厂在顶层定义；不要把显示对象查询、serialize 或代理 handler 传入这里。
+    var previous = global.__egretInspectorErrorHookState;
+    if (previous && typeof previous.dispose === "function") previous.dispose();
+    previous = null;
+    if (global.__egretInspectorErrorHooks) {
+        // 1.7.67 及更早版本只保存时间戳，无法安全回溯删除匿名监听。
+        return { requiresReload: true,
+            status: function () { return { managed: false, requiresReload: true }; },
+            dispose: function () { return { removedListeners: 0, restoredConsoleMethods: 0, requiresReload: true }; } };
+    }
+
+    var disposed = false;
+    var installedAt = Date.now();
+    var originals = {}, wrappers = {};
+    function buffer() {
+        return global.__egretInspectorErrors || (global.__egretInspectorErrors = []);
+    }
+    function push(type, message, stack) {
+        if (disposed) return;
+        var buf = buffer();
+        var text = String(message === undefined || message === null ? "" : message).slice(0, 500);
+        var last = buf[buf.length - 1];
+        if (last && last.type === type && last.message === text) {
+            last.count++;
+            last.lastAt = Date.now();
+            return;
+        }
+        buf.push({ type: type, message: text, at: Date.now(), lastAt: Date.now(), count: 1,
+            stack: stack ? String(stack).slice(0, 800) : null });
+        while (buf.length > 200) buf.shift();
+    }
+    function preview(value, depth, seen) {
+        if (value === null || typeof value !== "object") return typeof value === "function" ? undefined : value;
+        if (depth < 0) return Array.isArray(value) ? "[Array]" : "[Object]";
+        if (seen.indexOf(value) >= 0) return "[Circular]";
+        seen.push(value);
+        var out = Array.isArray(value) ? [] : {};
+        Object.keys(value).slice(0, 10).forEach(function (key) {
+            try { out[key] = preview(value[key], depth - 1, seen); } catch (e) { out[key] = "[getter error]"; }
+        });
+        seen.pop();
+        return out;
+    }
+    function formatArg(value) {
+        if (value instanceof Error) return value.message;
+        if (value === null || typeof value !== "object") return String(value);
+        try { return JSON.stringify(preview(value, 1, [])).slice(0, 200); }
+        catch (e) { return Object.prototype.toString.call(value); }
+    }
+    function onError(event) {
+        var target = event && event.target;
+        if (target && target !== global && (target.src || target.href)) push("resource", "资源加载失败：" + (target.src || target.href));
+        else push("error", event && event.message || "未捕获异常", event && event.error && event.error.stack);
+    }
+    function onUnhandledRejection(event) {
+        var reason = event && event.reason;
+        push("unhandledrejection", reason && reason.message || reason, reason && reason.stack);
+    }
+    global.addEventListener("error", onError, true);
+    global.addEventListener("unhandledrejection", onUnhandledRejection);
+    ["error", "warn"].forEach(function (level) {
+        var original = logger[level];
+        if (typeof original !== "function") return;
+        originals[level] = original;
+        var wrapper = function () {
+            try { push("console." + level, Array.prototype.map.call(arguments, formatArg).join(" ")); } catch (e) {}
+            return original.apply(logger, arguments);
+        };
+        wrappers[level] = wrapper;
+        logger[level] = wrapper;
+    });
+    var controller = {
+        requiresReload: false,
+        status: function () { return { managed: true, disposed: disposed, listeners: disposed ? 0 : 2 }; },
+        dispose: function () {
+            if (disposed) return { removedListeners: 0, restoredConsoleMethods: 0, alreadyDisposed: true };
+            disposed = true;
+            global.removeEventListener("error", onError, true);
+            global.removeEventListener("unhandledrejection", onUnhandledRejection);
+            var restored = 0;
+            Object.keys(wrappers).forEach(function (level) {
+                // 后装的日志包装不属于本代理，不能覆盖它。
+                if (logger[level] === wrappers[level]) { logger[level] = originals[level]; restored++; }
+            });
+            if (global.__egretInspectorErrorHookState === controller) {
+                delete global.__egretInspectorErrorHookState;
+                delete global.__egretInspectorErrorHooks;
+            }
+            return { removedListeners: 2, restoredConsoleMethods: restored };
+        }
+    };
+    global.__egretInspectorErrorHooks = installedAt;
+    global.__egretInspectorErrorHookState = controller;
+    return controller;
+});
