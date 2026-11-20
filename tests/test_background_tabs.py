@@ -12,5 +12,6 @@ from test_mcp_server import BRIDGE
 class BackgroundTabTest(unittest.TestCase):
     def test_background_operations(self):
         fixture = Path(__file__).parent / "fixtures" / "background_tabs.cjs"
-        result = subprocess.run(["node", str(fixture), str(BRIDGE)], capture_output=True, text=True, timeout=15)
+        result = subprocess.run(["node", str(fixture), str(BRIDGE)], capture_output=True,
+                                encoding="utf-8", timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
