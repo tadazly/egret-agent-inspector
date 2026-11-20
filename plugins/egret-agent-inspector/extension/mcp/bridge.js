@@ -11,7 +11,8 @@ const MAX_RETRY_DELAY = 30000;
 const sockets = new Map();
 const retryState = new Map();
 const frameCache = new Map();
-let lastTabId = null;
+// 每个 MCP 连接对应一个独立任务，省略 tabId 时只复用本连接的页签。
+const recentTabs = new Map();
 
 function log(...args) {
     console.debug("[Egret MCP]", ...args);
@@ -74,13 +75,14 @@ async function connect(port) {
             extensionVersion: chrome.runtime.getManifest().version,
             agentVersion: AGENT_VERSION,
             extensionId: chrome.runtime.id,
-            capabilities: ["closeTab"],
+            capabilities: ["closeTab", "backgroundRendering"],
             browser: browserName(),
             userAgent: navigator.userAgent
         }));
     };
     ws.onmessage = (ev) => onServerMessage(ws, ev.data);
     ws.onclose = () => {
+        recentTabs.delete(ws);
         sockets.delete(port);
         const state = retryState.get(port) || { fails: 0, timer: 0 };
         state.fails++;
@@ -121,7 +123,7 @@ async function onServerMessage(ws, raw) {
     if (msg.id === undefined) return;
     let reply;
     try {
-        reply = { id: msg.id, result: await handleRequest(msg.method, msg.params || {}) };
+        reply = { id: msg.id, result: await handleRequest(msg.method, msg.params || {}, ws) };
     } catch (e) {
         reply = { id: msg.id, error: e && e.message ? e.message : e && e.stack || String(e) };
     }
@@ -156,20 +158,17 @@ async function probeFrames(tabId, timeoutMs = 2500) {
     return hit ? hit.frameId : null;
 }
 
-async function resolveTab(tabId) {
+async function resolveTab(tabId, connection) {
     if (tabId !== undefined && tabId !== null) {
         const tab = await chrome.tabs.get(+tabId);
-        lastTabId = tab.id;
+        recentTabs.set(connection, tab.id);
         return tab;
     }
-    const candidates = [];
-    if (lastTabId !== null) {
-        try {
-            candidates.push(await chrome.tabs.get(lastTabId));
-        } catch (e) {
-            lastTabId = null;
-        }
+    if (recentTabs.has(connection)) {
+        // 已指定过的任务页可能还在加载。保留目标，让调用方看到该页的真实状态。
+        return chrome.tabs.get(recentTabs.get(connection));
     }
+    const candidates = [];
     const active = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const all = await chrome.tabs.query({});
     for (const t of active.concat(all)) {
@@ -181,7 +180,7 @@ async function resolveTab(tabId) {
             const frameId = await probeFrames(t.id);
             if (frameId !== null) {
                 frameCache.set(t.id, frameId);
-                lastTabId = t.id;
+                recentTabs.set(connection, t.id);
                 return t;
             }
         } catch (e) {}
@@ -200,26 +199,106 @@ async function resolveFrame(tabId, frameId) {
     return found;
 }
 
+// 后台页面恢复绘制只作用于目标 WebContents。相邻步骤复用同一次调试连接，
+// 并发的等待、操作和截图都结束后才开始计算空闲时间。
+const renderSessions = new Map();
+const RENDER_IDLE_MS = 15000;
+
+async function startRendering(session) {
+    const target = session.target;
+    await chrome.debugger.attach(target, "1.3");
+    try {
+        await chrome.debugger.sendCommand(target, "Emulation.setFocusEmulationEnabled", { enabled: true });
+        // 等游戏获得至少一帧布局/绘制机会，避免刚恢复就读到暂停前的动作表。
+        const [frame] = await chrome.scripting.executeScript({
+            target: { tabId: target.tabId },
+            func: () => new Promise((resolve) => {
+                const timer = setTimeout(() => resolve(false), 2500);
+                requestAnimationFrame(() => requestAnimationFrame(() => {
+                    clearTimeout(timer);
+                    resolve(!document.hidden);
+                }));
+            })
+        });
+        if (!frame?.result) throw new Error("目标页签未恢复绘制");
+    } catch (error) {
+        if (renderSessions.get(target.tabId) === session) {
+            await chrome.debugger.detach(target).catch(() => {});
+        }
+        throw error;
+    }
+}
+
+async function withBackgroundRendering(tabId, action) {
+    let session = renderSessions.get(tabId);
+    if (session?.closing) {
+        await session.closing;
+        return withBackgroundRendering(tabId, action);
+    }
+    if (!session) {
+        session = { target: { tabId }, users: 0 };
+        renderSessions.set(tabId, session);
+        session.ready = startRendering(session).catch((error) => {
+            if (renderSessions.get(tabId) === session) renderSessions.delete(tabId);
+            throw new Error(`无法在后台绘制页签 ${tabId}：${error.message || error}`);
+        });
+    }
+    clearTimeout(session.timer);
+    session.users++;
+    try {
+        await session.ready;
+        return await action(session.target);
+    } finally {
+        if (--session.users === 0 && renderSessions.get(tabId) === session) {
+            session.timer = setTimeout(() => {
+                session.closing = chrome.debugger.detach(session.target).catch(() => {}).finally(() => {
+                    if (renderSessions.get(tabId) === session) renderSessions.delete(tabId);
+                });
+            }, RENDER_IDLE_MS);
+        }
+    }
+}
+
+chrome.debugger.onDetach.addListener(({ tabId }) => {
+    clearTimeout(renderSessions.get(tabId)?.timer);
+    renderSessions.delete(tabId);
+});
+
 async function runInPage(tabId, frameId, method, params) {
     const target = { tabId, frameIds: [frameId] };
+    // 诊断与自定义表达式应读取页面原有的可见性和运行状态。
+    const needsFrames = !["runtimeStats", "status", "getErrors", "evaluate"].includes(method);
     const exec = async () => {
         const [res] = await chrome.scripting.executeScript({
             target,
             world: "MAIN",
-            func: (m, p, v) => {
+            func: (m, p, v, needsFrames) => {
+                if (needsFrames && document.hidden) return { needRendering: true };
                 const agent = window.__egretInspectorMcp;
                 if (!agent || agent.version !== v || agent.disposed) return { needInject: true };
                 return agent.call(m, p);
             },
-            args: [method, params, AGENT_VERSION]
+            args: [method, params, AGENT_VERSION, needsFrames]
         });
         return res && res.result;
     };
-    let result = await exec();
-    if (result && result.needInject) {
-        await chrome.scripting.executeScript({ target, world: "MAIN", files: [AGENT_FILE] });
-        result = await exec();
+    const invoke = async () => {
+        let result = await exec();
+        if (result?.needInject) {
+            await chrome.scripting.executeScript({ target, world: "MAIN", files: [AGENT_FILE] });
+            result = await exec();
+        }
+        return result;
+    };
+    // needRendering 只在调用页面方法之前返回，绝不因点击后的错误而重放动作。
+    let result;
+    if (needsFrames && renderSessions.has(tabId)) {
+        result = await withBackgroundRendering(tabId, invoke);
+    } else {
+        result = await invoke();
+        if (result?.needRendering) result = await withBackgroundRendering(tabId, invoke);
     }
+    if (result?.needRendering) throw new Error(`页签 ${tabId} 的游戏帧仍在后台，无法执行 ${method}`);
     if (!result) throw new Error("页面脚本没有返回结果（页面可能正在跳转）");
     if (!result.ok) throw new Error(result.error || "页面返回了异常结果：" + JSON.stringify(result).slice(0, 300));
     return result.result;
@@ -237,6 +316,10 @@ function waitTabComplete(tabId, timeoutMs) {
         };
         const timer = setTimeout(done, timeoutMs);
         chrome.tabs.onUpdated.addListener(listener);
+        // 新建的轻量页面可能在注册监听前已经加载完。
+        chrome.tabs.get(tabId).then((tab) => {
+            if (tab.status === "complete" && !tab.pendingUrl) done();
+        }, done);
     });
 }
 
@@ -276,7 +359,42 @@ async function resizeShot(dataUrl, format, quality, maxWidth, rect) {
     }
 }
 
-async function handleRequest(method, params) {
+async function captureTab(tab, format, quality) {
+    // captureVisibleTab 只能按窗口截图。在捕获期间用户切页时丢弃结果，
+    // 改用绑定 tabId 的截图，避免把用户当前看的页签交给 OCR 或 agent。
+    if (tab.active && !renderSessions.has(tab.id)) {
+        let switched = false;
+        const onActivated = ({ windowId }) => { if (windowId === tab.windowId) switched = true; };
+        chrome.tabs.onActivated.addListener(onActivated);
+        try {
+            const win = await chrome.windows.get(tab.windowId);
+            const minimized = win.state === "minimized";
+            const current = await chrome.tabs.get(tab.id);
+            let visible = !minimized && !switched && current.active && current.windowId === tab.windowId;
+            if (visible && isScriptableUrl(current.url)) {
+                // macOS 也可能把完全被其他应用遮住的选中页签置为 hidden。
+                const [state] = await chrome.scripting.executeScript({
+                    target: { tabId: tab.id }, func: () => document.hidden
+                });
+                visible = state?.result === false;
+            }
+            if (visible && !switched) {
+                const data = await chrome.tabs.captureVisibleTab(tab.windowId, { format, quality });
+                const after = await chrome.tabs.get(tab.id);
+                if (!switched && after.active && after.windowId === tab.windowId) return data;
+            }
+        } finally {
+            chrome.tabs.onActivated.removeListener(onActivated);
+        }
+    }
+    return withBackgroundRendering(tab.id, async (target) => {
+        const options = format === "jpeg" ? { format, quality } : { format };
+        const { data } = await chrome.debugger.sendCommand(target, "Page.captureScreenshot", options);
+        return `data:image/${format};base64,${data}`;
+    });
+}
+
+async function handleRequest(method, params, connection) {
     switch (method) {
         case "listTabs": {
             const tabs = await chrome.tabs.query({});
@@ -289,7 +407,7 @@ async function handleRequest(method, params) {
                         item.egret = false;
                     }
                 }
-                item.lastUsed = t.id === lastTabId;
+                item.lastUsed = t.id === recentTabs.get(connection);
                 return item;
             }));
         }
@@ -301,8 +419,7 @@ async function handleRequest(method, params) {
             const tab = tabs.find((t) => t.id === tabId);
             const receipt = { tabId, ok: true, status: "alreadyAbsent", verified: true, absent: true };
             if (!tab) {
-                frameCache.delete(tabId);
-                if (lastTabId === tabId) lastTabId = null;
+                forgetTab(tabId);
                 return receipt;
             }
             Object.assign(receipt, { windowId: tab.windowId, url: tab.url, title: tab.title });
@@ -324,8 +441,7 @@ async function handleRequest(method, params) {
                 if (remaining.some((t) => t.id === tabId)) {
                     return { ...receipt, ok: false, status: "stillOpen", verified: false, absent: false, error: "关闭后目标页签仍在" };
                 }
-                frameCache.delete(tabId);
-                if (lastTabId === tabId) lastTabId = null;
+                forgetTab(tabId);
                 return { ...receipt, status: "closed" };
             } catch (e) {
                 return { ...receipt, ok: false, status: "unconfirmed", verified: false, absent: null,
@@ -335,64 +451,37 @@ async function handleRequest(method, params) {
         case "navigate": {
             let tab;
             if (params.newWindow) {
-                // 多个 agent 并行：同一窗口里不在前台的标签页被当成后台，游戏停止渲染。
-                // 新窗口铺在右半边、原窗口收到左半边，两边都露着，都算前台。给了 tabId 就把那个标签页挪过去
-                const moving = params.tabId !== undefined && params.tabId !== null ? await chrome.tabs.get(+params.tabId) : null;
-                const focused = await chrome.windows.getLastFocused().catch(() => null);
-                const others = (await chrome.windows.getAll({ windowTypes: ["normal"] })).filter((w) => !moving || w.id !== moving.windowId);
-                const base = focused && (!moving || focused.id !== moving.windowId) ? focused : others[0] || focused;
-                const opts = { focused: true, type: "normal" };
-                if (moving) opts.tabId = moving.id;
-                else opts.url = params.url;
-                if (base && base.width && base.height) {
-                    // 顺着长边对半分：连着分几次后窗口窄过高，横屏游戏会切成竖屏布局
-                    const wide = base.width / 2 >= base.height;
-                    const w = wide ? Math.round(base.width / 2) : base.width;
-                    const h = wide ? base.height : Math.round(base.height / 2);
-                    Object.assign(opts, { left: base.left + (wide ? w : 0), top: base.top + (wide ? 0 : h), width: w, height: h });
-                    // 原窗口收到左（上）半边：两个窗口重叠时，前置一个就把另一个盖住，那边的游戏又停了
-                    await chrome.windows.update(base.id, { state: "normal" }).catch(() => {});
-                    await chrome.windows.update(base.id, { left: base.left, top: base.top, width: w, height: h }).catch(() => {});
-                }
-                // 算出来的位置仍可能大半在屏幕外（屏幕比窗口记录的小、原窗口本来就靠边），浏览器直接拒绝：不给位置重试
-                const win = await chrome.windows.create(opts).catch(() => {
-                    for (const k of ["left", "top", "width", "height"]) delete opts[k];
-                    return chrome.windows.create(opts);
-                });
-                tab = moving ? await chrome.tabs.update(moving.id, { url: params.url, active: true }) : win.tabs[0];
-            } else if (params.newTab) {
-                tab = await chrome.tabs.create({ url: params.url, active: true });
+                const moving = params.tabId !== undefined && params.tabId !== null;
+                const opts = moving ? { tabId: +params.tabId } : { url: params.url };
+                const win = await chrome.windows.create({ ...opts, type: "normal", focused: false });
+                tab = moving ? await chrome.tabs.update(+params.tabId, { url: params.url }) : win.tabs[0];
             } else {
-                const target = params.tabId !== undefined && params.tabId !== null ? await chrome.tabs.get(+params.tabId) :
-                    lastTabId !== null ? await chrome.tabs.get(lastTabId).catch(() => null) : null;
-                const t = target || (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
-                tab = t ? await chrome.tabs.update(t.id, { url: params.url, active: true }) : await chrome.tabs.create({ url: params.url });
+                let targetId = null;
+                if (!params.newTab) {
+                    if (params.tabId != null) targetId = +params.tabId;
+                    else targetId = recentTabs.get(connection);
+                }
+                tab = targetId != null ? await chrome.tabs.update(targetId, { url: params.url })
+                    : await chrome.tabs.create({ url: params.url, active: false });
             }
             frameCache.delete(tab.id);
-            lastTabId = tab.id;
+            recentTabs.set(connection, tab.id);
             await waitTabComplete(tab.id, params.timeoutMs || 30000);
             const t = await chrome.tabs.get(tab.id);
             return { tabId: t.id, url: t.url, title: t.title, status: t.status };
         }
         case "screenshot": {
-            const tab = await resolveTab(params.tabId);
-            if (!tab.active) await chrome.tabs.update(tab.id, { active: true });
-            // 窗口失焦不代表 captureVisibleTab 返回旧帧；只有明确不可可靠截图的状态才告警。
-            const warnings = [];
-            try {
-                const win = await chrome.windows.get(tab.windowId);
-                if (win.state === "minimized") warnings.push("浏览器窗口已最小化，截图不可用");
-            } catch (e) { /* 窗口信息拿不到就不加警告 */ }
+            const tab = await resolveTab(params.tabId, connection);
             // 截图按像素计费给模型，默认压到 jpeg + 限宽，够看清界面即可；要看细节就裁剪 rect
             const format = params.format === "png" ? "png" : "jpeg";
             const quality = params.quality === undefined ? 70 : Math.max(10, Math.min(100, +params.quality));
             const maxWidth = params.maxWidth === undefined ? 900 : +params.maxWidth;
-            const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format, quality });
+            const dataUrl = await captureTab(tab, format, quality);
             const shot = await resizeShot(dataUrl, format, quality, maxWidth, params.rect);
-            return { tabId: tab.id, mimeType: shot.mimeType, data: shot.data, width: shot.width, height: shot.height, warnings };
+            return { tabId: tab.id, mimeType: shot.mimeType, data: shot.data, width: shot.width, height: shot.height, warnings: [] };
         }
         case "page": {
-            const tab = await resolveTab(params.tabId);
+            const tab = await resolveTab(params.tabId, connection);
             if (!isScriptableUrl(tab.url)) throw new Error(`标签页 ${tab.id} 的地址无法注入脚本：${tab.url}`);
             let frameId = await resolveFrame(tab.id, params.frameId);
             try {
@@ -403,17 +492,6 @@ async function handleRequest(method, params) {
                 if (params.frameId === undefined && frameCache.has(tab.id) && /frame|No tab/i.test(String(e && e.message))) {
                     frameCache.delete(tab.id);
                     frameId = await resolveFrame(tab.id);
-                    const result = await runInPage(tab.id, frameId, params.method, params.params || {});
-                    return { tabId: tab.id, frameId, result };
-                }
-                // 页面在后台：先把标签页切到前台、窗口还原并前置，等游戏恢复渲染再试一次。
-                // 无人值守的验收里窗口常被别的程序盖住，agent 只能停下来等人
-                if (/页面在后台/.test(String(e && e.message))) {
-                    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
-                    const win = await chrome.windows.get(tab.windowId).catch(() => null);
-                    await chrome.windows.update(tab.windowId, win && win.state === "minimized"
-                        ? { state: "normal", focused: true } : { focused: true }).catch(() => {});
-                    await new Promise((r) => setTimeout(r, 800));
                     const result = await runInPage(tab.id, frameId, params.method, params.params || {});
                     return { tabId: tab.id, frameId, result };
                 }
@@ -436,10 +514,14 @@ async function handleRequest(method, params) {
     }
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+function forgetTab(tabId) {
     frameCache.delete(tabId);
-    if (lastTabId === tabId) lastTabId = null;
-});
+    for (const [connection, recentId] of recentTabs) {
+        if (recentId === tabId) recentTabs.delete(connection);
+    }
+}
+
+chrome.tabs.onRemoved.addListener(forgetTab);
 chrome.tabs.onUpdated.addListener((tabId, info) => {
     if (info.status === "loading") frameCache.delete(tabId);
 });

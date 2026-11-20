@@ -719,6 +719,29 @@ def load_server():
     return module
 
 
+class ConnectionHealthTest(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_calls_share_a_single_health_check(self):
+        conn = load_server().ExtensionConnection(None, mock.Mock(), {})
+        conn.last_seen = 0
+        sent = asyncio.Event()
+        conn.send_text = mock.AsyncMock(side_effect=lambda _: sent.set())
+        tasks = [asyncio.create_task(conn.alive(.3)) for _ in range(3)]
+        await sent.wait()
+        conn.on_message('{"type":"pong"}')
+        self.assertEqual(await asyncio.gather(*tasks), [True, True, True])
+        conn.send_text.assert_awaited_once()
+
+    async def test_close_wakes_a_pending_health_check(self):
+        conn = load_server().ExtensionConnection(None, mock.Mock(), {})
+        conn.last_seen = 0
+        sent = asyncio.Event()
+        conn.send_text = mock.AsyncMock(side_effect=lambda _: sent.set())
+        probe = asyncio.create_task(conn.alive(30))
+        await sent.wait()
+        conn.close()
+        self.assertFalse(await asyncio.wait_for(probe, .3))
+
+
 class PageAgentLintTest(unittest.TestCase):
     def test_no_local_shadows_a_top_level_helper(self):
         # 页面代理整体是一个 IIFE，var 会提升到函数作用域：局部变量叫 round 就把 round() 遮住了，

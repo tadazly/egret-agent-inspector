@@ -769,10 +769,9 @@ TOOLS = {
         {"type": "object", "properties": {"probe": {"type": "boolean", "description": "是否探测 Egret，默认 true"}}},
         "listTabs", None),
     "egret_navigate": (
-        "在浏览器中打开 URL（默认复用最近使用的标签页），并等待页面加载完成。",
-        obj({"url": {"type": "string"}, "newTab": {"type": "boolean", "description": "在新标签页中打开"},
-             "newWindow": {"type": "boolean", "description": "在新窗口中打开，新窗口铺右半边、原窗口收到左半边；给了 tabId 就把那个标签页挪进新窗口。"
-                           "多个 agent 并行各占一个窗口：同一窗口里不在前台的标签页游戏会停止渲染"},
+        "在后台打开 URL 并等待加载。默认复用本连接最近操作的页签，尚无目标时创建后台页签。",
+        obj({"url": {"type": "string"}, "newTab": {"type": "boolean", "description": "在新后台标签页中打开"},
+             "newWindow": {"type": "boolean", "description": "在独立的后台窗口中打开。给了 tabId 就把该页签移入新窗口"},
              "timeoutMs": {"type": "integer", "description": "等待加载完成的超时，默认 30000"}}, ["url"]),
         "navigate", None),
     "egret_close_tab": (
@@ -895,7 +894,7 @@ TOOLS = {
              "clear": {"type": "boolean", "description": "返回后清空缓冲区"}}),
         "page", "getErrors"),
     "egret_screenshot": (
-        "截取标签页当前可见区域（会先激活该标签页）。默认 jpeg 且限宽 900，以免占用过多上下文；"
+        "截取目标标签页的视口，支持后台页签。默认 jpeg 且限宽 900，以免占用过多上下文；"
         "只看某个区域时传 rect（页面视口 CSS 像素，可直接用查询结果里的 screenRect）。",
         obj({"format": {"type": "string", "enum": ["png", "jpeg"]},
              "quality": {"type": "integer", "description": "jpeg 质量 10-100，默认 70"},
@@ -1158,24 +1157,26 @@ class ExtensionConnection:
         self.on_ready = None
         self.send_lock = asyncio.Lock()
         self.last_seen = time.time()
+        self.probe_lock = asyncio.Lock()
         self.pong = None
         self.tabs = None
 
     async def alive(self, timeout=2.0):
         """确认连接对端仍在工作：扩展重载后旧 service worker 的连接可能仍然打开但不再应答。"""
-        if self.closed:
-            return False
-        if time.time() - self.last_seen < 2.0:
-            return True
-        self.pong = asyncio.get_running_loop().create_future()
-        try:
-            await self.send_text('{"type":"ping"}')
-            await asyncio.wait_for(self.pong, timeout)
-            return True
-        except Exception:  # noqa: BLE001
-            return False
-        finally:
-            self.pong = None
+        # 连接只维护一个 pong 等待者；并发请求复用首次探测得到的新鲜 last_seen。
+        async with self.probe_lock:
+            if self.closed:
+                return False
+            if time.time() - self.last_seen < 2.0:
+                return True
+            self.pong = asyncio.get_running_loop().create_future()
+            try:
+                await self.send_text('{"type":"ping"}')
+                return await asyncio.wait_for(self.pong, timeout)
+            except Exception:  # noqa: BLE001
+                return False
+            finally:
+                self.pong = None
 
     async def send_text(self, text):
         data = text.encode("utf-8")
@@ -1234,6 +1235,8 @@ class ExtensionConnection:
 
     def close(self):
         self.closed = True
+        if self.pong and not self.pong.done():
+            self.pong.set_result(False)
         for fut in self.pending.values():
             if not fut.done():
                 fut.set_exception(RuntimeError("与浏览器扩展的连接已断开"))
@@ -1610,7 +1613,7 @@ class McpServer:
                 else:
                     body = render_action_table(res)
                 if args.get("screenshot"):
-                    shot = await self.invoke("egret_screenshot", {"tabId": args.get("tabId"), "maxWidth": 900})
+                    shot = await self.invoke("egret_screenshot", {"tabId": res.get("tabId", args.get("tabId")), "maxWidth": 900})
                     return {"content": [
                         {"type": "text", "text": body},
                         {"type": "image", "data": shot["data"], "mimeType": shot["mimeType"]},
@@ -1795,7 +1798,7 @@ class McpServer:
                             "skipped": "cached" if cached else "cached-miss" if missed else "no-weak-labels"}
             return table
         try:
-            shot = await self.invoke("egret_screenshot", {"tabId": args.get("tabId"), "format": "png", "maxWidth": 1600})
+            shot = await self.invoke("egret_screenshot", {"tabId": table.get("tabId", args.get("tabId")), "format": "png", "maxWidth": 1600})
             capture = table.get("captureSize") or table.get("viewportSize") or {}
             width = float(capture.get("width") or 0)
             if not width:
@@ -1823,7 +1826,7 @@ class McpServer:
         candidates = initial.get("candidates") or []
         ocr_limit = min(max(int(args.get("ocrLimit", 12)), 1), 20)
         try:
-            shot = await self.invoke("egret_screenshot", {"tabId": args.get("tabId"), "format": "png", "maxWidth": 1600})
+            shot = await self.invoke("egret_screenshot", {"tabId": initial.get("tabId", args.get("tabId")), "format": "png", "maxWidth": 1600})
             viewport = initial.get("captureSize") or initial.get("viewportSize") or {}
             viewport_width = float(viewport.get("width") or 0)
             viewport_height = float(viewport.get("height") or 0)

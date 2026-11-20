@@ -128,7 +128,7 @@ description: 通过 egret_* MCP 工具查看和操作浏览器中的 Egret 游�
 - 要理解整体布局、颜色、半透明遮罩；
 - `mode: blocked` 且短等后仍不变。
 
-`egret_screenshot` 默认压缩并可用 `rect` 只截局部（传 `format: "json"` 拿到的 `screenRect`）。`egret_observe` / `egret_act` 传 `screenshot: true` 可以在同一次调用里附带一张图。动作表出现「警告 页面在后台」时让用户把浏览器窗口恢复到前台，否则动画和加载会被浏览器节流。
+`egret_screenshot` 默认压缩并可用 `rect` 只截局部（传 `format: "json"` 拿到的 `screenRect`）。`egret_observe` / `egret_act` 传 `screenshot: true` 可以在同一次调用里附带一张图。后台页签按原 tabId 操作和截图。若浏览器拒绝后台调试，向用户报告具体错误。
 
 ## 其他操作
 

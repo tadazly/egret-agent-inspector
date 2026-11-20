@@ -18,6 +18,7 @@ let tabs = (config.tabs || []).map(t => ({ ...t })), queries = 0;
 const calls = [], removed = [];
 const event = () => ({ addListener() {}, removeListener() {} });
 const chrome = {
+    debugger: { onDetach: event() },
     tabs: {
         onRemoved: event(), onUpdated: event(),
         async query(p) {
@@ -45,12 +46,12 @@ const chrome = {
 const ctx = vm.createContext({ chrome, console: { debug() {} } });
 const source = fs.readFileSync(process.argv[1], "utf8").replace(/\nconnectAll\(\);\s*$/, "");
 vm.runInContext(source, ctx);
-vm.runInContext("lastTabId = 17; frameCache.set(17, 0); frameCache.set(18, 1)", ctx);
+vm.runInContext("recentTabs.set(undefined, 17); frameCache.set(17, 0); frameCache.set(18, 1)", ctx);
 (async () => {
     let result, error;
     try { result = await vm.runInContext("handleRequest('closeTab', " + JSON.stringify(config.params || {}) + ")", ctx); }
     catch (e) { error = String(e.message || e); }
-    const cache = vm.runInContext("({lastTabId, frames: [...frameCache.keys()]})", ctx);
+    const cache = vm.runInContext("({lastTabId: recentTabs.get(undefined) ?? null, frames: [...frameCache.keys()]})", ctx);
     process.stdout.write(JSON.stringify({ result, error, tabs, calls, removed, cache }));
 })().catch(e => { process.stderr.write(String(e.stack || e)); process.exitCode = 1; });
 '''

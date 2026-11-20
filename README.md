@@ -27,6 +27,8 @@ codex plugin marketplace add tadazly/egret-agent-inspector
 
 只使用 DevTools 面板时，可以在扩展管理页直接加载 `plugins/egret-agent-inspector/extension`。
 
+Agent 可以在后台页签中读动作表、点击和截图。扩展通过 Chromium 的 `debugger` 权限恢复页面绘制，浏览器可能显示调试提示条。操作结束并空闲 15 秒后，扩展会断开调试连接。
+
 ## 使用示例
 
 - `为我的默认浏览器安装 Egret Agent Inspector 扩展。`

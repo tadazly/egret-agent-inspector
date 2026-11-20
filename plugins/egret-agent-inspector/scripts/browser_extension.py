@@ -287,7 +287,7 @@ def open_url(browser, url):
         return {"ok": False, "error": "未找到 %s 可执行文件" % BROWSERS[browser_id]["name"]}
     try:
         if SYSTEM == "Darwin":
-            subprocess.Popen(["open", "-a", exe, url])
+            subprocess.Popen(["open", "-g", "-a", exe, url])
         else:
             subprocess.Popen([exe, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as e:
